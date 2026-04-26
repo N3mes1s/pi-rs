@@ -98,6 +98,12 @@ pub(crate) struct View {
     pub history_idx: Option<usize>,
     pub queued_count: usize,
     pub thinking: ThinkingSetting,
+    /// Mirror of `Settings.scoped_models`. Drives footer colour and whether
+    /// `/model`-via-picker reverts after the next Submit.
+    pub scoped_models: bool,
+    /// If `Some`, the model that was active *before* a scoped-models picker
+    /// chose a different one. Restored after the next Submit fires.
+    pub scoped_previous_model: Option<String>,
     /// Time of the previous unconfirmed Quit action (Ctrl+C). If a second
     /// Quit lands within ~1s, we exit; otherwise we just clear.
     pub last_quit: Option<Instant>,
@@ -116,6 +122,8 @@ impl View {
             history_idx: None,
             queued_count: 0,
             thinking,
+            scoped_models: false,
+            scoped_previous_model: None,
             last_quit: None,
             turn_in_progress: false,
             dirty: true,
@@ -135,6 +143,8 @@ pub(crate) enum KeyOutcome {
     Abort,
     /// Cycle to next model in registry.
     CycleModel,
+    /// Open the model picker overlay (Ctrl+L).
+    OpenModelPicker,
     /// Cycle thinking level.
     CycleThinking,
     /// Spawn external editor.
@@ -295,8 +305,11 @@ pub(crate) fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
                 history_next(view);
                 return KeyOutcome::None;
             }
-            Action::CycleModel | Action::OpenModel => {
+            Action::CycleModel => {
                 return KeyOutcome::CycleModel;
+            }
+            Action::OpenModel => {
+                return KeyOutcome::OpenModelPicker;
             }
             Action::CycleModelBack => {
                 return KeyOutcome::CycleModel;
@@ -522,6 +535,13 @@ fn build_frame(
 
     // Footer.
     let mut footer = view.transcript.footer(theme, model, cwd);
+    if view.scoped_models {
+        // Highlight that model changes will only apply to the next message.
+        footer.spans.push(Span::coloured(
+            "  (scoped)".to_string(),
+            theme.accent.to_crossterm(),
+        ));
+    }
     footer.spans.push(Span::coloured(
         format!("  queued:{}", view.queued_count),
         theme.muted.to_crossterm(),
@@ -564,7 +584,7 @@ fn thinking_to_runtime(t: ThinkingSetting) -> pi_ai::ThinkingLevel {
 
 // ─── main TUI loop ─────────────────────────────────────────────────────────
 
-async fn run_tui(startup: Startup) -> anyhow::Result<()> {
+async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
     let mut slash = SlashRegistry::new();
     slash.register_templates(&startup.prompts);
 
@@ -579,6 +599,7 @@ async fn run_tui(startup: Startup) -> anyhow::Result<()> {
         .unwrap_or_else(|| pi_tui::ThemeRegistry::new().get("dark").cloned().unwrap());
 
     let mut view = View::new(startup.keymap.clone(), startup.settings.thinking);
+    view.scoped_models = startup.settings.scoped_models;
     let mut current_model = format!("{}/{}", startup.settings.provider, startup.settings.model);
     let cwd = startup.runtime_config.cwd.clone();
 
@@ -608,7 +629,14 @@ async fn run_tui(startup: Startup) -> anyhow::Result<()> {
                             KeyOutcome::Submit(text) => {
                                 view.turn_in_progress = true;
                                 let s = session.clone();
-                                tokio::spawn(async move { let _ = s.prompt(text).await; });
+                                let scoped_prev = view.scoped_previous_model.clone();
+                                tokio::spawn(async move {
+                                    let _ = s.prompt(text).await;
+                                    if let Some(prev) = scoped_prev {
+                                        let (p, m) = split_model(&prev);
+                                        s.set_model(p, m).await;
+                                    }
+                                });
                             }
                             KeyOutcome::Queue(text) => {
                                 session.enqueue(text).await;
@@ -621,6 +649,19 @@ async fn run_tui(startup: Startup) -> anyhow::Result<()> {
                                 let (p, m) = split_model(&current_model);
                                 session.set_model(p, m).await;
                                 view.transcript.model_label = current_model.clone();
+                            }
+                            KeyOutcome::OpenModelPicker => {
+                                // Reuse the /model picker code path. Passing
+                                // empty args opens the overlay.
+                                match handle_slash(&slash, "model", "", &session, &mut startup, &mut view, &mut current_model).await {
+                                    SlashOutcome::Quit => break 'outer,
+                                    SlashOutcome::Continue => {}
+                                    SlashOutcome::Submit(text) => {
+                                        view.turn_in_progress = true;
+                                        let s = session.clone();
+                                        tokio::spawn(async move { let _ = s.prompt(text).await; });
+                                    }
+                                }
                             }
                             KeyOutcome::CycleThinking => {
                                 view.thinking = cycle_thinking(view.thinking);
@@ -644,7 +685,7 @@ async fn run_tui(startup: Startup) -> anyhow::Result<()> {
                                 view.dirty = true;
                             }
                             KeyOutcome::SlashCommand(name, args) => {
-                                match handle_slash(&slash, &name, &args, &session, &startup, &mut view, &mut current_model).await {
+                                match handle_slash(&slash, &name, &args, &session, &mut startup, &mut view, &mut current_model).await {
                                     SlashOutcome::Quit => break 'outer,
                                     SlashOutcome::Continue => {}
                                     SlashOutcome::Submit(text) => {
@@ -666,7 +707,7 @@ async fn run_tui(startup: Startup) -> anyhow::Result<()> {
             }
             maybe_ag = rx.recv() => {
                 let Some(ev) = maybe_ag else { continue; };
-                ingest_event(&mut view, &ev);
+                ingest_event(&mut view, &ev, &mut current_model);
                 view.dirty = true;
             }
             _ = tick.tick() => {
@@ -681,13 +722,19 @@ async fn run_tui(startup: Startup) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn ingest_event(view: &mut View, ev: &AgentEvent) {
+fn ingest_event(view: &mut View, ev: &AgentEvent, current_model: &mut String) {
     view.transcript.ingest(ev);
     if matches!(
         ev.kind,
         AgentEventKind::TurnComplete | AgentEventKind::Aborted
     ) {
         view.turn_in_progress = false;
+        // Scoped-model revert: restore the previous model label after the
+        // turn we promised to scope completes.
+        if let Some(prev) = view.scoped_previous_model.take() {
+            *current_model = prev.clone();
+            view.transcript.model_label = prev;
+        }
     }
 }
 
@@ -741,7 +788,7 @@ async fn handle_slash(
     name: &str,
     args: &str,
     session: &pi_agent_core::AgentSession,
-    startup: &Startup,
+    startup: &mut Startup,
     view: &mut View,
     current_model: &mut String,
 ) -> SlashOutcome {
@@ -788,13 +835,21 @@ async fn handle_slash(
                 SlashOutcome::Continue
             } else {
                 let (p, m) = split_model(target);
+                // If scoped-models is enabled, remember the model we are
+                // about to replace so the TUI can revert after the next
+                // turn completes. Don't overwrite an existing snapshot
+                // (consecutive scoped picks chain back to the original).
+                if view.scoped_models && view.scoped_previous_model.is_none() {
+                    view.scoped_previous_model = Some(current_model.clone());
+                }
                 session.set_model(p.clone(), m.clone()).await;
                 *current_model = format!("{}/{}", p, m);
                 view.transcript
                     .blocks
                     .push(crate::renderer::Block::Note(format!(
-                        "[model set to {}]",
-                        current_model
+                        "[model set to {}{}]",
+                        current_model,
+                        if view.scoped_models { " (scoped)" } else { "" }
                     )));
                 SlashOutcome::Continue
             }
@@ -879,14 +934,15 @@ async fn handle_slash(
         }
         "clone" => {
             let mgr = startup.runtime_config.session_manager.clone();
-            match mgr.create(&startup.settings.provider, &startup.settings.model) {
-                Ok(meta) => view
-                    .transcript
-                    .blocks
-                    .push(crate::renderer::Block::Note(format!(
-                        "[cloned → {}]",
-                        meta.id
-                    ))),
+            match mgr.clone_branch(session.id()) {
+                Ok(meta) => {
+                    view.transcript
+                        .blocks
+                        .push(crate::renderer::Block::Note(format!(
+                            "[cloned → {}]",
+                            meta.id
+                        )));
+                }
                 Err(e) => view
                     .transcript
                     .blocks
@@ -894,49 +950,47 @@ async fn handle_slash(
             }
             SlashOutcome::Continue
         }
-        "share" => {
-            if which::which("gh").is_err() {
-                view.transcript.blocks.push(crate::renderer::Block::Error(
-                    "/share requires the `gh` CLI; install it from https://cli.github.com".into(),
-                ));
-                return SlashOutcome::Continue;
+        "scoped-models" => {
+            startup.settings.scoped_models = !startup.settings.scoped_models;
+            view.scoped_models = startup.settings.scoped_models;
+            // If turning scoped mode off, drop any pending snapshot — the
+            // user has opted into persistent changes again.
+            if !view.scoped_models {
+                view.scoped_previous_model = None;
             }
-            let mut tmp = std::env::temp_dir();
-            tmp.push(format!("pi-share-{}.md", std::process::id()));
-            let messages = session.messages().await;
-            let mut body = String::new();
-            for m in messages {
-                body.push_str(&format!("## {:?}\n\n{}\n\n", m.role, m.text()));
-            }
-            if std::fs::write(&tmp, &body).is_err() {
-                view.transcript.blocks.push(crate::renderer::Block::Error(
-                    "failed to write share tmpfile".into(),
-                ));
-                return SlashOutcome::Continue;
-            }
-            let out = std::process::Command::new("gh")
-                .args(["gist", "create", "--public"])
-                .arg(&tmp)
-                .output();
-            let _ = std::fs::remove_file(&tmp);
-            match out {
-                Ok(o) if o.status.success() => {
-                    let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    view.transcript
-                        .blocks
-                        .push(crate::renderer::Block::Note(format!("[shared: {url}]")));
-                }
-                Ok(o) => {
-                    view.transcript.blocks.push(crate::renderer::Block::Error(format!(
-                        "gh: {}",
-                        String::from_utf8_lossy(&o.stderr)
+            let path = crate::context::settings_paths().0;
+            if let Err(e) = startup.settings.save(&path) {
+                view.transcript
+                    .blocks
+                    .push(crate::renderer::Block::Error(format!(
+                        "scoped-models: persist failed: {e}"
                     )));
-                }
-                Err(e) => {
-                    view.transcript
-                        .blocks
-                        .push(crate::renderer::Block::Error(format!("gh: {e}")));
-                }
+            }
+            view.transcript
+                .blocks
+                .push(crate::renderer::Block::Note(format!(
+                    "[scoped-models: {}]",
+                    if view.scoped_models { "on" } else { "off" }
+                )));
+            SlashOutcome::Continue
+        }
+        "share" => {
+            let mgr = startup.runtime_config.session_manager.clone();
+            let branch = mgr.current_branch(session.id());
+            let meta = mgr.meta(session.id());
+            let (provider, model) = meta
+                .map(|m| (m.provider, m.model))
+                .unwrap_or_else(|| (startup.settings.provider.clone(), startup.settings.model.clone()));
+            let body = crate::share::render_markdown(session.id(), &provider, &model, &branch);
+            match crate::share::run_gh_gist(&body) {
+                Ok(url) => view
+                    .transcript
+                    .blocks
+                    .push(crate::renderer::Block::Note(format!("[shared: {url}]"))),
+                Err(e) => view
+                    .transcript
+                    .blocks
+                    .push(crate::renderer::Block::Error(e)),
             }
             SlashOutcome::Continue
         }
@@ -963,18 +1017,18 @@ async fn handle_slash(
                                 .set("anthropic", tok.into_auth_method());
                             view.transcript
                                 .blocks
-                                .push(crate::renderer::Block::Note("[login: ok]".into()));
+                                .push(crate::renderer::Block::Note("logged in".into()));
                         }
                         Err(e) => view
                             .transcript
                             .blocks
-                            .push(crate::renderer::Block::Error(format!("token: {e}"))),
+                            .push(crate::renderer::Block::Error(format!("login: {e}"))),
                     }
                 }
                 Err(e) => view
                     .transcript
                     .blocks
-                    .push(crate::renderer::Block::Error(format!("callback: {e}"))),
+                    .push(crate::renderer::Block::Error(format!("login: {e}"))),
             }
             SlashOutcome::Continue
         }

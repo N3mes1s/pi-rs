@@ -32,6 +32,7 @@ pub mod renderer;
 pub mod packages;
 pub mod prompts;
 pub mod sdk;
+pub mod share;
 pub mod skills;
 pub mod slash;
 pub mod startup;

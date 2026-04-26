@@ -327,6 +327,38 @@ impl SessionManager {
         Ok(entry)
     }
 
+    /// Duplicate the active branch of `source_id` into a brand new session.
+    /// Walks `current_branch(source_id)` and replays each entry verbatim
+    /// (User / Assistant / ToolCall / ToolResult / Compaction) into the new
+    /// session, preserving order. The new session's Meta uses the source
+    /// session's provider+model.
+    pub fn clone_branch(&self, source_id: &str) -> std::io::Result<SessionMeta> {
+        let branch = self.current_branch(source_id);
+        if branch.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "source session not open",
+            ));
+        }
+        // Inherit provider+model from the source meta if available.
+        let (provider, model) = self
+            .meta(source_id)
+            .map(|m| (m.provider, m.model))
+            .unwrap_or_else(|| ("anthropic".into(), "sonnet".into()));
+        let new_meta = self.create(&provider, &model)?;
+        for e in branch {
+            // Skip the Meta entry — `create` already wrote one for the new
+            // session. Replay everything else.
+            match e.kind {
+                SessionEntryKind::Meta { .. } => continue,
+                k => {
+                    self.append(&new_meta.id, k)?;
+                }
+            }
+        }
+        Ok(new_meta)
+    }
+
     pub fn fork(&self, session_id: &str, from_entry: &str) -> std::io::Result<()> {
         let mut state = self.state.lock().map_err(io_lock)?;
         let open = state

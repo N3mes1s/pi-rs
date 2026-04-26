@@ -33,6 +33,11 @@ pub struct Settings {
     pub no_tools: bool,
     #[serde(default)]
     pub session_dir: Option<PathBuf>,
+    /// When true, model changes via `Ctrl+L` apply to just the *next* user
+    /// message and revert afterward. When false (default), changes persist
+    /// for the rest of the session.
+    #[serde(default)]
+    pub scoped_models: bool,
 }
 
 impl Default for Settings {
@@ -50,6 +55,7 @@ impl Default for Settings {
             no_builtin_tools: false,
             no_tools: false,
             session_dir: None,
+            scoped_models: false,
         }
     }
 }
@@ -105,6 +111,16 @@ impl Settings {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
+    }
+
+    /// Persist `self` as pretty JSON, creating parent directories if needed.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let txt = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(path, txt)
     }
 
     pub fn merge_project(&mut self, project_path: &std::path::Path) {
