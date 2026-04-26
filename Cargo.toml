@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pi-ai",
+    "crates/pi-tools",
+    "crates/pi-agent-core",
+    "crates/pi-tui",
+    "crates/pi-coding-agent",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["pi-rs contributors"]
+license = "MIT"
+repository = "https://github.com/n3mes1s/playground"
+description = "Rust reimplementation of pi (badlogic/pi-mono) - a minimal terminal coding agent harness"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+futures = "0.3"
+async-trait = "0.1"
+anyhow = "1"
+thiserror = "1"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+crossterm = "0.27"
+unicode-width = "0.1"
+dirs = "5"
+walkdir = "2"
+ignore = "0.4"
+regex = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+url = "2"
+base64 = "0.22"
+sha2 = "0.10"
+eventsource-stream = "0.2"
+which = "6"
+shellexpand = "3"
+glob = "0.3"
+tempfile = "3"
+nucleo-matcher = "0.3"
+
+pi-ai = { path = "crates/pi-ai" }
+pi-tools = { path = "crates/pi-tools" }
+pi-agent-core = { path = "crates/pi-agent-core" }
+pi-tui = { path = "crates/pi-tui" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

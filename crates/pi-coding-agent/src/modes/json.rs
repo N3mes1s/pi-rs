@@ -1,0 +1,36 @@
+use crate::modes::{build_session, read_stdin_if_piped};
+use crate::startup::Startup;
+
+/// JSON event stream mode: emit one event per line, JSON encoded.
+pub async fn run(startup: Startup) -> anyhow::Result<()> {
+    let (session, mut rx) = build_session(&startup)?;
+    let stdin_text = read_stdin_if_piped();
+    let prompt = match (startup.cli.prompt_text(), stdin_text) {
+        (Some(p), Some(s)) => format!("{p}\n\n{s}"),
+        (Some(p), None) => p,
+        (None, Some(s)) => s,
+        (None, None) => return Ok(()),
+    };
+
+    let printer = tokio::spawn(async move {
+        use std::io::Write;
+        while let Some(ev) = rx.recv().await {
+            if let Ok(line) = serde_json::to_string(&ev) {
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                let _ = writeln!(out, "{line}");
+                let _ = out.flush();
+            }
+            if matches!(
+                ev.kind,
+                pi_agent_core::AgentEventKind::TurnComplete | pi_agent_core::AgentEventKind::Aborted
+            ) {
+                break;
+            }
+        }
+    });
+
+    let _ = session.prompt(prompt).await;
+    printer.await.ok();
+    Ok(())
+}

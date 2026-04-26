@@ -1,0 +1,155 @@
+use clap::{ArgAction, Parser};
+use std::path::PathBuf;
+
+/// `pi` — minimal terminal coding agent harness (Rust port).
+#[derive(Parser, Debug, Clone)]
+#[command(name = "pi", version, about, long_about = None)]
+pub struct Cli {
+    /// Provider to use (anthropic, openai, deepseek, groq, …).
+    #[arg(long, env = "PI_PROVIDER")]
+    pub provider: Option<String>,
+
+    /// Model id or alias (e.g. `sonnet`, `gpt-4o`, `anthropic/claude-opus-4-7`).
+    #[arg(long, short = 'm')]
+    pub model: Option<String>,
+
+    /// Comma-separated list of models to make cyclable in interactive mode.
+    #[arg(long)]
+    pub models: Option<String>,
+
+    /// Thinking level: off, low, medium, high.
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(["off","low","medium","high"]))]
+    pub thinking: Option<String>,
+
+    /// Allowlist of tool names. Comma-separated.
+    #[arg(long)]
+    pub tools: Option<String>,
+
+    /// Disable built-in tools (extensions still register).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_builtin_tools: bool,
+
+    /// Disable all tools.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_tools: bool,
+
+    /// Print mode — non-interactive. Reads stdin if piped, prints final reply.
+    #[arg(long, short = 'p', action = ArgAction::SetTrue)]
+    pub print: bool,
+
+    /// JSON event stream (implies print).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub json: bool,
+
+    /// RPC mode — bidirectional JSONL on stdin/stdout.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub rpc: bool,
+
+    /// Continue most recent session.
+    #[arg(short = 'c', action = ArgAction::SetTrue)]
+    pub continue_recent: bool,
+
+    /// Resume with a session selector.
+    #[arg(short = 'r', action = ArgAction::SetTrue)]
+    pub resume: bool,
+
+    /// Use a specific session id or path.
+    #[arg(long)]
+    pub session: Option<String>,
+
+    /// Fork a session into a new one.
+    #[arg(long)]
+    pub fork: Option<String>,
+
+    /// Disable session persistence (ephemeral).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_session: bool,
+
+    /// Override session directory.
+    #[arg(long)]
+    pub session_dir: Option<PathBuf>,
+
+    /// Disable AGENTS.md / CLAUDE.md auto-loading.
+    #[arg(long = "no-context-files", short = 'n', action = ArgAction::SetTrue)]
+    pub no_context_files: bool,
+
+    /// Disable extension loading.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub no_extensions: bool,
+
+    /// Add an extension at a specific path.
+    #[arg(long = "extension", short = 'e', value_name = "PATH")]
+    pub extensions: Vec<PathBuf>,
+
+    /// Add a skill at a specific path.
+    #[arg(long = "skill", value_name = "PATH")]
+    pub skills: Vec<PathBuf>,
+
+    /// Use a prompt template by name or `@path`.
+    #[arg(long)]
+    pub prompt_template: Option<String>,
+
+    /// Theme name (`dark`, `light`, or any installed theme).
+    #[arg(long)]
+    pub theme: Option<String>,
+
+    /// Subcommand: install / list / config / update.
+    #[arg(long)]
+    pub install: Option<String>,
+
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub list: bool,
+
+    #[arg(long = "config", action = ArgAction::SetTrue)]
+    pub config_subcommand: bool,
+
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub update: bool,
+
+    /// Free-form positional args. `@file` references add attachments.
+    #[arg(value_name = "MESSAGE_OR_AT_FILES")]
+    pub positionals: Vec<String>,
+}
+
+impl Cli {
+    pub fn prompt_text(&self) -> Option<String> {
+        let parts: Vec<String> = self
+            .positionals
+            .iter()
+            .filter(|p| !p.starts_with('@'))
+            .cloned()
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" "))
+        }
+    }
+
+    pub fn at_files(&self) -> Vec<PathBuf> {
+        self.positionals
+            .iter()
+            .filter_map(|p| p.strip_prefix('@').map(|s| PathBuf::from(s)))
+            .collect()
+    }
+
+    pub fn effective_mode(&self) -> Mode {
+        if self.rpc {
+            Mode::Rpc
+        } else if self.json {
+            Mode::Json
+        } else if self.print {
+            Mode::Print
+        } else {
+            Mode::Interactive
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Interactive,
+    Print,
+    Json,
+    Rpc,
+}
