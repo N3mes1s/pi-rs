@@ -8,9 +8,11 @@ use std::path::PathBuf;
 
 use crate::cli::Cli;
 use crate::context::{
-    agent_dir, auth_path, package_dir, prompts_dirs, sessions_dir, settings_paths, skills_dirs,
-    system_prompt_paths, themes_dirs,
+    agent_dir, auth_path, keybindings_path, package_dir, prompts_dirs, sessions_dir,
+    settings_paths, skills_dirs, system_prompt_paths, themes_dirs,
 };
+use crate::extensions::{self, LoadedExtension};
+use crate::keymap::Keymap;
 use crate::packages;
 use crate::prompts::PromptRegistry;
 use crate::skills::SkillRegistry;
@@ -23,6 +25,8 @@ pub struct Startup {
     pub prompts: PromptRegistry,
     pub skills: SkillRegistry,
     pub themes: pi_tui::ThemeRegistry,
+    pub keymap: Keymap,
+    pub extensions: Vec<LoadedExtension>,
 }
 
 pub fn assemble(cli: Cli) -> anyhow::Result<Startup> {
@@ -65,10 +69,7 @@ pub fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     let auth = AuthStorage::open(auth_path()).unwrap_or_else(|_| AuthStorage::in_memory());
     // overlay env keys (env wins for fresh shells).
     let env = AuthStorage::from_env();
-    for p in [
-        "anthropic", "openai", "azure", "google", "gemini", "groq", "cerebras", "xai",
-        "openrouter", "deepseek", "mistral", "fireworks", "zai", "vercel", "huggingface",
-    ] {
+    for (p, _) in AuthStorage::ENV_KEYS {
         if let Some(m) = env.get(p) {
             auth.set(p, m);
         }
@@ -141,6 +142,39 @@ pub fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     // 13. themes.
     let themes = crate::themes::load_themes(&themes_dirs());
 
+    // 14. keybindings (defaults + JSON overrides).
+    let mut keymap = Keymap::defaults();
+    if !cli.no_extensions {
+        if let Ok(overrides) = Keymap::load_overrides(&keybindings_path()) {
+            keymap.merge_overrides(&overrides);
+        }
+    }
+
+    // 15. extensions: project + user + CLI + package-provided.
+    let mut ext_roots: Vec<PathBuf> = if cli.no_extensions {
+        Vec::new()
+    } else {
+        vec![
+            agent_dir().join("extensions"),
+            PathBuf::from(".pi").join("extensions"),
+        ]
+    };
+    if !cli.no_extensions {
+        for pkg in &pkgs {
+            let dirs = packages::package_dirs(pkg);
+            ext_roots.extend(dirs.extensions);
+        }
+        for e in &cli.extensions {
+            ext_roots.push(e.clone());
+        }
+    }
+    let loaded_exts = extensions::discover(&ext_roots);
+    if !loaded_exts.is_empty() {
+        for t in extensions::extension_tools(&loaded_exts) {
+            tools.register(t);
+        }
+    }
+
     let runtime_config = RuntimeConfig {
         session_manager,
         auth_storage: auth,
@@ -159,5 +193,7 @@ pub fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         prompts,
         skills,
         themes,
+        keymap,
+        extensions: loaded_exts,
     })
 }

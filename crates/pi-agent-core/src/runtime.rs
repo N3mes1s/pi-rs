@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::compaction::Compactor;
 use crate::context::ContextFile;
 use crate::event::{AgentEvent, AgentEventKind, EventSender};
 use crate::session::{SessionEntryKind, SessionManager};
@@ -164,12 +163,33 @@ impl AgentSession {
     }
 
     pub async fn compact(&self, instructions: Option<String>) {
-        let comp = Compactor::default();
+        self.compact_inner(instructions, false).await
+    }
+
+    /// Compact using the active provider+model (LLM-driven). Falls back to
+    /// the heuristic compactor on provider error.
+    pub async fn compact_with_llm(&self, instructions: Option<String>) {
+        self.compact_inner(instructions, true).await
+    }
+
+    async fn compact_inner(&self, instructions: Option<String>, prefer_llm: bool) {
+        let messages = self.inner.lock().await.messages.clone();
+        let original_len = messages.len();
+        let (new_msgs, summary) = if prefer_llm {
+            self.try_llm_compact(&messages, instructions.as_deref())
+                .await
+                .unwrap_or_else(|| {
+                    let comp = crate::compaction::Compactor::default();
+                    comp.compact(&messages, instructions.as_deref())
+                })
+        } else {
+            let comp = crate::compaction::Compactor::default();
+            comp.compact(&messages, instructions.as_deref())
+        };
         let mut g = self.inner.lock().await;
-        let original_len = g.messages.len();
-        let (new_msgs, summary) = comp.compact(&g.messages, instructions.as_deref());
         g.messages = new_msgs;
         let freed_tokens = (original_len - g.messages.len()) as u64 * 200;
+        drop(g);
         let _ = self.cfg.session_manager.append(
             &self.id,
             SessionEntryKind::Compaction {
@@ -178,6 +198,34 @@ impl AgentSession {
             },
         );
         self.emit(AgentEventKind::CompactionComplete { summary, freed_tokens }).await;
+    }
+
+    async fn try_llm_compact(
+        &self,
+        messages: &[Message],
+        instructions: Option<&str>,
+    ) -> Option<(Vec<Message>, String)> {
+        let (provider_name, model_name) = {
+            let g = self.inner.lock().await;
+            (g.provider.clone(), g.model.clone())
+        };
+        let (provider_cfg, model_info) = self
+            .cfg
+            .model_registry
+            .resolve(&format!("{}/{}", provider_name, model_name))
+            .or_else(|| self.cfg.model_registry.resolve(&model_name))?;
+        let auth = self
+            .cfg
+            .auth_storage
+            .get(&provider_cfg.name)
+            .unwrap_or(AuthMethod::None);
+        let provider = build_provider(provider_cfg.clone(), auth).ok()?;
+        let comp = crate::compaction::LlmCompactor {
+            keep_last_turns: 6,
+            provider: provider.as_ref(),
+            model: model_info,
+        };
+        comp.compact(messages, instructions).await.ok()
     }
 
     pub async fn prompt(&self, user_text: String) -> Result<Message, RuntimeError> {
@@ -458,7 +506,6 @@ fn build_provider(
         ProviderKind::Anthropic => Box::new(AnthropicProvider::new(cfg, auth)),
         ProviderKind::OpenAi => Box::new(OpenAiProvider::new(cfg, auth)),
         ProviderKind::OpenAiCompat => Box::new(OpenAiCompatProvider::new(cfg, auth)),
-        ProviderKind::Google => return Err(RuntimeError::Unsupported("google native API".into())),
     })
 }
 

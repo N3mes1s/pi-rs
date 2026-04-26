@@ -7,6 +7,7 @@
 
 pub mod auth;
 pub mod message;
+pub mod oauth;
 pub mod provider;
 pub mod registry;
 pub mod stream;
@@ -16,6 +17,7 @@ pub use auth::{AuthMethod, AuthStorage};
 pub use message::{
     Attachment, AttachmentKind, ContentBlock, FinishReason, Message, Role, ThinkingLevel, Usage,
 };
+pub use oauth::{build_authorize_url, exchange_code, is_expired, OAuthEndpoints, Pkce, TokenResponse};
 pub use provider::{
     AnthropicProvider, GenerateRequest, GenerateResponse, OpenAiCompatProvider, OpenAiProvider,
     Provider, ProviderKind,

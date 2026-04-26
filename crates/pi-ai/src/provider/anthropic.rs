@@ -27,6 +27,11 @@ impl AnthropicProvider {
         }
     }
 
+    pub fn with_client(mut self, client: Client) -> Self {
+        self.client = client;
+        self
+    }
+
     fn auth_token(&self) -> Result<&str> {
         match &self.auth {
             AuthMethod::ApiKey { value } => Ok(value),
@@ -44,7 +49,7 @@ fn role_str(role: Role) -> &'static str {
     }
 }
 
-fn content_blocks_to_anthropic(blocks: &[ContentBlock]) -> Value {
+pub fn content_blocks_to_anthropic(blocks: &[ContentBlock]) -> Value {
     let mut out = Vec::new();
     for b in blocks {
         match b {

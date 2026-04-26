@@ -6,6 +6,8 @@ description = "Agent loop orchestration, session management, and event streaming
 
 [dev-dependencies]
 tempfile.workspace = true
+futures.workspace = true
+async-trait.workspace = true
 
 [dependencies]
 pi-ai.workspace = true

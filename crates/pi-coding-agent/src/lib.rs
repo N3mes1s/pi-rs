@@ -24,7 +24,11 @@
 pub mod cli;
 pub mod cmd;
 pub mod context;
+pub mod extensions;
+pub mod keymap;
 pub mod modes;
+pub mod picker;
+pub mod renderer;
 pub mod packages;
 pub mod prompts;
 pub mod sdk;

@@ -17,6 +17,7 @@ pi-ai.workspace = true
 pi-tools.workspace = true
 pi-agent-core.workspace = true
 pi-tui.workspace = true
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -36,3 +37,11 @@ glob.workspace = true
 chrono.workspace = true
 which.workspace = true
 nucleo-matcher.workspace = true
+notify.workspace = true
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+wiremock.workspace = true
+proptest.workspace = true
+tokio-test.workspace = true

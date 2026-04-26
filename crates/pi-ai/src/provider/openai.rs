@@ -32,6 +32,11 @@ impl OpenAiProvider {
         }
     }
 
+    pub fn with_client(mut self, client: Client) -> Self {
+        self.client = client;
+        self
+    }
+
     fn auth_header(&self) -> Result<String> {
         let token = match &self.auth {
             AuthMethod::ApiKey { value } => value.clone(),
@@ -51,7 +56,7 @@ fn role_str(role: Role) -> &'static str {
     }
 }
 
-fn message_to_openai(m: &crate::message::Message) -> Vec<Value> {
+pub fn message_to_openai(m: &crate::message::Message) -> Vec<Value> {
     // OpenAI splits a single Anthropic-style assistant message with multiple
     // tool_use blocks into one assistant message + N tool messages.
     let mut out = Vec::new();

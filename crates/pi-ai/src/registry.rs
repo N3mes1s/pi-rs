@@ -119,7 +119,7 @@ fn m(
     }
 }
 
-fn default_providers() -> Vec<ProviderConfig> {
+pub(crate) fn default_providers() -> Vec<ProviderConfig> {
     vec![
         ProviderConfig {
             name: "anthropic".into(),
@@ -148,80 +148,45 @@ fn default_providers() -> Vec<ProviderConfig> {
             ],
         },
         ProviderConfig {
-            name: "deepseek".into(),
-            kind: ProviderKind::OpenAiCompat,
-            base_url: "https://api.deepseek.com".into(),
-            auth_header: "Authorization".into(),
-            auth_format: "Bearer {token}".into(),
-            models: vec![
-                m("deepseek", "deepseek-chat", Some("deepseek"), 64_000, 8_192, false, false, 0.14, 0.28),
-                m("deepseek", "deepseek-reasoner", Some("deepseek-r1"), 64_000, 8_192, true, false, 0.55, 2.19),
-            ],
-        },
-        ProviderConfig {
-            name: "groq".into(),
-            kind: ProviderKind::OpenAiCompat,
-            base_url: "https://api.groq.com/openai/v1".into(),
-            auth_header: "Authorization".into(),
-            auth_format: "Bearer {token}".into(),
-            models: vec![
-                m("groq", "llama-3.3-70b-versatile", Some("llama"), 128_000, 32_768, false, false, 0.59, 0.79),
-            ],
-        },
-        ProviderConfig {
-            name: "cerebras".into(),
-            kind: ProviderKind::OpenAiCompat,
-            base_url: "https://api.cerebras.ai/v1".into(),
-            auth_header: "Authorization".into(),
-            auth_format: "Bearer {token}".into(),
-            models: vec![
-                m("cerebras", "llama3.1-70b", None, 8_192, 8_192, false, false, 0.60, 0.60),
-            ],
-        },
-        ProviderConfig {
-            name: "xai".into(),
-            kind: ProviderKind::OpenAiCompat,
-            base_url: "https://api.x.ai/v1".into(),
-            auth_header: "Authorization".into(),
-            auth_format: "Bearer {token}".into(),
-            models: vec![
-                m("xai", "grok-2-latest", Some("grok"), 131_072, 131_072, false, true, 2.0, 10.0),
-            ],
-        },
-        ProviderConfig {
-            name: "openrouter".into(),
-            kind: ProviderKind::OpenAiCompat,
-            base_url: "https://openrouter.ai/api/v1".into(),
-            auth_header: "Authorization".into(),
-            auth_format: "Bearer {token}".into(),
-            models: vec![],
-        },
-        ProviderConfig {
-            name: "mistral".into(),
-            kind: ProviderKind::OpenAiCompat,
-            base_url: "https://api.mistral.ai/v1".into(),
-            auth_header: "Authorization".into(),
-            auth_format: "Bearer {token}".into(),
-            models: vec![
-                m("mistral", "mistral-large-latest", Some("mistral-large"), 131_072, 32_768, false, true, 2.0, 6.0),
-            ],
-        },
-        ProviderConfig {
             name: "fireworks".into(),
             kind: ProviderKind::OpenAiCompat,
             base_url: "https://api.fireworks.ai/inference/v1".into(),
             auth_header: "Authorization".into(),
             auth_format: "Bearer {token}".into(),
-            models: vec![],
-        },
-        ProviderConfig {
-            name: "zai".into(),
-            kind: ProviderKind::OpenAiCompat,
-            base_url: "https://api.z.ai/api/paas/v4".into(),
-            auth_header: "Authorization".into(),
-            auth_format: "Bearer {token}".into(),
             models: vec![
-                m("zai", "glm-4.6", Some("glm"), 200_000, 32_000, true, true, 0.6, 2.2),
+                m(
+                    "fireworks",
+                    "accounts/fireworks/models/llama-v3p3-70b-instruct",
+                    Some("llama-3.3-70b"),
+                    131_072,
+                    16_384,
+                    false,
+                    false,
+                    0.90,
+                    0.90,
+                ),
+                m(
+                    "fireworks",
+                    "accounts/fireworks/models/qwen2p5-coder-32b-instruct",
+                    Some("qwen-coder"),
+                    32_768,
+                    16_384,
+                    false,
+                    false,
+                    0.90,
+                    0.90,
+                ),
+                m(
+                    "fireworks",
+                    "accounts/fireworks/models/deepseek-r1",
+                    Some("deepseek-r1"),
+                    160_000,
+                    32_000,
+                    true,
+                    false,
+                    8.0,
+                    8.0,
+                ),
             ],
         },
     ]

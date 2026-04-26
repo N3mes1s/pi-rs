@@ -50,30 +50,19 @@ impl AuthStorage {
         })
     }
 
+    pub const ENV_KEYS: &'static [(&'static str, &'static str)] = &[
+        ("anthropic", "ANTHROPIC_API_KEY"),
+        ("openai", "OPENAI_API_KEY"),
+        ("fireworks", "FIREWORKS_API_KEY"),
+    ];
+
     pub fn from_env() -> Self {
         let mut data = AuthData::default();
-        let env_keys = [
-            ("anthropic", "ANTHROPIC_API_KEY"),
-            ("openai", "OPENAI_API_KEY"),
-            ("azure", "AZURE_OPENAI_API_KEY"),
-            ("google", "GOOGLE_API_KEY"),
-            ("gemini", "GEMINI_API_KEY"),
-            ("groq", "GROQ_API_KEY"),
-            ("cerebras", "CEREBRAS_API_KEY"),
-            ("xai", "XAI_API_KEY"),
-            ("openrouter", "OPENROUTER_API_KEY"),
-            ("deepseek", "DEEPSEEK_API_KEY"),
-            ("mistral", "MISTRAL_API_KEY"),
-            ("fireworks", "FIREWORKS_API_KEY"),
-            ("zai", "ZAI_API_KEY"),
-            ("vercel", "VERCEL_AI_API_KEY"),
-            ("huggingface", "HF_TOKEN"),
-        ];
-        for (provider, env) in env_keys {
+        for (provider, env) in Self::ENV_KEYS {
             if let Ok(val) = std::env::var(env) {
                 if !val.is_empty() {
                     data.providers
-                        .insert(provider.to_string(), AuthMethod::ApiKey { value: val });
+                        .insert((*provider).to_string(), AuthMethod::ApiKey { value: val });
                 }
             }
         }
@@ -81,6 +70,13 @@ impl AuthStorage {
             inner: Arc::new(Mutex::new(data)),
             path: None,
         }
+    }
+
+    pub fn provider_names(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|g| g.providers.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn get(&self, provider: &str) -> Option<AuthMethod> {

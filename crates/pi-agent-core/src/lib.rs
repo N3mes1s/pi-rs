@@ -8,7 +8,7 @@ pub mod session;
 pub mod settings;
 pub mod system;
 
-pub use compaction::Compactor;
+pub use compaction::{Compactor, LlmCompactor};
 pub use context::{discover_context_files, ContextFile};
 pub use event::{AgentEvent, AgentEventKind, EventSender};
 pub use runtime::{create_agent_session, AgentSession, AgentSessionRuntime, RuntimeConfig};

@@ -16,7 +16,6 @@ pub enum ProviderKind {
     Anthropic,
     OpenAi,
     OpenAiCompat,
-    Google,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,8 +103,8 @@ pub trait Provider: Send + Sync {
     async fn stream(&self, req: GenerateRequest, model: &ModelInfo) -> Result<EventStream>;
 }
 
-mod anthropic;
-mod openai;
+pub mod anthropic;
+pub mod openai;
 
 pub use anthropic::AnthropicProvider;
 pub use openai::{OpenAiCompatProvider, OpenAiProvider};
