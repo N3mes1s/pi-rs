@@ -22,6 +22,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-cargo llvm-cov --workspace \
+cargo llvm-cov --workspace --no-fail-fast \
     --ignore-filename-regex '(modes/(interactive|print|json|rpc)\.rs|/bin/pi\.rs|startup\.rs|sdk\.rs|telemetry\.rs|examples/|pi-agent-core/src/runtime\.rs|pi-coding-agent/src/modes\.rs)' \
-    --summary-only "$@"
+    --summary-only "$@" -- --test-threads=1
