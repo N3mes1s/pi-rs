@@ -54,5 +54,6 @@ pub fn build_runtime_config(b: BuildConfig) -> RuntimeConfig {
         system_prompt: b.system_prompt,
         context_files: b.context_files,
         cwd: b.cwd,
+        provider_factory: None,
     }
 }

@@ -11,7 +11,10 @@ pub mod system;
 pub use compaction::{Compactor, LlmCompactor};
 pub use context::{discover_context_files, ContextFile};
 pub use event::{AgentEvent, AgentEventKind, EventSender};
-pub use runtime::{create_agent_session, AgentSession, AgentSessionRuntime, RuntimeConfig};
+pub use runtime::{
+    create_agent_session, AgentSession, AgentSessionRuntime, DefaultProviderFactory,
+    ProviderFactory, RuntimeConfig,
+};
 pub use session::{
     SessionEntry, SessionEntryKind, SessionManager, SessionMeta, SessionTree,
 };

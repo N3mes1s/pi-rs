@@ -52,6 +52,23 @@ fn dir_without_skill_md_is_skipped() {
 }
 
 #[test]
+fn skill_md_with_invalid_utf8_is_silently_skipped() {
+    // Forces the `read_skill -> None` branch (read_to_string fails).
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("badbytes");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("SKILL.md"), [0xFFu8, 0xFE, 0x00, 0xC0]).unwrap();
+
+    // Also test the bare-`name.md` branch with invalid UTF-8.
+    std::fs::write(dir.path().join("garbage.md"), [0xFFu8, 0xFE, 0x00]).unwrap();
+
+    let mut reg = SkillRegistry::new();
+    reg.load_dir(dir.path());
+    assert!(reg.get("badbytes").is_none());
+    assert!(reg.get("garbage").is_none());
+}
+
+#[test]
 fn add_inserts_or_replaces_a_skill_by_name() {
     let mut reg = SkillRegistry::new();
     reg.add(Skill {

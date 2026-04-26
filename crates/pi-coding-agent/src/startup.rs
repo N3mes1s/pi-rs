@@ -184,6 +184,7 @@ pub fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         system_prompt: system,
         context_files,
         cwd,
+        provider_factory: None,
     };
 
     Ok(Startup {

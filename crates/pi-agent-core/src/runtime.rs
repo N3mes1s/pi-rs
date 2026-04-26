@@ -15,6 +15,27 @@ use crate::event::{AgentEvent, AgentEventKind, EventSender};
 use crate::session::{SessionEntryKind, SessionManager};
 use crate::settings::Settings;
 
+/// Pluggable provider builder. The default implementation matches on
+/// `ProviderKind` and returns one of the built-in `pi_ai` providers.
+/// Tests can swap this out to inject mock providers without going over
+/// the network.
+pub trait ProviderFactory: Send + Sync {
+    fn build(&self, cfg: ProviderConfig, auth: AuthMethod) -> Result<Box<dyn Provider>, RuntimeError>;
+}
+
+/// Default factory: dispatch on `ProviderKind`.
+pub struct DefaultProviderFactory;
+
+impl ProviderFactory for DefaultProviderFactory {
+    fn build(&self, cfg: ProviderConfig, auth: AuthMethod) -> Result<Box<dyn Provider>, RuntimeError> {
+        Ok(match cfg.kind {
+            ProviderKind::Anthropic => Box::new(AnthropicProvider::new(cfg, auth)),
+            ProviderKind::OpenAi => Box::new(OpenAiProvider::new(cfg, auth)),
+            ProviderKind::OpenAiCompat => Box::new(OpenAiCompatProvider::new(cfg, auth)),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct RuntimeConfig {
     pub session_manager: SessionManager,
@@ -25,6 +46,18 @@ pub struct RuntimeConfig {
     pub system_prompt: String,
     pub context_files: Vec<ContextFile>,
     pub cwd: PathBuf,
+    /// Optional override for provider construction. When `None`, the runtime
+    /// uses [`DefaultProviderFactory`].
+    pub provider_factory: Option<Arc<dyn ProviderFactory>>,
+}
+
+impl RuntimeConfig {
+    /// Replace the provider factory used by this runtime. Returns `self`
+    /// for chaining.
+    pub fn with_provider_factory(mut self, factory: Arc<dyn ProviderFactory>) -> Self {
+        self.provider_factory = Some(factory);
+        self
+    }
 }
 
 /// `AgentSessionRuntime` mirrors `createAgentSessionRuntime` in upstream pi:
@@ -219,7 +252,7 @@ impl AgentSession {
             .auth_storage
             .get(&provider_cfg.name)
             .unwrap_or(AuthMethod::None);
-        let provider = build_provider(provider_cfg.clone(), auth).ok()?;
+        let provider = build_provider(&self.cfg, provider_cfg.clone(), auth).ok()?;
         let comp = crate::compaction::LlmCompactor {
             keep_last_turns: 6,
             provider: provider.as_ref(),
@@ -274,7 +307,7 @@ impl AgentSession {
                 .auth_storage
                 .get(&provider_cfg.name)
                 .unwrap_or(AuthMethod::None);
-            let provider = build_provider(provider_cfg.clone(), auth)?;
+            let provider = build_provider(&self.cfg, provider_cfg.clone(), auth)?;
 
             let mut system = self.cfg.system_prompt.clone();
             for ctx in &self.cfg.context_files {
@@ -499,14 +532,14 @@ impl AgentSession {
 }
 
 fn build_provider(
-    cfg: ProviderConfig,
+    cfg: &RuntimeConfig,
+    provider_cfg: ProviderConfig,
     auth: AuthMethod,
 ) -> Result<Box<dyn Provider>, RuntimeError> {
-    Ok(match cfg.kind {
-        ProviderKind::Anthropic => Box::new(AnthropicProvider::new(cfg, auth)),
-        ProviderKind::OpenAi => Box::new(OpenAiProvider::new(cfg, auth)),
-        ProviderKind::OpenAiCompat => Box::new(OpenAiCompatProvider::new(cfg, auth)),
-    })
+    if let Some(factory) = &cfg.provider_factory {
+        return factory.build(provider_cfg, auth);
+    }
+    DefaultProviderFactory.build(provider_cfg, auth)
 }
 
 #[derive(Debug, thiserror::Error)]

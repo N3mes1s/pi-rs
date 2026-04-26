@@ -180,7 +180,7 @@ async fn extension_invoke_with_failing_exit_status_returns_error_result() {
     let root = tempfile::tempdir().unwrap();
     let exe = root.path().join("run.sh");
     // Write to stderr, then exit non-zero.
-    make_executable(&exe, "#!/bin/sh\necho boom 1>&2\nexit 7\n");
+    make_executable(&exe, "#!/bin/sh\necho boom 1>&2\nsleep 0.05\nexit 7\n");
     let manifest = ExtensionManifest {
         name: "ext".into(),
         version: "0.0.1".into(),
@@ -254,7 +254,7 @@ async fn extension_invoke_with_json_lacking_output_field_falls_back_to_stdout() 
 async fn extension_invoke_times_out_when_exe_sleeps_longer_than_timeout() {
     let root = tempfile::tempdir().unwrap();
     let exe = root.path().join("run.sh");
-    make_executable(&exe, "#!/bin/sh\nsleep 5\n");
+    make_executable(&exe, "#!/bin/sh\nsleep 30\n");
     let manifest = ExtensionManifest {
         name: "slow".into(),
         version: "0.0.1".into(),
@@ -265,7 +265,7 @@ async fn extension_invoke_times_out_when_exe_sleeps_longer_than_timeout() {
             input_schema: serde_json::Value::Null,
         }],
         commands: vec![],
-        timeout_ms: Some(50),
+        timeout_ms: Some(200),
     };
     let loaded = Arc::new(LoadedExtension {
         manifest: manifest.clone(),
