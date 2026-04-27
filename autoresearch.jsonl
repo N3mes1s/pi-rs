@@ -1,0 +1,2 @@
+{"type":"config","name":"pi-rs r4 — musl/upx/post-link round","metricName":"score","metricUnit":"µs+KiB","bestDirection":"lower"}
+{"run":1,"commit":"fa130d2","metric":6814.0,"metrics":{"size_kib":5029.0,"startup_us":1785.0},"status":"keep","description":"r4 baseline (5-trial median × 200 invocations)","timestamp":1777287242149,"confidence":null,"iterationTokens":null,"asi":{"binary":"5.0M dynamically linked glibc","noise_floor_us":"~120 (range 240/median 1785 ≈ 13%)","samples_us":[1709,1690,1930,1842,1785],"score_breakdown":"1785 µs + 5029 KiB"}}
