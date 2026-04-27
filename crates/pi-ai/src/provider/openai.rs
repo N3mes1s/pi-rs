@@ -5,7 +5,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::auth::AuthMethod;
-use crate::message::{ContentBlock, FinishReason, Role, Usage};
+use crate::message::{ContentBlock, FinishReason, Role, ThinkingLevel, Usage};
 use crate::registry::{ModelInfo, ProviderConfig};
 use crate::stream::{StreamEvent, StreamEventKind};
 use crate::{AiError, GenerateRequest, Result};
@@ -170,6 +170,21 @@ impl Provider for OpenAiProvider {
                     })
                     .collect(),
             );
+        }
+
+        // Reasoning effort for thinking-capable models (o1, o1-mini, o3-mini, …).
+        // OpenAI rejects requests to these models that omit `reasoning_effort`,
+        // so we always set it to one of low|medium|high when the flag is on.
+        if model.supports_thinking {
+            let effort = match req.thinking {
+                ThinkingLevel::Off => None,
+                ThinkingLevel::Low => Some("low"),
+                ThinkingLevel::Medium => Some("medium"),
+                ThinkingLevel::High => Some("high"),
+            };
+            if let Some(e) = effort {
+                body["reasoning_effort"] = json!(e);
+            }
         }
 
         let resp = self
