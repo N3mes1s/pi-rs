@@ -30,6 +30,12 @@ else
   fi
 fi
 
+# Strip unwind tables.  `panic = "abort"` means they're never read.
+objcopy --remove-section=.eh_frame \
+        --remove-section=.eh_frame_hdr \
+        --remove-section=.gcc_except_table \
+        ./target/release/pi 2>/dev/null || true
+
 if [[ -n "$POSTBUILD" ]]; then
   bash -c "$POSTBUILD ./target/release/pi" >/dev/null 2>&1 || true
 fi

@@ -1,7 +1,19 @@
-.PHONY: build test cov cov-pure run-haiku run-opus install-cov check
+.PHONY: build build-release test cov cov-pure run-haiku run-opus install-cov check
 
 build:
 	cargo build --workspace
+
+# Release artefact tuned for size + cold-start (musl static, no unwind tables).
+# Drops the binary at ./target/release/pi for downstream tooling.
+build-release:
+	cargo build --release -p pi-coding-agent
+	@bin=$$(ls target/x86_64-unknown-linux-musl/release/pi 2>/dev/null || echo target/release/pi); \
+	  install -m 755 $$bin target/release/pi; \
+	  objcopy --remove-section=.eh_frame \
+	          --remove-section=.eh_frame_hdr \
+	          --remove-section=.gcc_except_table \
+	          target/release/pi 2>/dev/null || true; \
+	  ls -l target/release/pi
 
 test:
 	cargo test --workspace
