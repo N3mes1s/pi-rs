@@ -15,11 +15,19 @@
 //! foundation it will plug into.
 //!
 //! See `dogfood-blocked.md` at the repo root for the deferred work.
+//!
+//! D1.transport status: the JSON-RPC stdio transport (framing, id
+//! correlation, initialize handshake, server-pushed notification
+//! channel) lives in [`transport`]. The engine + agent-facing tool
+//! still want for follow-ups; `tests/fake_lsp_server.py` is the test
+//! harness that keeps us off real `rust-analyzer` in CI.
 
 pub mod catalogue;
 pub mod config;
 pub mod ops;
+pub mod transport;
 
 pub use catalogue::{language_for_extension, LanguageEntry, DEFAULT_CATALOGUE};
 pub use config::LspConfig;
 pub use ops::LspOp;
+pub use transport::{LspClient, ServerMessage, TransportError};
