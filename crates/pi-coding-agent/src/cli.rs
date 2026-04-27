@@ -189,6 +189,23 @@ pub struct Cli {
     /// Free-form positional args. `@file` references add attachments.
     #[arg(value_name = "MESSAGE_OR_AT_FILES")]
     pub positionals: Vec<String>,
+
+    /// Run this invocation inside a private git worktree (RFD 0006).
+    /// The parent branch is not touched; on success, changes land on
+    /// `pi/task/<id>` (or as a patch artifact when
+    /// `--worktree-mode=patch`).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub worktree: bool,
+
+    /// Reconciliation mode for `--worktree`: `branch` (default) or
+    /// `patch`.
+    #[arg(long = "worktree-mode", value_name = "MODE",
+          value_parser = clap::builder::PossibleValuesParser::new(["branch", "patch"]))]
+    pub worktree_mode: Option<String>,
+
+    /// Explicit task id for `--worktree`. Defaults to a random UUID.
+    #[arg(long = "worktree-id", value_name = "ID")]
+    pub worktree_id: Option<String>,
 }
 
 impl Cli {
