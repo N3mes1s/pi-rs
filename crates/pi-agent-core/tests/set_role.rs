@@ -69,6 +69,7 @@ fn cfg(settings: Settings) -> RuntimeConfig {
         provider_factory: Some(Arc::new(NullFactory(provider))),
         tool_gate: None,
         gate_ask_is_approve: false,
+        stream_interceptor: None,
     }
 }
 

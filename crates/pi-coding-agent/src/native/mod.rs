@@ -7,6 +7,7 @@
 //! evolution loop (G group). It is not a tool; the agent never sees it.
 
 pub mod ask;
+pub mod lsp;
 pub mod todo;
 pub mod trajectory;
 pub mod ttsr;

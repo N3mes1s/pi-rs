@@ -57,5 +57,6 @@ pub fn build_runtime_config(b: BuildConfig) -> RuntimeConfig {
         provider_factory: None,
         tool_gate: None,
         gate_ask_is_approve: false,
+        stream_interceptor: None,
     }
 }

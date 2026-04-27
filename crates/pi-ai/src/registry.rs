@@ -165,6 +165,14 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
                 m("openai", "o1", Some("o1"), 200_000, 100_000, true, true, 15.0, 60.0),
                 m("openai", "o1-mini", Some("o1-mini"), 128_000, 65_536, true, false, 3.0, 12.0),
                 m("openai", "o3-mini", Some("o3-mini"), 200_000, 100_000, true, false, 1.10, 4.40),
+                // Reasoning family additions (E1).
+                m("openai", "o3", Some("o3"), 200_000, 100_000, true, true, 10.0, 40.0),
+                m("openai", "o3-pro", Some("o3-pro"), 200_000, 100_000, true, true, 60.0, 240.0),
+                m("openai", "o4-mini", Some("o4-mini"), 200_000, 100_000, true, true, 1.10, 4.40),
+                // GPT-5 family (reasoning-capable per OpenAI announcement).
+                m("openai", "gpt-5", Some("gpt-5"), 400_000, 100_000, true, true, 5.0, 20.0),
+                m("openai", "gpt-5-mini", Some("gpt-5-mini"), 400_000, 100_000, true, true, 0.5, 2.0),
+                m("openai", "gpt-5-nano", Some("gpt-5-nano"), 400_000, 100_000, true, true, 0.10, 0.40),
             ],
         },
         ProviderConfig {

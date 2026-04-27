@@ -221,3 +221,56 @@ fn injection_mechanic_aborts_and_appends_reminder() {
     }
     assert!(!second_aborted, "rule must be one-shot per session");
 }
+
+// ── TtsrInterceptor adapter ───────────────────────────────────────────────
+
+use pi_agent_core::{InterceptAction, StreamInterceptor};
+use pi_coding_agent::native::ttsr::TtsrInterceptor;
+use std::sync::Arc;
+
+fn arc_ruleset(triggers: &[(&str, &str, &str)]) -> Arc<RuleSet> {
+    let mut rs = RuleSet::new();
+    for (name, pat, body) in triggers {
+        rs.push(Rule {
+            name: (*name).into(),
+            trigger_pattern: (*pat).into(),
+            body: (*body).into(),
+            path: PathBuf::from(format!("{name}.md")),
+        })
+        .unwrap();
+    }
+    Arc::new(rs)
+}
+
+#[tokio::test]
+async fn interceptor_returns_inject_on_first_match_then_continue() {
+    let rs = arc_ruleset(&[("planner", "\\bplan\\b", "STOP AND PLAN")]);
+    let it = TtsrInterceptor::new(rs);
+    it.turn_start().await;
+    assert_eq!(it.on_text_delta("we should ").await, InterceptAction::Continue);
+    let action = it.on_text_delta("plan now").await;
+    match action {
+        InterceptAction::AbortAndInject(s) => {
+            assert!(s.contains("STOP AND PLAN"));
+            assert!(s.contains("<system_reminder name=\"planner\">"));
+        }
+        _ => panic!("expected AbortAndInject"),
+    }
+    // One-shot per session: a fresh turn cannot re-fire planner.
+    it.turn_start().await;
+    assert_eq!(
+        it.on_text_delta("plan again").await,
+        InterceptAction::Continue,
+    );
+    assert_eq!(it.fired_names().await, vec!["planner".to_string()]);
+}
+
+#[tokio::test]
+async fn interceptor_buffers_across_delta_boundary() {
+    let rs = arc_ruleset(&[("p", "\\bplan\\b", "x")]);
+    let it = TtsrInterceptor::new(rs);
+    it.turn_start().await;
+    assert_eq!(it.on_text_delta("we should pl").await, InterceptAction::Continue);
+    let action = it.on_text_delta("an now").await;
+    assert!(matches!(action, InterceptAction::AbortAndInject(_)));
+}

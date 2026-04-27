@@ -48,6 +48,41 @@ pub enum ToolGateOutcome {
     AskUser(String),
 }
 
+/// Action requested by a [`StreamInterceptor`] after observing one
+/// streamed assistant text delta.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterceptAction {
+    /// No-op — keep streaming.
+    Continue,
+    /// Abort the in-flight assistant turn, append the carried text as a
+    /// new synthetic user message, and re-issue the turn. Used by TTSR
+    /// (Time-Travelling Streamed Rules) to inject `<system_reminder>`
+    /// messages mid-stream.
+    AbortAndInject(String),
+}
+
+/// Hook invoked once per streamed `TextDelta` during an assistant turn.
+/// Lives in `pi-agent-core` so the run loop can call it generically;
+/// `pi-coding-agent` plugs the TTSR matcher in here.
+///
+/// The interceptor is `&self` because the runtime calls it concurrently
+/// with whatever else the host is doing — implementations should hold
+/// their own interior mutability (typically a `Mutex<Matcher>`).
+#[async_trait::async_trait]
+pub trait StreamInterceptor: Send + Sync {
+    /// Called once at the *start* of every assistant turn. Lets the
+    /// interceptor reset any per-turn buffers (the TTSR matcher uses
+    /// this to clear its delta accumulator without losing the
+    /// `fired_rules` set).
+    async fn turn_start(&self) {}
+
+    /// Called for each streamed assistant text delta. Returning
+    /// [`InterceptAction::AbortAndInject`] aborts the current stream
+    /// and re-issues the turn with the carried text appended as a user
+    /// message.
+    async fn on_text_delta(&self, text: &str) -> InterceptAction;
+}
+
 /// Default factory: dispatch on `ProviderKind`.
 pub struct DefaultProviderFactory;
 
@@ -84,6 +119,10 @@ pub struct RuntimeConfig {
     /// or be treated as "reject". TUI mode flips this on (and prompts the
     /// user); headless modes leave it false (fail-closed).
     pub gate_ask_is_approve: bool,
+    /// Optional stream interceptor. Called for every assistant text
+    /// delta; may signal an abort + re-injection (TTSR). `None` ⇒ no
+    /// interception.
+    pub stream_interceptor: Option<Arc<dyn StreamInterceptor>>,
 }
 
 impl RuntimeConfig {
@@ -104,6 +143,12 @@ impl RuntimeConfig {
     ) -> Self {
         self.tool_gate = Some(gate);
         self.gate_ask_is_approve = ask_is_approve;
+        self
+    }
+
+    /// Install a stream interceptor (typically the TTSR matcher).
+    pub fn with_stream_interceptor(mut self, interceptor: Arc<dyn StreamInterceptor>) -> Self {
+        self.stream_interceptor = Some(interceptor);
         self
     }
 }
@@ -402,12 +447,23 @@ impl AgentSession {
 
             self.emit(AgentEventKind::AssistantStart).await;
 
+            // Notify the stream interceptor (if any) that a new turn has
+            // started so it can reset per-turn buffers without losing
+            // session-scoped state like fired TTSR rules.
+            if let Some(intercept) = &self.cfg.stream_interceptor {
+                intercept.turn_start().await;
+            }
+
             let mut stream = provider.stream(req, model_info).await.map_err(|e| RuntimeError::Provider(e.to_string()))?;
             let mut assistant_text = String::new();
             let mut assistant_thinking = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut usage_total = Usage::default();
             let mut finish = FinishReason::Stop;
+            // If an interceptor fires, we drop the partial assistant
+            // message, queue an `<system_reminder>` user message and
+            // restart the outer loop from the top.
+            let mut intercept_inject: Option<String> = None;
 
             while let Some(ev) = stream.next().await {
                 if self.inner.lock().await.aborted {
@@ -419,7 +475,16 @@ impl AgentSession {
                 match ev.kind {
                     K::TextDelta { text } => {
                         assistant_text.push_str(&text);
-                        self.emit(AgentEventKind::AssistantTextDelta { text }).await;
+                        self.emit(AgentEventKind::AssistantTextDelta { text: text.clone() }).await;
+                        if let Some(intercept) = &self.cfg.stream_interceptor {
+                            match intercept.on_text_delta(&text).await {
+                                InterceptAction::Continue => {}
+                                InterceptAction::AbortAndInject(reminder) => {
+                                    intercept_inject = Some(reminder);
+                                    break;
+                                }
+                            }
+                        }
                     }
                     K::ThinkingDelta { text } => {
                         assistant_thinking.push_str(&text);
@@ -443,6 +508,26 @@ impl AgentSession {
                     }
                     _ => {}
                 }
+            }
+
+            // TTSR / interceptor abort: throw away any partial assistant
+            // output, emit Aborted so UIs collapse the half-finished
+            // bubble, and inject the carried text as a fresh user turn.
+            // The outer `loop` then re-issues the assistant turn against
+            // the new history.
+            if let Some(reminder) = intercept_inject {
+                self.emit(AgentEventKind::Aborted).await;
+                let next = Message::user_text(reminder);
+                {
+                    let mut g = self.inner.lock().await;
+                    g.messages.push(next.clone());
+                }
+                let _ = self.cfg.session_manager.append(
+                    &self.id,
+                    SessionEntryKind::User { message: next.clone() },
+                );
+                self.emit(AgentEventKind::UserMessage { message: next }).await;
+                continue;
             }
 
             let mut assistant_blocks: Vec<ContentBlock> = Vec::new();

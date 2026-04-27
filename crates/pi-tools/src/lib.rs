@@ -19,6 +19,7 @@ pub mod find;
 pub mod grep;
 pub mod ls;
 pub mod read;
+pub mod web_search;
 pub mod write;
 
 #[derive(Debug, thiserror::Error)]
@@ -84,6 +85,7 @@ impl ToolRegistry {
         r.register(Arc::new(grep::GrepTool));
         r.register(Arc::new(find::FindTool));
         r.register(Arc::new(ls::LsTool));
+        r.register(Arc::new(web_search::WebSearchTool::default()));
         r
     }
 

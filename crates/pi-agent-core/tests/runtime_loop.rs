@@ -106,6 +106,7 @@ fn build_config(provider: MockProvider, tools: ToolRegistry) -> RuntimeConfig {
         provider_factory: Some(Arc::new(MockFactory { inner: provider })),
         tool_gate: None,
         gate_ask_is_approve: false,
+        stream_interceptor: None,
     }
 }
 
@@ -428,6 +429,7 @@ async fn runtime_abort_emits_aborted_event() {
         })),
         tool_gate: None,
         gate_ask_is_approve: false,
+        stream_interceptor: None,
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -456,4 +458,89 @@ async fn runtime_abort_emits_aborted_event() {
     // Suppress unused warnings for futures features unused here.
     let _ = futures::stream::empty::<()>();
     let _ = futures::stream::iter::<Vec<()>>(Vec::new()).next();
+}
+
+// --- 8. stream interceptor: TTSR-style abort + inject ---------------------
+
+struct InjectOnceInterceptor {
+    fired: tokio::sync::Mutex<bool>,
+    trigger: String,
+    reminder: String,
+}
+
+#[async_trait]
+impl pi_agent_core::StreamInterceptor for InjectOnceInterceptor {
+    async fn on_text_delta(&self, text: &str) -> pi_agent_core::InterceptAction {
+        let mut fired = self.fired.lock().await;
+        if *fired {
+            return pi_agent_core::InterceptAction::Continue;
+        }
+        if text.contains(&self.trigger) {
+            *fired = true;
+            return pi_agent_core::InterceptAction::AbortAndInject(self.reminder.clone());
+        }
+        pi_agent_core::InterceptAction::Continue
+    }
+}
+
+#[tokio::test]
+async fn stream_interceptor_aborts_and_reinjects_then_completes() {
+    // Turn 1: assistant says "let me PLAN this" — interceptor catches
+    // "PLAN" and aborts. Turn 2 (after the synthetic reminder is
+    // appended) emits a clean reply with no trigger, completing.
+    let provider = MockProvider::new(vec![
+        vec![
+            ev(StreamEventKind::TextDelta { text: "let me ".into() }),
+            ev(StreamEventKind::TextDelta { text: "PLAN ".into() }),
+            ev(StreamEventKind::TextDelta { text: "the change".into() }),
+            ev(StreamEventKind::Finish { reason: FinishReason::Stop }),
+        ],
+        vec![
+            ev(StreamEventKind::TextDelta { text: "ok, here's the plan: do X".into() }),
+            ev(StreamEventKind::Finish { reason: FinishReason::Stop }),
+        ],
+    ]);
+    let mut cfg = build_config(provider, ToolRegistry::new());
+    cfg.stream_interceptor = Some(Arc::new(InjectOnceInterceptor {
+        fired: tokio::sync::Mutex::new(false),
+        trigger: "PLAN".into(),
+        reminder: "<system_reminder>do not plan</system_reminder>".into(),
+    }));
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_runtime, session) = create_agent_session(cfg, Some(tx)).expect("session");
+    let result = session.prompt("hi".into()).await.expect("turn ok");
+    assert!(matches!(result.role, pi_ai::Role::Assistant));
+
+    let kinds = drain(rx).await;
+
+    // We expect an Aborted (from the interceptor), then a UserMessage
+    // carrying the reminder, then a fresh AssistantStart, then a final
+    // AssistantMessage with the second turn's content.
+    let mut saw_abort = false;
+    let mut saw_reminder_user = false;
+    let mut saw_assistant_after = false;
+    let mut after_abort = false;
+    for k in &kinds {
+        match k {
+            AgentEventKind::Aborted => {
+                saw_abort = true;
+                after_abort = true;
+            }
+            AgentEventKind::UserMessage { message } if after_abort => {
+                if format!("{:?}", message).contains("system_reminder") {
+                    saw_reminder_user = true;
+                }
+            }
+            AgentEventKind::AssistantMessage { message } if after_abort => {
+                if format!("{:?}", message).contains("here's the plan") {
+                    saw_assistant_after = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_abort, "expected Aborted from interceptor");
+    assert!(saw_reminder_user, "expected synthetic user message carrying reminder");
+    assert!(saw_assistant_after, "expected fresh assistant turn after inject");
 }
