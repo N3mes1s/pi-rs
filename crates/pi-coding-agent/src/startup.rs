@@ -31,7 +31,7 @@ pub struct Startup {
     pub slash_registry: SlashRegistry,
 }
 
-pub fn assemble(cli: Cli) -> anyhow::Result<Startup> {
+pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // 1. settings (global + project).
@@ -172,9 +172,14 @@ pub fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     }
     let loaded_exts = extensions::discover(&ext_roots);
     if !loaded_exts.is_empty() {
+        // Strip any builtins that extensions declare they replace, *before*
+        // registering the extension tools so there are no duplicates.
+        extensions::apply_replacements(&mut tools, &loaded_exts);
         for t in extensions::extension_tools(&loaded_exts) {
             tools.register(t);
         }
+        // Fire-and-forget startup hooks (errors are only warned, never fatal).
+        extensions::run_startup_hooks(&loaded_exts).await;
     }
 
     // Register extension keybindings.

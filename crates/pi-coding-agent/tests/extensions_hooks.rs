@@ -35,6 +35,8 @@ fn manifest_with_hooks(hooks: Vec<ExtensionHook>) -> ExtensionManifest {
         timeout_ms: Some(5_000),
         keybindings: vec![],
         hooks,
+        replaces_builtin: vec![],
+        startup_executable: None,
     }
 }
 

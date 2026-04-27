@@ -21,6 +21,8 @@ fn mock_extension(commands: Vec<ExtensionCommandManifest>, executable: &str) -> 
             timeout_ms: None,
             keybindings: vec![],
                 hooks: vec![],
+            replaces_builtin: vec![],
+            startup_executable: None,
         },
         root: PathBuf::from("/tmp"),
     }
@@ -142,6 +144,8 @@ async fn extensions_slash_run_command_captures_stdout_with_args() {
             timeout_ms: Some(5_000),
             keybindings: vec![],
                 hooks: vec![],
+            replaces_builtin: vec![],
+            startup_executable: None,
         },
         root: dir.path().to_path_buf(),
     };

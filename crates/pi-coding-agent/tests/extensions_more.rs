@@ -49,6 +49,8 @@ fn manifest_with_two_tools_produces_two_tool_entries() {
         timeout_ms: Some(5_000),
         keybindings: vec![],
                 hooks: vec![],
+        replaces_builtin: vec![],
+        startup_executable: None,
     };
     write_manifest(root.path(), &manifest);
 
@@ -79,6 +81,8 @@ async fn extension_with_non_json_stdout_still_succeeds() {
         timeout_ms: Some(5_000),
         keybindings: vec![],
                 hooks: vec![],
+        replaces_builtin: vec![],
+        startup_executable: None,
     };
     write_manifest(root.path(), &manifest);
 
@@ -120,6 +124,8 @@ async fn extension_json_output_with_is_error_true_surfaces_as_error() {
         timeout_ms: Some(5_000),
         keybindings: vec![],
                 hooks: vec![],
+        replaces_builtin: vec![],
+        startup_executable: None,
     };
     write_manifest(root.path(), &manifest);
 
@@ -155,6 +161,8 @@ async fn run_command_passes_argv_to_executable() {
         timeout_ms: Some(5_000),
         keybindings: vec![],
                 hooks: vec![],
+        replaces_builtin: vec![],
+        startup_executable: None,
     };
     write_manifest(root.path(), &manifest);
     let loaded = LoadedExtension {

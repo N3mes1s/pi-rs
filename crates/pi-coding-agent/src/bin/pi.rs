@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
         return cmd::run_update();
     }
 
-    let startup = startup::assemble(cli.clone())?;
+    let startup = startup::assemble(cli.clone()).await?;
 
     match cli.effective_mode() {
         pi_coding_agent::cli::Mode::Print => modes::print::run(startup).await,

@@ -43,6 +43,8 @@ fn discover_via_explicit_pi_extension_json_file_path() {
             timeout_ms: Some(2_000),
             keybindings: vec![],
                 hooks: vec![],
+            replaces_builtin: vec![],
+            startup_executable: None,
         })
         .unwrap(),
     )
@@ -76,6 +78,8 @@ fn discover_skips_subdirs_with_invalid_manifest_json() {
             timeout_ms: Some(1_000),
             keybindings: vec![],
                 hooks: vec![],
+            replaces_builtin: vec![],
+            startup_executable: None,
         },
     );
 
@@ -96,6 +100,8 @@ fn loaded_extension_executable_path_handles_absolute_executable() {
         timeout_ms: None,
         keybindings: vec![],
                 hooks: vec![],
+        replaces_builtin: vec![],
+        startup_executable: None,
     };
     let loaded = LoadedExtension {
         manifest,
@@ -118,6 +124,8 @@ fn loaded_extension_default_timeout_is_two_minutes() {
         timeout_ms: None,
         keybindings: vec![],
                 hooks: vec![],
+        replaces_builtin: vec![],
+        startup_executable: None,
     };
     let l = LoadedExtension {
         manifest,
@@ -141,6 +149,8 @@ fn extension_tool_is_never_read_only() {
         timeout_ms: Some(1_000),
         keybindings: vec![],
                 hooks: vec![],
+        replaces_builtin: vec![],
+        startup_executable: None,
     };
     let loaded = Arc::new(LoadedExtension {
         manifest: manifest.clone(),
@@ -170,6 +180,8 @@ async fn extension_invoke_with_nonexistent_executable_errors() {
         timeout_ms: Some(1_000),
         keybindings: vec![],
                 hooks: vec![],
+        replaces_builtin: vec![],
+        startup_executable: None,
     };
     let loaded = Arc::new(LoadedExtension {
         manifest: manifest.clone(),
@@ -206,6 +218,8 @@ async fn extension_invoke_with_failing_exit_status_returns_error_result() {
         timeout_ms: Some(2_000),
         keybindings: vec![],
                 hooks: vec![],
+        replaces_builtin: vec![],
+        startup_executable: None,
     };
     let loaded = Arc::new(LoadedExtension {
         manifest: manifest.clone(),
@@ -247,6 +261,8 @@ async fn extension_invoke_with_json_lacking_output_field_falls_back_to_stdout() 
         timeout_ms: Some(2_000),
         keybindings: vec![],
                 hooks: vec![],
+        replaces_builtin: vec![],
+        startup_executable: None,
     };
     let loaded = Arc::new(LoadedExtension {
         manifest: manifest.clone(),
@@ -284,6 +300,8 @@ async fn extension_invoke_times_out_when_exe_sleeps_longer_than_timeout() {
         timeout_ms: Some(200),
         keybindings: vec![],
                 hooks: vec![],
+        replaces_builtin: vec![],
+        startup_executable: None,
     };
     let loaded = Arc::new(LoadedExtension {
         manifest: manifest.clone(),
@@ -317,6 +335,8 @@ fn loaded_extension_spec_falls_back_to_object_schema_when_input_schema_null() {
         timeout_ms: None,
         keybindings: vec![],
                 hooks: vec![],
+        replaces_builtin: vec![],
+        startup_executable: None,
     };
     let loaded = Arc::new(LoadedExtension {
         manifest: manifest.clone(),

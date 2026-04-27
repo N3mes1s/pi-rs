@@ -86,6 +86,16 @@ pub struct ExtensionManifest {
     pub keybindings: Vec<ExtensionKeybinding>,
     #[serde(default)]
     pub hooks: Vec<ExtensionHook>,
+    /// Built-in tool names that this extension replaces. The named builtins are
+    /// unregistered before the extension's own tools are registered, so a
+    /// same-named extension tool cleanly shadows the builtin.
+    #[serde(default)]
+    pub replaces_builtin: Vec<String>,
+    /// Optional executable run once at startup (fire-and-forget). Relative
+    /// paths are resolved against the extension root. Failures are logged as
+    /// warnings and never abort startup.
+    #[serde(default)]
+    pub startup_executable: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -399,6 +409,82 @@ impl HookDispatcher {
             .collect();
 
         futures::future::join_all(futs).await;
+    }
+}
+
+// ── Replacement helpers ───────────────────────────────────────────────────────
+
+/// For every loaded extension that declares `replaces_builtin`, unregister the
+/// named builtins from `reg` before registering the extension's own tools.
+///
+/// This is extracted as a free function so it can be unit-tested independently
+/// of the full startup machinery.
+pub fn apply_replacements(reg: &mut pi_tools::ToolRegistry, exts: &[LoadedExtension]) {
+    for ext in exts {
+        for name in &ext.manifest.replaces_builtin {
+            reg.unregister(name);
+        }
+    }
+}
+
+// ── Startup hooks ─────────────────────────────────────────────────────────────
+
+/// Run the `startup_executable` for every loaded extension that declares one.
+///
+/// Each executable is spawned and awaited (with `timeout_ms` or 30 000 ms as
+/// the fallback). stdout/stderr are discarded. Any error is logged via
+/// [`tracing::warn!`] and never propagates — startup hooks are best-effort.
+pub async fn run_startup_hooks(exts: &[LoadedExtension]) {
+    for ext in exts {
+        let se = match &ext.manifest.startup_executable {
+            Some(s) => s.clone(),
+            None => continue,
+        };
+
+        let exe_path = {
+            let p = std::path::Path::new(&se);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                ext.root.join(p)
+            }
+        };
+
+        let timeout = std::time::Duration::from_millis(ext.manifest.timeout_ms.unwrap_or(30_000));
+        let ext_name = ext.manifest.name.clone();
+        let root = ext.root.clone();
+
+        let mut cmd = tokio::process::Command::new(&exe_path);
+        cmd.current_dir(&root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "startup_hook: failed to spawn `{}` for extension `{ext_name}`: {e}",
+                    exe_path.display()
+                );
+                continue;
+            }
+        };
+
+        match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "startup_hook: extension `{ext_name}` hook wait error: {e}"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "startup_hook: extension `{ext_name}` startup hook timed out after {}ms",
+                    timeout.as_millis()
+                );
+            }
+        }
     }
 }
 
