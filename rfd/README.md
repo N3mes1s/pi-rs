@@ -35,3 +35,6 @@ crosses crate boundaries.
 | 0001 | LSP-on-write hook                                | Implemented |
 | 0002 | Tier-5 follow-ups                                | Draft      |
 | 0003 | Adaptive thinking (Opus 4.7+)                    | Implemented |
+| 0004 | `pi-stats` crate                                 | Discussion |
+| 0005 | Subagents and the `task` tool                    | Discussion |
+| 0006 | Worktree-isolated tasks                          | Discussion |
