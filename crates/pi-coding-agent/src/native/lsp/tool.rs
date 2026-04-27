@@ -443,6 +443,7 @@ mod tests {
                     "python3".into(),
                     path.to_string_lossy().into_owned(),
                 ]),
+                format_options: Default::default(),
             },
         );
         let tool = LspTool::new(cfg);

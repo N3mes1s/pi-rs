@@ -281,12 +281,44 @@ fn default_lsp_diagnostics_on_write() -> bool {
 }
 
 /// Per-language override block for `LspSettings`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct LspLanguageSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
+    /// Override the `FormattingOptions` block sent with
+    /// `textDocument/formatting`. Missing fields inherit the hardcoded
+    /// engine defaults (tab_size=4, insert_spaces=true, trim/newline=true).
+    /// RFD 0007.
+    #[serde(default, skip_serializing_if = "FormattingOptions::is_empty")]
+    pub format_options: FormattingOptions,
+}
+
+/// Per-language override of LSP `FormattingOptions` (LSP 3.17 §3.17.13).
+/// Each `None` field falls back to the engine default. RFD 0007.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FormattingOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_spaces: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_trailing_whitespace: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_final_newline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_final_newlines: Option<bool>,
+}
+
+impl FormattingOptions {
+    pub fn is_empty(&self) -> bool {
+        self.tab_size.is_none()
+            && self.insert_spaces.is_none()
+            && self.trim_trailing_whitespace.is_none()
+            && self.insert_final_newline.is_none()
+            && self.trim_final_newlines.is_none()
+    }
 }
 
 fn default_model() -> String {

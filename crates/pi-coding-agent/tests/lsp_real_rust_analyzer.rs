@@ -70,6 +70,7 @@ fn build_tool(_cwd: &Path, ra: &Path) -> LspTool {
         LanguageConfig {
             enabled: Some(true),
             command: Some(vec![ra.to_string_lossy().into_owned()]),
+            format_options: Default::default(),
         },
     );
     LspTool::new(cfg)

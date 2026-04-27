@@ -47,7 +47,7 @@ impl Default for LspConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct LanguageConfig {
     /// Override: enable/disable this language regardless of the master
     /// switch. `None` = inherit.
@@ -56,6 +56,24 @@ pub struct LanguageConfig {
     /// Override the server command (e.g. point to a vendored binary).
     #[serde(default)]
     pub command: Option<Vec<String>>,
+    /// Per-language overrides for the `FormattingOptions` block sent
+    /// with `textDocument/formatting`. Missing fields inherit the
+    /// engine defaults (tab_size=4, insert_spaces=true, trim/newline
+    /// flags=true). RFD 0007.
+    #[serde(default)]
+    pub format_options: FormattingOptions,
+}
+
+/// Runtime mirror of [`pi_agent_core::settings::FormattingOptions`].
+/// Each `None` field falls back to the engine default at request-build
+/// time. RFD 0007.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct FormattingOptions {
+    pub tab_size: Option<u32>,
+    pub insert_spaces: Option<bool>,
+    pub trim_trailing_whitespace: Option<bool>,
+    pub insert_final_newline: Option<bool>,
+    pub trim_final_newlines: Option<bool>,
 }
 
 impl From<&pi_agent_core::settings::LspSettings> for LspConfig {
@@ -75,6 +93,15 @@ impl From<&pi_agent_core::settings::LspSettings> for LspConfig {
                         LanguageConfig {
                             enabled: v.enabled,
                             command: v.command.clone(),
+                            format_options: FormattingOptions {
+                                tab_size: v.format_options.tab_size,
+                                insert_spaces: v.format_options.insert_spaces,
+                                trim_trailing_whitespace: v
+                                    .format_options
+                                    .trim_trailing_whitespace,
+                                insert_final_newline: v.format_options.insert_final_newline,
+                                trim_final_newlines: v.format_options.trim_final_newlines,
+                            },
                         },
                     )
                 })
@@ -124,6 +151,7 @@ mod tests {
             LanguageConfig {
                 enabled: Some(false),
                 command: Some(vec!["ra-multiplex".into()]),
+                format_options: Default::default(),
             },
         );
         let json = serde_json::to_string(&c).unwrap();
@@ -143,6 +171,7 @@ mod tests {
             LanguageConfig {
                 enabled: Some(false),
                 command: None,
+                format_options: Default::default(),
             },
         );
         assert!(!c.is_language_enabled("rust"));
@@ -160,6 +189,7 @@ mod tests {
             LanguageConfig {
                 enabled: Some(true),
                 command: None,
+                format_options: Default::default(),
             },
         );
         assert!(c.is_language_enabled("rust"));
@@ -174,6 +204,7 @@ mod tests {
             LanguageConfig {
                 enabled: None,
                 command: Some(vec!["ra".into(), "--watch".into()]),
+                format_options: Default::default(),
             },
         );
         let cmd = c.command_override("rust").expect("override present");
@@ -203,6 +234,7 @@ mod tests {
                 pi_agent_core::settings::LspLanguageSettings {
                     enabled: Some(true),
                     command: Some(vec!["ra-multiplex".into()]),
+                    format_options: Default::default(),
                 },
             )]
             .into_iter()
@@ -221,5 +253,60 @@ mod tests {
     fn from_default_lsp_settings_matches_lspconfig_default() {
         let c = LspConfig::from(&pi_agent_core::settings::LspSettings::default());
         assert_eq!(c, LspConfig::default());
+    }
+
+    #[test]
+    fn language_config_format_options_round_trip_through_json() {
+        // RFD 0007: a partial `format_options` override survives a
+        // serde JSON round trip on the runtime mirror.
+        let lc = LanguageConfig {
+            enabled: Some(true),
+            command: None,
+            format_options: FormattingOptions {
+                tab_size: Some(2),
+                insert_spaces: Some(false),
+                trim_trailing_whitespace: None,
+                insert_final_newline: Some(true),
+                trim_final_newlines: None,
+            },
+        };
+        let json = serde_json::to_string(&lc).unwrap();
+        let back: LanguageConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, lc);
+        assert_eq!(back.format_options.tab_size, Some(2));
+    }
+
+    #[test]
+    fn from_lsp_settings_propagates_format_options_field_by_field() {
+        // RFD 0007: every field of `FormattingOptions` is copied verbatim
+        // from the serde mirror onto the runtime `LanguageConfig`.
+        let s = pi_agent_core::settings::LspSettings {
+            enabled: true,
+            format_on_write: false,
+            diagnostics_on_write: true,
+            languages: [(
+                "python".into(),
+                pi_agent_core::settings::LspLanguageSettings {
+                    enabled: None,
+                    command: None,
+                    format_options: pi_agent_core::settings::FormattingOptions {
+                        tab_size: Some(2),
+                        insert_spaces: Some(true),
+                        trim_trailing_whitespace: Some(false),
+                        insert_final_newline: Some(true),
+                        trim_final_newlines: Some(false),
+                    },
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let c = LspConfig::from(&s);
+        let py = c.languages.get("python").expect("python override");
+        assert_eq!(py.format_options.tab_size, Some(2));
+        assert_eq!(py.format_options.insert_spaces, Some(true));
+        assert_eq!(py.format_options.trim_trailing_whitespace, Some(false));
+        assert_eq!(py.format_options.insert_final_newline, Some(true));
+        assert_eq!(py.format_options.trim_final_newlines, Some(false));
     }
 }

@@ -33,6 +33,7 @@ fn build_cfg(format_on_write: bool, diagnostics_on_write: bool) -> LspConfig {
         LanguageConfig {
             enabled: Some(true),
             command: Some(vec!["python3".into(), fake_server_path()]),
+            format_options: Default::default(),
         },
     );
     cfg

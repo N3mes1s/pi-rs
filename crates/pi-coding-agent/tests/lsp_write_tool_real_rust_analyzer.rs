@@ -61,6 +61,7 @@ fn build_tool(ra: &Path) -> LspWriteTool {
         LanguageConfig {
             enabled: Some(true),
             command: Some(vec![ra.to_string_lossy().into_owned()]),
+            format_options: Default::default(),
         },
     );
     LspWriteTool::new(cfg)
