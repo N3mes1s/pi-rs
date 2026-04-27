@@ -16,6 +16,7 @@ use crate::keymap::Keymap;
 use crate::packages;
 use crate::prompts::PromptRegistry;
 use crate::skills::SkillRegistry;
+use crate::slash::SlashRegistry;
 
 /// The set of resources assembled at startup, ready to drive any of the modes.
 pub struct Startup {
@@ -27,6 +28,7 @@ pub struct Startup {
     pub themes: pi_tui::ThemeRegistry,
     pub keymap: Keymap,
     pub extensions: Vec<LoadedExtension>,
+    pub slash_registry: SlashRegistry,
 }
 
 pub fn assemble(cli: Cli) -> anyhow::Result<Startup> {
@@ -175,6 +177,18 @@ pub fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         }
     }
 
+    // Build slash registry with extension commands registered.
+    let mut slash_registry = SlashRegistry::new();
+    slash_registry.register_templates(&prompts);
+    {
+        let ext_cmds: Vec<(usize, &crate::extensions::ExtensionCommandManifest)> = loaded_exts
+            .iter()
+            .enumerate()
+            .flat_map(|(i, ext)| ext.manifest.commands.iter().map(move |c| (i, c)))
+            .collect();
+        slash_registry.register_extension_commands(&ext_cmds);
+    }
+
     let runtime_config = RuntimeConfig {
         session_manager,
         auth_storage: auth,
@@ -196,5 +210,6 @@ pub fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         themes,
         keymap,
         extensions: loaded_exts,
+        slash_registry,
     })
 }

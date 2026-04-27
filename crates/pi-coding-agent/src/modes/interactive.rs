@@ -25,6 +25,7 @@ use crate::picker::{PickItem, Picker};
 use crate::renderer::Transcript;
 use crate::slash::{self, SlashKind, SlashRegistry};
 use crate::startup::Startup;
+use crate::extensions;
 
 /// Entry point. Picks raw-TUI or line-based depending on TTY state.
 pub async fn run(startup: Startup) -> anyhow::Result<()> {
@@ -585,8 +586,8 @@ fn thinking_to_runtime(t: ThinkingSetting) -> pi_ai::ThinkingLevel {
 // ─── main TUI loop ─────────────────────────────────────────────────────────
 
 async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
-    let mut slash = SlashRegistry::new();
-    slash.register_templates(&startup.prompts);
+    // Use the pre-built slash registry from startup (includes extension commands).
+    let slash = std::mem::replace(&mut startup.slash_registry, SlashRegistry::new());
 
     let (session, mut rx) = build_session(&startup)?;
 
@@ -1055,8 +1056,42 @@ async fn handle_slash(
         "__clone_pick" => SlashOutcome::Continue,
         other => {
             if let Some(cmd) = slash.get(other) {
-                if let SlashKind::Template { body } = &cmd.kind {
-                    return SlashOutcome::Submit(slash::render_template(body, args));
+                match &cmd.kind {
+                    SlashKind::Template { body } => {
+                        return SlashOutcome::Submit(slash::render_template(body, args));
+                    }
+                    SlashKind::Extension {
+                        extension_index,
+                        command_name,
+                    } => {
+                        let idx = *extension_index;
+                        let cname = command_name.clone();
+                        let args_owned = args.to_string();
+                        if let Some(ext) = startup.extensions.get(idx) {
+                            match extensions::run_command(ext, &cname, &args_owned).await {
+                                Ok(stdout) => {
+                                    view.transcript
+                                        .blocks
+                                        .push(crate::renderer::Block::Note(stdout));
+                                }
+                                Err(e) => {
+                                    view.transcript
+                                        .blocks
+                                        .push(crate::renderer::Block::Error(format!(
+                                            "extension command /{cname}: {e}"
+                                        )));
+                                }
+                            }
+                        } else {
+                            view.transcript
+                                .blocks
+                                .push(crate::renderer::Block::Error(format!(
+                                    "extension index {idx} out of range"
+                                )));
+                        }
+                        return SlashOutcome::Continue;
+                    }
+                    SlashKind::Builtin => {}
                 }
             }
             view.transcript
@@ -1079,9 +1114,9 @@ fn reqwest_client() -> reqwest::Client {
 // Line-based fallback (kept verbatim from the previous implementation)
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn run_line_based(startup: Startup) -> anyhow::Result<()> {
-    let mut slash = SlashRegistry::new();
-    slash.register_templates(&startup.prompts);
+async fn run_line_based(mut startup: Startup) -> anyhow::Result<()> {
+    // Use the pre-built slash registry from startup (includes extension commands).
+    let slash = std::mem::replace(&mut startup.slash_registry, SlashRegistry::new());
 
     let (session, mut rx) = build_session(&startup)?;
 
@@ -1252,8 +1287,28 @@ async fn handle_slash_line(
         }
         other => {
             if let Some(cmd) = slash.get(other) {
-                if let SlashKind::Template { body } = &cmd.kind {
-                    return LineSlashOutcome::Submit(slash::render_template(body, args));
+                match &cmd.kind {
+                    SlashKind::Template { body } => {
+                        return LineSlashOutcome::Submit(slash::render_template(body, args));
+                    }
+                    SlashKind::Extension {
+                        extension_index,
+                        command_name,
+                    } => {
+                        let idx = *extension_index;
+                        let cname = command_name.clone();
+                        let args_owned = args.to_string();
+                        if let Some(ext) = startup.extensions.get(idx) {
+                            match extensions::run_command(ext, &cname, &args_owned).await {
+                                Ok(stdout) => print!("{}", stdout),
+                                Err(e) => eprintln!("extension command /{cname}: {e}"),
+                            }
+                        } else {
+                            eprintln!("extension index {idx} out of range");
+                        }
+                        return LineSlashOutcome::Continue;
+                    }
+                    SlashKind::Builtin => {}
                 }
             }
             println!("unknown slash command: /{other}");

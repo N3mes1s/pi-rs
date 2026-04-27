@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::extensions::ExtensionCommandManifest;
 use crate::prompts::PromptRegistry;
 
 /// A slash command: built-in or template-derived.
@@ -18,6 +19,12 @@ pub enum SlashKind {
     /// rendered (with `{{arg}}` replaced by trailing arguments) and sent
     /// to the agent as a user prompt.
     Template { body: String },
+    /// Command exported by a loaded extension. `extension_index` is the
+    /// position of the owning [`LoadedExtension`] in `Startup::extensions`.
+    Extension {
+        extension_index: usize,
+        command_name: String,
+    },
 }
 
 #[derive(Default, Debug, Clone)]
@@ -56,6 +63,34 @@ impl SlashRegistry {
                     name: name.into(),
                     description: desc.into(),
                     kind: SlashKind::Builtin,
+                },
+            );
+        }
+    }
+
+    /// Register slash commands exported by extensions.
+    ///
+    /// `items` is a slice of `(extension_index, manifest)` pairs where
+    /// `extension_index` matches the position in `Startup::extensions`.
+    /// Existing names (builtins, templates) are **not** overwritten so that
+    /// built-in commands always take precedence.
+    pub fn register_extension_commands(
+        &mut self,
+        items: &[(usize, &ExtensionCommandManifest)],
+    ) {
+        for (ext_idx, cmd) in items {
+            if self.inner.contains_key(&cmd.name) {
+                continue;
+            }
+            self.inner.insert(
+                cmd.name.clone(),
+                SlashCommand {
+                    name: cmd.name.clone(),
+                    description: cmd.description.clone(),
+                    kind: SlashKind::Extension {
+                        extension_index: *ext_idx,
+                        command_name: cmd.name.clone(),
+                    },
                 },
             );
         }
