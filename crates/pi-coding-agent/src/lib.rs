@@ -29,6 +29,7 @@ pub mod context;
 pub mod extensions;
 pub mod keymap;
 pub mod modes;
+pub mod native;
 pub mod picker;
 pub mod renderer;
 pub mod packages;

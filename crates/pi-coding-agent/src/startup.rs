@@ -218,6 +218,8 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         tools.register(Arc::new(crate::autoresearch::tools::InitExperimentTool));
         tools.register(Arc::new(crate::autoresearch::tools::RunExperimentTool));
         tools.register(Arc::new(crate::autoresearch::tools::LogExperimentTool));
+        // Native todo tool (B2). Persists to <cwd>/.pi/todo.json.
+        tools.register(Arc::new(crate::native::todo::TodoTool));
     }
 
     let loaded_exts = extensions::discover(&ext_roots);
