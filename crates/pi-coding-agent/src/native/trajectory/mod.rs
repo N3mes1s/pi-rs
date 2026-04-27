@@ -22,6 +22,7 @@
 //! diagnosed. The verdict has to read the actual trajectory.
 
 pub mod features;
+pub mod flamegraph;
 pub mod judge;
 pub mod recorder;
 

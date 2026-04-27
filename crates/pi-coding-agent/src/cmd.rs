@@ -123,10 +123,48 @@ pub fn run_evolve(verb: &str) -> anyhow::Result<()> {
 }
 
 /// `pi --flamegraph <session-id-or-path>` — render trajectory flamegraph
-/// to HTML. Stub for G11.
+/// to HTML on stdout. Width = estimated tokens, depth = turn nesting,
+/// colour = block kind. Self-contained (no JS, no external assets).
 pub fn run_flamegraph(target: &str) -> anyhow::Result<()> {
-    let _ = target;
-    anyhow::bail!("--flamegraph not yet implemented (pending G11)")
+    use crate::context::sessions_dir;
+    use crate::native::trajectory::flamegraph;
+    use pi_agent_core::SessionEntry;
+
+    // Resolve the input: a path, or a session id under the per-cwd
+    // sessions directory.
+    let path = if std::path::Path::new(target).is_file() {
+        std::path::PathBuf::from(target)
+    } else {
+        let cwd = std::env::current_dir()?;
+        let slug = cwd.display().to_string().replace(['/', '\\', ':'], "_");
+        let dir = sessions_dir().join(slug);
+        let candidate = dir.join(format!("{target}.jsonl"));
+        if !candidate.exists() {
+            anyhow::bail!(
+                "no session jsonl at {} (looked up id={} for cwd={})",
+                candidate.display(),
+                target,
+                cwd.display()
+            );
+        }
+        candidate
+    };
+
+    let txt = std::fs::read_to_string(&path)?;
+    let entries: Vec<SessionEntry> = txt
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let session_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("session")
+        .to_string();
+
+    let html = flamegraph::render(&session_id, &entries);
+    println!("{html}");
+    Ok(())
 }
 
 /// `pi --refresh-models` — query every provider with credentials for its
