@@ -252,5 +252,112 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
             // pre-registered here.
             models: vec![],
         },
+        ProviderConfig {
+            name: "cerebras".into(),
+            kind: ProviderKind::OpenAiCompat,
+            base_url: "https://api.cerebras.ai/v1".into(),
+            auth_header: "Authorization".into(),
+            auth_format: "Bearer {token}".into(),
+            models: vec![
+                m("cerebras", "llama3.1-70b", Some("llama3.1-70b"), 131_072, 8_192, false, false, 0.5, 1.5),
+            ],
+        },
+        ProviderConfig {
+            name: "groq".into(),
+            kind: ProviderKind::OpenAiCompat,
+            base_url: "https://api.groq.com/openai/v1".into(),
+            auth_header: "Authorization".into(),
+            auth_format: "Bearer {token}".into(),
+            models: vec![
+                m("groq", "llama-3.3-70b-versatile", Some("llama-3.3-70b-versatile"), 131_072, 8_192, false, false, 0.5, 1.5),
+            ],
+        },
+        ProviderConfig {
+            name: "xai".into(),
+            kind: ProviderKind::OpenAiCompat,
+            base_url: "https://api.x.ai/v1".into(),
+            auth_header: "Authorization".into(),
+            auth_format: "Bearer {token}".into(),
+            models: vec![
+                m("xai", "grok-2-latest", Some("grok-2-latest"), 131_072, 8_192, false, false, 0.5, 1.5),
+            ],
+        },
+        ProviderConfig {
+            name: "openrouter".into(),
+            kind: ProviderKind::OpenAiCompat,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            auth_header: "Authorization".into(),
+            auth_format: "Bearer {token}".into(),
+            // Users pick their own models on OpenRouter.
+            models: vec![],
+        },
+        ProviderConfig {
+            name: "deepseek".into(),
+            kind: ProviderKind::OpenAiCompat,
+            base_url: "https://api.deepseek.com".into(),
+            auth_header: "Authorization".into(),
+            auth_format: "Bearer {token}".into(),
+            models: vec![
+                m("deepseek", "deepseek-chat", Some("deepseek-chat"), 131_072, 8_192, false, false, 0.5, 1.5),
+                m("deepseek", "deepseek-reasoner", Some("deepseek-reasoner"), 131_072, 8_192, true, false, 0.5, 1.5),
+            ],
+        },
+        ProviderConfig {
+            name: "mistral".into(),
+            kind: ProviderKind::OpenAiCompat,
+            base_url: "https://api.mistral.ai/v1".into(),
+            auth_header: "Authorization".into(),
+            auth_format: "Bearer {token}".into(),
+            models: vec![
+                m("mistral", "mistral-large-latest", Some("mistral-large-latest"), 131_072, 8_192, false, false, 0.5, 1.5),
+            ],
+        },
+        ProviderConfig {
+            name: "zai".into(),
+            kind: ProviderKind::OpenAiCompat,
+            base_url: "https://api.z.ai/api/paas/v4".into(),
+            auth_header: "Authorization".into(),
+            auth_format: "Bearer {token}".into(),
+            models: vec![
+                m("zai", "glm-4.6", Some("glm-4.6"), 131_072, 8_192, false, false, 0.5, 1.5),
+            ],
+        },
+        ProviderConfig {
+            name: "huggingface".into(),
+            kind: ProviderKind::OpenAiCompat,
+            base_url: "https://api-inference.huggingface.co/v1".into(),
+            auth_header: "Authorization".into(),
+            auth_format: "Bearer {token}".into(),
+            // Users pick their own models on HuggingFace.
+            models: vec![],
+        },
+        ProviderConfig {
+            name: "ollama".into(),
+            kind: ProviderKind::OpenAiCompat,
+            base_url: "http://localhost:11434/v1".into(),
+            auth_header: "Authorization".into(),
+            auth_format: "Bearer {token}".into(),
+            // Users pick their own locally-installed models.
+            models: vec![],
+        },
+        ProviderConfig {
+            name: "kimi".into(),
+            kind: ProviderKind::OpenAiCompat,
+            base_url: "https://api.moonshot.cn/v1".into(),
+            auth_header: "Authorization".into(),
+            auth_format: "Bearer {token}".into(),
+            models: vec![
+                m("kimi", "moonshot-v1-128k", Some("moonshot-v1-128k"), 131_072, 8_192, false, false, 0.5, 1.5),
+            ],
+        },
+        ProviderConfig {
+            name: "minimax".into(),
+            kind: ProviderKind::OpenAiCompat,
+            base_url: "https://api.minimax.chat/v1".into(),
+            auth_header: "Authorization".into(),
+            auth_format: "Bearer {token}".into(),
+            // Users pick their own models on MiniMax.
+            models: vec![],
+        },
     ]
 }

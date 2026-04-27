@@ -57,6 +57,17 @@ impl AuthStorage {
         ("google", "GOOGLE_API_KEY"),
         ("bedrock", "AWS_BEDROCK_TOKEN"),
         ("azure-openai", "AZURE_OPENAI_API_KEY"),
+        ("cerebras", "CEREBRAS_API_KEY"),
+        ("groq", "GROQ_API_KEY"),
+        ("xai", "XAI_API_KEY"),
+        ("openrouter", "OPENROUTER_API_KEY"),
+        ("deepseek", "DEEPSEEK_API_KEY"),
+        ("mistral", "MISTRAL_API_KEY"),
+        ("zai", "ZAI_API_KEY"),
+        ("huggingface", "HF_TOKEN"),
+        ("ollama", "OLLAMA_API_KEY"),
+        ("kimi", "MOONSHOT_API_KEY"),
+        ("minimax", "MINIMAX_API_KEY"),
     ];
 
     pub fn from_env() -> Self {
