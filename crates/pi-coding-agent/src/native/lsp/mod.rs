@@ -24,10 +24,14 @@
 
 pub mod catalogue;
 pub mod config;
+pub mod engine;
 pub mod ops;
+pub mod tool;
 pub mod transport;
 
 pub use catalogue::{language_for_extension, LanguageEntry, DEFAULT_CATALOGUE};
 pub use config::LspConfig;
+pub use engine::{EngineError, LspEngine};
 pub use ops::LspOp;
+pub use tool::LspTool;
 pub use transport::{LspClient, ServerMessage, TransportError};
