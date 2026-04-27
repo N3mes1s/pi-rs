@@ -101,54 +101,22 @@ pub fn export_dashboard(cwd: &Path) -> Result<std::path::PathBuf, String> {
     // Load session — we need the config for the DashboardState.
     let session = Session::load(cwd).map_err(|e| format!("cannot load session: {e}"))?;
 
-    // Load JSONL log entries to build run rows and compute confidence.
-    let log = crate::autoresearch::log::JsonlLog::new(
-        session.jsonl_path(),
-        session.config.direction,
-    );
-    let entries = log.read_all().map_err(|e| format!("cannot read log: {e}"))?;
+    // Load JSONL log entries — upstream-format (run entries).
+    let log = crate::autoresearch::log::JsonlLog::new(session.jsonl_path());
+    let runs = log.read_runs().map_err(|e| format!("cannot read log: {e}"))?;
 
-    // Build run rows: (idea, metric_value, kept) from Result entries,
-    // paired with the preceding Run entry's idea.
+    // Build run rows: (description, metric, kept).
     let mut run_rows: Vec<(String, f64, bool)> = Vec::new();
-    let mut run_ideas: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
     let mut sample_values: Vec<f64> = Vec::new();
 
-    for entry in &entries {
-        match &entry.kind {
-            crate::autoresearch::log::LogEntryKind::Run { idea, .. } => {
-                run_ideas.insert(entry.id.clone(), idea.clone());
-            }
-            crate::autoresearch::log::LogEntryKind::Result {
-                run_id,
-                metric_value,
-                kept,
-                ..
-            } => {
-                let idea = run_ideas
-                    .get(run_id)
-                    .cloned()
-                    .unwrap_or_else(|| run_id.clone());
-                run_rows.push((idea, *metric_value, *kept));
-                sample_values.push(*metric_value);
-            }
-            _ => {}
-        }
+    for r in &runs {
+        let kept = r.status == crate::autoresearch::log::RunStatus::Keep;
+        run_rows.push((r.description.clone(), r.metric, kept));
+        sample_values.push(r.metric);
     }
 
-    // Compute baseline from the first Init entry's config or fall back to 0.
-    let baseline = entries
-        .iter()
-        .find_map(|e| {
-            if let crate::autoresearch::log::LogEntryKind::Init { .. } = &e.kind {
-                // We don't store the baseline in the config, so use 0.
-                Some(0.0_f64)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(0.0);
+    // Baseline = first run's metric (the canonical "before any change" sample).
+    let baseline = sample_values.first().copied().unwrap_or(0.0);
 
     let current_best = match session.config.direction {
         MetricDirection::Lower => sample_values

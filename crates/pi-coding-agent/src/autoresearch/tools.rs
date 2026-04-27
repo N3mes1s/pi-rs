@@ -1,73 +1,161 @@
-//! Autoresearch [`pi_tools::Tool`] implementations.
+//! `init_experiment`, `run_experiment`, `log_experiment` — the three tools
+//! that drive an autoresearch loop. Faithful port of upstream
+//! pi-autoresearch's tool surface (see
+//! `davebcn87/pi-autoresearch/extensions/pi-autoresearch/index.ts`).
 //!
-//! Three tools are exposed to the agent:
+//! Behaviour summary:
 //!
-//! | Tool | Purpose |
-//! |------|---------|
-//! | [`InitExperimentTool`] | Bootstrap a new experiment (writes config + md, logs Init entry) |
-//! | [`RunExperimentTool`]  | Run a benchmark command and parse `METRIC name=value` from stdout |
-//! | [`LogExperimentTool`]  | Record the result, keep or revert, commit or reset HEAD |
+//! * **`init_experiment`** writes a `{type:"config",…}` line to
+//!   `<working_dir>/autoresearch.jsonl`. Re-running starts a new segment.
+//! * **`run_experiment`** spawns a shell command (default 600s timeout),
+//!   parses `METRIC <name>=<number>` lines from stdout, and — if
+//!   `<working_dir>/autoresearch.checks.sh` exists — runs it next (default
+//!   300s timeout). Returns a structured summary to the agent. Does NOT
+//!   write to the JSONL log itself; that's `log_experiment`'s job.
+//! * **`log_experiment`** appends a `{run:N,…}` line with `status` ∈
+//!   {`keep`, `discard`, `crash`, `checks_failed`}. `keep` triggers
+//!   `git add -A && git commit -m <description>`; the others trigger
+//!   `git reset --hard <commit>`. The JSONL itself is preserved across
+//!   reverts (it's only autoresearch.{md,sh,checks.sh,jsonl,ideas.md} that
+//!   ride along with the kept-commit content; reverts back out user code
+//!   only).
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use pi_ai::{ToolResult, ToolSpec};
 use pi_tools::{Tool, ToolContext, ToolError};
 use serde_json::{json, Value};
 
-use crate::autoresearch::{
-    log::{JsonlLog, LogEntryKind},
-    session::{MetricDirection, Session, SessionConfig},
+use crate::autoresearch::log::{
+    BestDirection, ConfigEntry, JsonlLog, RunEntry, RunStatus,
 };
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+const DEFAULT_RUN_TIMEOUT_S: u64 = 600;
+const DEFAULT_CHECKS_TIMEOUT_S: u64 = 300;
+const RUN_OUTPUT_MAX_BYTES: usize = 4 * 1024;
+const RUN_OUTPUT_MAX_LINES: usize = 10;
+const CHECKS_OUTPUT_MAX_LINES: usize = 80;
 
-/// Parse lines of the form `METRIC <name>=<number>` from `output`.
-/// Returns the first matching value for `metric_name`, or `None`.
-pub fn parse_metric(output: &str, metric_name: &str) -> Option<f64> {
-    let prefix = format!("METRIC {}=", metric_name);
-    for line in output.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix(&prefix) {
-            if let Ok(v) = rest.trim().parse::<f64>() {
-                return Some(v);
+// ── helpers ─────────────────────────────────────────────────────────────────
+
+fn resolve_working_dir(ctx: &ToolContext, input: &Value) -> PathBuf {
+    let s = input.get("working_dir").and_then(|v| v.as_str());
+    match s {
+        Some(p) => {
+            let pb = PathBuf::from(p);
+            if pb.is_absolute() { pb } else { ctx.cwd.join(pb) }
+        }
+        None => ctx.cwd.clone(),
+    }
+}
+
+fn jsonl_log(working_dir: &Path) -> JsonlLog {
+    JsonlLog::new(working_dir.join("autoresearch.jsonl"))
+}
+
+fn checks_path(working_dir: &Path) -> PathBuf {
+    working_dir.join("autoresearch.checks.sh")
+}
+
+fn truncate_tail(s: &str, max_bytes: usize, max_lines: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let kept: Vec<&str> = if lines.len() > max_lines {
+        lines[lines.len() - max_lines..].to_vec()
+    } else {
+        lines
+    };
+    let body = kept.join("\n");
+    if body.len() > max_bytes {
+        let cut = body.len() - max_bytes;
+        format!("…(truncated {cut} bytes)…\n{}", &body[cut..])
+    } else {
+        body
+    }
+}
+
+/// Parsed METRIC lines, returning (insertion-ordered list, sorted map). The
+/// primary metric is the first entry of the list (matches upstream's
+/// "first METRIC line wins" rule); the map is for serialisation.
+fn parse_metric_lines(stdout: &str) -> (Vec<(String, f64)>, BTreeMap<String, f64>) {
+    let mut order: Vec<(String, f64)> = Vec::new();
+    let mut map: BTreeMap<String, f64> = BTreeMap::new();
+    let denied = ["__proto__", "constructor", "prototype"];
+    for line in stdout.lines() {
+        let trimmed = line.trim_end();
+        let Some(rest) = trimmed.strip_prefix("METRIC ") else { continue };
+        let mut parts = rest.splitn(2, '=');
+        let name = match parts.next() {
+            Some(n) => n.trim(),
+            None => continue,
+        };
+        if denied.contains(&name) || name.is_empty() {
+            continue;
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == 'µ')
+        {
+            continue;
+        }
+        let val_str = match parts.next() {
+            Some(v) => v.trim(),
+            None => continue,
+        };
+        if let Ok(v) = val_str.parse::<f64>() {
+            if v.is_finite() {
+                if !map.contains_key(name) {
+                    order.push((name.to_string(), v));
+                }
+                map.insert(name.to_string(), v);
             }
         }
     }
-    None
+    (order, map)
 }
 
-/// Run a shell command synchronously (blocking), returning (stdout, exit_ok).
-fn run_shell(cmd: &str, cwd: &std::path::Path) -> std::io::Result<(String, bool)> {
-    let output = std::process::Command::new("bash")
-        .args(["-lc", cmd])
+async fn run_with_timeout(
+    cmd: &str,
+    cwd: &Path,
+    deadline: Duration,
+) -> std::io::Result<(String, i32, bool, bool)> {
+    // Returns (output, exit_code, timed_out, crashed).
+    let mut command = tokio::process::Command::new("bash");
+    command
+        .arg("-lc")
+        .arg(cmd)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()?;
-    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.is_empty() {
-        if !combined.is_empty() && !combined.ends_with('\n') {
-            combined.push('\n');
+        .stderr(Stdio::piped());
+    let child = command.spawn()?;
+    match tokio::time::timeout(deadline, child.wait_with_output()).await {
+        Ok(Ok(out)) => {
+            let mut buf = String::new();
+            buf.push_str(&String::from_utf8_lossy(&out.stdout));
+            if !out.stderr.is_empty() {
+                if !buf.is_empty() && !buf.ends_with('\n') {
+                    buf.push('\n');
+                }
+                buf.push_str(&String::from_utf8_lossy(&out.stderr));
+            }
+            let code = out.status.code().unwrap_or(-1);
+            let crashed = !out.status.success() && code < 0;
+            Ok((buf, code, false, crashed))
         }
-        combined.push_str("[stderr]\n");
-        combined.push_str(&stderr);
+        Ok(Err(e)) => Err(e),
+        Err(_) => Ok((String::new(), -1, true, false)),
     }
-    Ok((combined, output.status.success()))
 }
 
-/// Return the current git HEAD SHA (short) or an empty string on failure.
-fn git_head(cwd: &std::path::Path) -> String {
+fn git_head_short(cwd: &Path) -> String {
     std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
         .output()
         .ok()
         .and_then(|o| {
@@ -80,56 +168,51 @@ fn git_head(cwd: &std::path::Path) -> String {
         .unwrap_or_default()
 }
 
-/// Resolve the working directory for git commands: prefer `config.working_dir`,
-/// fall back to `root`.
-fn work_dir(root: &std::path::Path, config: &SessionConfig) -> PathBuf {
-    config
-        .working_dir
-        .clone()
-        .unwrap_or_else(|| root.to_path_buf())
+fn git_commit_all(cwd: &Path, message: &str) -> std::io::Result<bool> {
+    let _ = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(cwd)
+        .status()?;
+    let st = std::process::Command::new("git")
+        .args(["commit", "--no-gpg-sign", "-m"])
+        .arg(message)
+        .current_dir(cwd)
+        .status()?;
+    Ok(st.success())
 }
 
-// ── InitExperimentTool ────────────────────────────────────────────────────────
+fn git_reset_hard(cwd: &Path, commit: &str) -> std::io::Result<bool> {
+    let st = std::process::Command::new("git")
+        .args(["reset", "--hard", commit])
+        .current_dir(cwd)
+        .status()?;
+    Ok(st.success())
+}
 
-/// Initialise a new autoresearch experiment.
-///
-/// **Input JSON fields**
-///
-/// | Field | Type | Required | Description |
-/// |-------|------|----------|-------------|
-/// | `session_dir` | string | yes | Directory where `autoresearch.{config.json,jsonl,md}` live |
-/// | `name` | string | yes | Human-readable experiment name |
-/// | `metric` | string | yes | Name of the metric (matches `METRIC <name>=…` lines) |
-/// | `unit` | string | yes | Display unit (e.g. `"ms"`) |
-/// | `direction` | `"lower"` \| `"higher"` | yes | Whether lower or higher values are improvements |
-/// | `max_iterations` | integer | no | Hard iteration cap (`null` = unlimited) |
-/// | `working_dir` | string | no | Git working directory for benchmarks/commits (defaults to `session_dir`) |
-///
-/// `root` is accepted as a deprecated alias for `session_dir`.
+// ── init_experiment ─────────────────────────────────────────────────────────
+
 pub struct InitExperimentTool;
 
 #[async_trait]
 impl Tool for InitExperimentTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "autoresearch_init".into(),
+            name: "init_experiment".into(),
             description:
-                "Initialise a new autoresearch experiment. Writes autoresearch.config.json \
-                 and autoresearch.md, and appends an Init log entry to autoresearch.jsonl."
+                "Configure an autoresearch session. Writes a `{type:\"config\",…}` header line to \
+                 `<working_dir>/autoresearch.jsonl` (creating it if absent). Re-run to start a new \
+                 segment with a different metric. Always pair with run_experiment + log_experiment."
                     .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "session_dir":    { "type": "string", "description": "Directory where autoresearch.{config.json,jsonl,md} live" },
-                    "root":           { "type": "string", "description": "Deprecated alias for session_dir" },
-                    "name":           { "type": "string" },
-                    "metric":         { "type": "string" },
-                    "unit":           { "type": "string" },
-                    "direction":      { "type": "string", "enum": ["lower", "higher"] },
-                    "max_iterations": { "type": "integer" },
-                    "working_dir":    { "type": "string", "description": "Git working directory for benchmarks/commits (defaults to session_dir)" }
+                    "name":         { "type": "string", "description": "Human-readable session name (e.g. 'optimise total_µs in liquid')" },
+                    "metric_name":  { "type": "string", "description": "Display name for the primary metric (must match the METRIC <name>=… line emitted by autoresearch.sh)" },
+                    "metric_unit":  { "type": "string", "description": "Unit. 'µs' | 'ms' | 's' | 'kb' | 'mb' | '' (default '')" },
+                    "direction":    { "type": "string", "enum": ["lower", "higher"], "description": "lower or higher is better (default 'lower')" },
+                    "working_dir":  { "type": "string", "description": "Where autoresearch.{md,sh,jsonl,…} live. Defaults to cwd." }
                 },
-                "required": ["name", "metric", "unit", "direction"]
+                "required": ["name", "metric_name"]
             }),
         }
     }
@@ -144,142 +227,77 @@ impl Tool for InitExperimentTool {
         call_id: &str,
         input: Value,
     ) -> Result<ToolResult, ToolError> {
-        // ── parse inputs ────────────────────────────────────────────────────
-        let root_str = input
-            .get("root")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidInput("missing `root`".into()))?;
-        let root: PathBuf = {
-            let p = std::path::Path::new(root_str);
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                ctx.cwd.join(p)
-            }
-        };
-
         let name = input
             .get("name")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing `name`".into()))?
             .to_string();
-        let metric = input
-            .get("metric")
+        let metric_name = input
+            .get("metric_name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidInput("missing `metric`".into()))?
+            .ok_or_else(|| ToolError::InvalidInput("missing `metric_name`".into()))?
             .to_string();
-        let unit = input
-            .get("unit")
+        let metric_unit = input
+            .get("metric_unit")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidInput("missing `unit`".into()))?
+            .unwrap_or("")
             .to_string();
-        let direction = match input
-            .get("direction")
-            .and_then(|v| v.as_str())
-            .unwrap_or("lower")
-        {
-            "higher" => MetricDirection::Higher,
-            _ => MetricDirection::Lower,
+        let direction = match input.get("direction").and_then(|v| v.as_str()) {
+            Some("higher") => BestDirection::Higher,
+            _ => BestDirection::Lower,
         };
-        let max_iterations = input
-            .get("max_iterations")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32);
-        let working_dir = input
-            .get("working_dir")
-            .and_then(|v| v.as_str())
-            .map(|p| {
-                let pb = std::path::Path::new(p);
-                if pb.is_absolute() {
-                    pb.to_path_buf()
-                } else {
-                    ctx.cwd.join(pb)
-                }
-            });
+        let working_dir = resolve_working_dir(ctx, &input);
+        std::fs::create_dir_all(&working_dir).map_err(ToolError::Io)?;
 
-        // ── create root dir if needed ───────────────────────────────────────
-        std::fs::create_dir_all(&root)?;
-
-        let config = SessionConfig {
-            name: name.clone(),
-            metric: metric.clone(),
-            unit: unit.clone(),
-            direction,
-            max_iterations,
-            working_dir,
-        };
-        let session = Session::new(&root, config.clone());
-
-        // ── persist config + markdown ───────────────────────────────────────
-        session.save_config()?;
-        session.save_md()?;
-
-        // ── append Init log entry ───────────────────────────────────────────
-        let log = JsonlLog::new(session.jsonl_path(), direction);
-        let entry = log.append(LogEntryKind::Init { config })?;
+        let log = jsonl_log(&working_dir);
+        let entry = ConfigEntry::new(name.clone(), metric_name.clone(), &metric_unit, direction);
+        log.append_config(&entry).map_err(ToolError::Io)?;
 
         Ok(ToolResult {
             tool_use_id: call_id.into(),
             model_output: format!(
-                "Experiment '{}' initialised.\n\
-                 config: {}\n\
-                 log:    {}\n\
-                 md:     {}\n\
-                 entry id: {}",
-                name,
-                session.config_path().display(),
-                session.jsonl_path().display(),
-                session.md_path().display(),
-                entry.id,
+                "init_experiment: name='{name}' metric='{metric_name}' unit='{metric_unit}' direction={direction:?}\nworking_dir={}\nautoresearch.jsonl ready.",
+                working_dir.display()
             ),
             display: Some(json!({
                 "kind": "autoresearch_init",
                 "name": name,
-                "metric": metric,
-                "root": root.display().to_string(),
-                "entry_id": entry.id,
+                "metric_name": metric_name,
+                "metric_unit": metric_unit,
+                "direction": format!("{direction:?}").to_lowercase(),
+                "working_dir": working_dir.display().to_string(),
+                "jsonl_path": log.path.display().to_string(),
             })),
             is_error: false,
         })
     }
 }
 
-// ── RunExperimentTool ─────────────────────────────────────────────────────────
+// ── run_experiment ──────────────────────────────────────────────────────────
 
-/// Run a benchmark command and parse the metric value from its stdout.
-///
-/// **Input JSON fields**
-///
-/// | Field | Type | Required | Description |
-/// |-------|------|----------|-------------|
-/// | `root` | string | yes | Experiment root (to locate `autoresearch.config.json`) |
-/// | `command` | string | yes | Shell command to execute via `bash -lc` |
-/// | `idea` | string | yes | One-line description of the change being benchmarked |
-///
-/// The tool records `git rev-parse --short HEAD` as `commit_before`,
-/// executes `command`, and scans stdout for a line matching
-/// `METRIC <metric_name>=<number>`.  Returns the parsed value (or an error
-/// if none is found).  A [`LogEntryKind::Run`] entry is appended.
 pub struct RunExperimentTool;
 
 #[async_trait]
 impl Tool for RunExperimentTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "autoresearch_run".into(),
+            name: "run_experiment".into(),
             description:
-                "Run a benchmark command for an autoresearch experiment. \
-                 Parses `METRIC <name>=<value>` from stdout and appends a Run log entry."
+                "Run a benchmark command for an autoresearch experiment. Parses METRIC <name>=<value> \
+                 lines from stdout. If autoresearch.checks.sh exists, runs it after a passing \
+                 benchmark. Returns a structured summary including parsed metrics, exit code, \
+                 timing, and tail output. Does NOT write to autoresearch.jsonl — call \
+                 log_experiment with the chosen status afterward."
                     .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "session_dir": { "type": "string", "description": "Directory where the autoresearch session lives" },
-                    "root":        { "type": "string", "description": "Deprecated alias for session_dir" },
-                    "command":     { "type": "string" },
-                    "idea":        { "type": "string" }
+                    "command":               { "type": "string", "description": "Shell command (typically 'bash autoresearch.sh' or 'pnpm test:vitest')" },
+                    "timeout_seconds":       { "type": "number", "description": "Kill after this many seconds (default 600)" },
+                    "checks_timeout_seconds":{ "type": "number", "description": "Kill autoresearch.checks.sh after this many seconds (default 300)" },
+                    "working_dir":           { "type": "string", "description": "Where the command runs. Defaults to cwd." }
                 },
-                "required": ["command", "idea"]
+                "required": ["command"]
             }),
         }
     }
@@ -294,124 +312,144 @@ impl Tool for RunExperimentTool {
         call_id: &str,
         input: Value,
     ) -> Result<ToolResult, ToolError> {
-        let root = resolve_root(ctx, &input)?;
         let command = input
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing `command`".into()))?
             .to_string();
-        let idea = input
-            .get("idea")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidInput("missing `idea`".into()))?
-            .to_string();
+        let timeout_s = input
+            .get("timeout_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_RUN_TIMEOUT_S);
+        let checks_timeout_s = input
+            .get("checks_timeout_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_CHECKS_TIMEOUT_S);
+        let working_dir = resolve_working_dir(ctx, &input);
 
-        let session = Session::load(&root)
-            .map_err(|e| ToolError::Other(format!("cannot load session: {}", e)))?;
-        let cwd = work_dir(&root, &session.config);
-
-        // Record HEAD before the run.
-        let commit_before = git_head(&cwd);
-
-        // Run the benchmark command.
+        let commit = git_head_short(&working_dir);
         let t0 = Instant::now();
-        let (output, _ok) =
-            run_shell(&command, &cwd).map_err(ToolError::Io)?;
-        let duration_ms = t0.elapsed().as_millis() as u64;
+        let (output, exit_code, timed_out, crashed) =
+            run_with_timeout(&command, &working_dir, Duration::from_secs(timeout_s))
+                .await
+                .map_err(ToolError::Io)?;
+        let duration_seconds = t0.elapsed().as_secs_f64();
+        let (ordered, metrics) = parse_metric_lines(&output);
+        let parsed_primary = ordered.first().map(|(_, v)| *v);
 
-        // Parse metric.
-        let metric_value = parse_metric(&output, &session.config.metric);
+        // After a passing benchmark, run checks.sh if present.
+        let mut checks_pass: Option<bool> = None;
+        let mut checks_output = String::new();
+        let mut checks_duration = 0.0;
+        let mut checks_timed_out = false;
+        let passed = !timed_out && !crashed && exit_code == 0;
+        let checks_path = checks_path(&working_dir);
+        if passed && checks_path.exists() {
+            let cmd = format!("bash {}", shell_escape(&checks_path.display().to_string()));
+            let t1 = Instant::now();
+            let (out, code, t_out, _crash) =
+                run_with_timeout(&cmd, &working_dir, Duration::from_secs(checks_timeout_s))
+                    .await
+                    .map_err(ToolError::Io)?;
+            checks_duration = t1.elapsed().as_secs_f64();
+            checks_timed_out = t_out;
+            checks_output = truncate_tail(&out, RUN_OUTPUT_MAX_BYTES, CHECKS_OUTPUT_MAX_LINES);
+            checks_pass = Some(!t_out && code == 0);
+        }
 
-        // Append Run log entry.
-        let log = JsonlLog::new(session.jsonl_path(), session.config.direction);
-        let entry = log
-            .append(LogEntryKind::Run {
-                idea: idea.clone(),
-                commit_before: commit_before.clone(),
-            })
-            .map_err(ToolError::Io)?;
+        let tail = truncate_tail(&output, RUN_OUTPUT_MAX_BYTES, RUN_OUTPUT_MAX_LINES);
 
-        let (model_output, is_error) = match metric_value {
-            Some(v) => (
-                format!(
-                    "Run logged. idea: {}\ncommit_before: {}\n\
-                     METRIC {}={}\nduration: {}ms\nrun_id: {}",
-                    idea, commit_before, session.config.metric, v, duration_ms, entry.id
-                ),
-                false,
-            ),
-            None => (
-                format!(
-                    "Run logged but no METRIC line found for '{}' in output.\n\
-                     idea: {}\ncommit_before: {}\nduration: {}ms\nrun_id: {}\n\
-                     --- output ---\n{}",
-                    session.config.metric, idea, commit_before, duration_ms, entry.id, output
-                ),
-                true,
-            ),
-        };
+        let mut summary = format!(
+            "run_experiment: exit={exit_code} duration={:.1}s passed={passed} timed_out={timed_out} crashed={crashed}\ncommit_before={commit}\n",
+            duration_seconds
+        );
+        if !metrics.is_empty() {
+            summary.push_str("metrics:\n");
+            for (k, v) in &metrics {
+                summary.push_str(&format!("  {k}={v}\n"));
+            }
+        } else {
+            summary.push_str("metrics: (no METRIC lines parsed)\n");
+        }
+        if let Some(cp) = checks_pass {
+            summary.push_str(&format!(
+                "checks: pass={cp} duration={:.1}s timed_out={checks_timed_out}\n",
+                checks_duration
+            ));
+            if !cp {
+                summary.push_str("checks_output (last 80 lines):\n");
+                summary.push_str(&checks_output);
+                summary.push('\n');
+            }
+        }
+        summary.push_str("output (tail):\n");
+        summary.push_str(&tail);
 
         Ok(ToolResult {
             tool_use_id: call_id.into(),
-            model_output,
+            model_output: summary,
             display: Some(json!({
                 "kind": "autoresearch_run",
-                "idea": idea,
-                "run_id": entry.id,
-                "commit_before": commit_before,
-                "metric_value": metric_value,
-                "duration_ms": duration_ms,
+                "command": command,
+                "commit_before": commit,
+                "exit_code": exit_code,
+                "duration_seconds": duration_seconds,
+                "passed": passed,
+                "timed_out": timed_out,
+                "crashed": crashed,
+                "metrics": metrics,
+                "primary_metric": parsed_primary,
+                "checks_pass": checks_pass,
+                "checks_timed_out": checks_timed_out,
+                "checks_duration": checks_duration,
+                "working_dir": working_dir.display().to_string(),
             })),
-            is_error,
+            is_error: !passed && !crashed && !timed_out,
         })
     }
 }
 
-// ── LogExperimentTool ─────────────────────────────────────────────────────────
+fn shell_escape(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+' | '=' | ':'))
+    {
+        s.to_string()
+    } else {
+        let escaped = s.replace('\'', "'\\''");
+        format!("'{}'", escaped)
+    }
+}
 
-/// Record the final result of an experiment run.
-///
-/// **Input JSON fields**
-///
-/// | Field | Type | Required | Description |
-/// |-------|------|----------|-------------|
-/// | `root` | string | yes | Experiment root |
-/// | `run_id` | string | yes | `id` of the corresponding `Run` log entry |
-/// | `metric_value` | number | yes | The observed metric value |
-/// | `kept` | bool | yes | Whether to keep (`true`) or revert (`false`) the change |
-/// | `commit_before` | string | yes | Git SHA recorded before the run (used for revert) |
-/// | `idea` | string | yes | Idea description (used in commit message when keeping) |
-/// | `duration_ms` | integer | no | Wall-clock duration (default 0) |
-///
-/// When `kept=true` the tool runs `git add -A && git commit -m "autoresearch: <idea>"`.
-/// When `kept=false` the tool runs `git reset --hard <commit_before>`.
-///
-/// If `autoresearch.checks.sh` exists and is executable it is run first;
-/// `checks_passed` in the log entry reflects its exit code.
+// ── log_experiment ──────────────────────────────────────────────────────────
+
 pub struct LogExperimentTool;
 
 #[async_trait]
 impl Tool for LogExperimentTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: "autoresearch_log".into(),
+            name: "log_experiment".into(),
             description:
-                "Record the result of an autoresearch run. Commits the change when kept=true, \
-                 reverts to commit_before when kept=false. Appends a Result log entry."
+                "Record an experiment outcome. Appends a `{run:N,…}` line to \
+                 autoresearch.jsonl. status='keep' triggers `git add -A && git commit -m \
+                 description`; the others trigger `git reset --hard commit`. ASI is the \
+                 free-form note dict that survives revert (the only memory of a discarded run \
+                 the next agent will see)."
                     .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "session_dir":   { "type": "string", "description": "Directory where the autoresearch session lives" },
-                    "root":          { "type": "string", "description": "Deprecated alias for session_dir" },
-                    "run_id":        { "type": "string" },
-                    "metric_value":  { "type": "number" },
-                    "kept":          { "type": "boolean" },
-                    "commit_before": { "type": "string" },
-                    "idea":          { "type": "string" },
-                    "duration_ms":   { "type": "integer" }
+                    "commit":         { "type": "string", "description": "Short git commit hash captured before the run (from run_experiment.commit_before)" },
+                    "metric":         { "type": "number", "description": "Primary metric value. 0 for crashes/timeouts." },
+                    "status":         { "type": "string", "enum": ["keep", "discard", "crash", "checks_failed"], "description": "keep auto-commits; the others auto-revert." },
+                    "description":    { "type": "string", "description": "One-line description of what this experiment tried." },
+                    "metrics":        { "type": "object", "description": "Secondary metrics dict {name: number}." },
+                    "asi":            { "type": "object", "description": "Free-form key/value annotations the agent wants to remember." },
+                    "iteration_tokens":{ "type": "integer", "description": "Tokens consumed during this iteration (optional)." },
+                    "confidence":     { "type": "number", "description": "Optional confidence score (best_improvement / MAD)." },
+                    "working_dir":    { "type": "string" }
                 },
-                "required": ["run_id", "metric_value", "kept", "commit_before", "idea"]
+                "required": ["commit", "metric", "status", "description"]
             }),
         }
     }
@@ -426,130 +464,104 @@ impl Tool for LogExperimentTool {
         call_id: &str,
         input: Value,
     ) -> Result<ToolResult, ToolError> {
-        let root = resolve_root(ctx, &input)?;
-        let run_id = input
-            .get("run_id")
+        let commit = input
+            .get("commit")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidInput("missing `run_id`".into()))?
+            .ok_or_else(|| ToolError::InvalidInput("missing `commit`".into()))?
             .to_string();
-        let metric_value = input
-            .get("metric_value")
+        let metric = input
+            .get("metric")
             .and_then(|v| v.as_f64())
-            .ok_or_else(|| ToolError::InvalidInput("missing `metric_value`".into()))?;
-        let kept = input
-            .get("kept")
-            .and_then(|v| v.as_bool())
-            .ok_or_else(|| ToolError::InvalidInput("missing `kept`".into()))?;
-        let commit_before = input
-            .get("commit_before")
+            .ok_or_else(|| ToolError::InvalidInput("missing `metric` (number)".into()))?;
+        let status_str = input
+            .get("status")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidInput("missing `commit_before`".into()))?
-            .to_string();
-        let idea = input
-            .get("idea")
+            .ok_or_else(|| ToolError::InvalidInput("missing `status`".into()))?;
+        let status = RunStatus::parse(status_str)
+            .ok_or_else(|| ToolError::InvalidInput(format!("bad status: {status_str}")))?;
+        let description = input
+            .get("description")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidInput("missing `idea`".into()))?
+            .ok_or_else(|| ToolError::InvalidInput("missing `description`".into()))?
             .to_string();
-        let duration_ms = input
-            .get("duration_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let metrics_in = input.get("metrics").cloned().unwrap_or_else(|| json!({}));
+        let mut metrics: BTreeMap<String, f64> = BTreeMap::new();
+        if let Some(obj) = metrics_in.as_object() {
+            for (k, v) in obj {
+                if let Some(n) = v.as_f64() {
+                    metrics.insert(k.clone(), n);
+                }
+            }
+        }
+        let asi = input.get("asi").cloned();
+        let iteration_tokens = input.get("iteration_tokens").and_then(|v| v.as_u64());
+        let confidence = input.get("confidence").and_then(|v| v.as_f64());
+        let working_dir = resolve_working_dir(ctx, &input);
 
-        let session = Session::load(&root)
-            .map_err(|e| ToolError::Other(format!("cannot load session: {}", e)))?;
-        let cwd = work_dir(&root, &session.config);
+        let log = jsonl_log(&working_dir);
+        let run_number = log.next_run_number().map_err(ToolError::Io)?;
 
-        // ── run checks script (if present) ──────────────────────────────────
-        let checks_script = session.checks_script();
-        let checks_passed = if checks_script.exists() {
-            let (_, ok) = run_shell(
-                &checks_script.display().to_string(),
-                &cwd,
-            )
-            .unwrap_or_default();
-            ok
-        } else {
-            true // no checks script → assume passing
+        let entry = RunEntry {
+            run: run_number,
+            commit: commit.clone(),
+            metric,
+            metrics,
+            status,
+            description: description.clone(),
+            timestamp: Utc::now().timestamp_millis(),
+            confidence,
+            iteration_tokens,
+            asi,
         };
+        log.append_run(&entry).map_err(ToolError::Io)?;
 
-        // ── git operations ──────────────────────────────────────────────────
-        let git_output = if kept {
-            // Stage everything and commit.
-            let add_cmd = "git add -A";
-            let commit_cmd = format!(r#"git commit -m "autoresearch: {}""#, idea.replace('"', "'"));
-            let (add_out, _) = run_shell(add_cmd, &cwd).unwrap_or_default();
-            let (commit_out, _) = run_shell(&commit_cmd, &cwd).unwrap_or_default();
-            format!("{}\n{}", add_out, commit_out)
-        } else {
-            // Hard-reset to the pre-run commit.
-            let reset_cmd = format!("git reset --hard {}", commit_before);
-            let (out, _) = run_shell(&reset_cmd, &cwd).unwrap_or_default();
-            out
-        };
-
-        let commit_after = git_head(&cwd);
-
-        // ── append Result log entry ─────────────────────────────────────────
-        let log = JsonlLog::new(session.jsonl_path(), session.config.direction);
-        let entry = log
-            .append(LogEntryKind::Result {
-                run_id: run_id.clone(),
-                metric_value,
-                duration_ms,
-                kept,
-                commit_after: commit_after.clone(),
-                checks_passed,
-            })
-            .map_err(ToolError::Io)?;
+        // Git side-effects.
+        let mut git_msg = String::new();
+        match status {
+            RunStatus::Keep => {
+                let ok = git_commit_all(&working_dir, &description).map_err(ToolError::Io)?;
+                git_msg = if ok {
+                    format!("git committed: {description}")
+                } else {
+                    "git commit failed (no changes? check working_dir)".into()
+                };
+            }
+            RunStatus::Discard | RunStatus::Crash | RunStatus::ChecksFailed => {
+                if !commit.is_empty() {
+                    let ok =
+                        git_reset_hard(&working_dir, &commit).map_err(ToolError::Io)?;
+                    git_msg = if ok {
+                        format!("git reset --hard {commit}")
+                    } else {
+                        format!("git reset --hard {commit} FAILED")
+                    };
+                }
+            }
+        }
 
         Ok(ToolResult {
             tool_use_id: call_id.into(),
             model_output: format!(
-                "Result recorded.\n\
-                 run_id: {}\nmetric_value: {}\nkept: {}\n\
-                 checks_passed: {}\ncommit_after: {}\n\
-                 entry_id: {}\n--- git ---\n{}",
-                run_id,
-                metric_value,
-                kept,
-                checks_passed,
-                commit_after,
-                entry.id,
-                git_output.trim(),
+                "log_experiment: run={run_number} status={status_str} metric={metric} description='{description}'\n{git_msg}",
             ),
             display: Some(json!({
                 "kind": "autoresearch_log",
-                "run_id": run_id,
-                "metric_value": metric_value,
-                "kept": kept,
-                "checks_passed": checks_passed,
-                "commit_after": commit_after,
-                "entry_id": entry.id,
+                "run": run_number,
+                "status": status_str,
+                "metric": metric,
+                "commit": commit,
+                "git_action": git_msg,
+                "working_dir": working_dir.display().to_string(),
             })),
             is_error: false,
         })
     }
 }
 
-// ── shared helpers ────────────────────────────────────────────────────────────
+// ── helper for tests ────────────────────────────────────────────────────────
 
-/// Resolve the **session directory** — where autoresearch.{config.json,jsonl,md}
-/// live. Accepts `session_dir` (preferred) or `root` (legacy alias). Relative
-/// paths resolve against the current `ToolContext::cwd`.
-fn resolve_root(ctx: &ToolContext, input: &Value) -> Result<PathBuf, ToolError> {
-    let s = input
-        .get("session_dir")
-        .and_then(|v| v.as_str())
-        .or_else(|| input.get("root").and_then(|v| v.as_str()))
-        .ok_or_else(|| {
-            ToolError::InvalidInput(
-                "missing `session_dir` (where autoresearch.{config.json,jsonl,md} live)".into(),
-            )
-        })?;
-    let p = std::path::Path::new(s);
-    Ok(if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        ctx.cwd.join(p)
-    })
+/// Parse a single METRIC line. Public for tests + callers that need the same
+/// regex behaviour as run_experiment.
+pub fn parse_metric(output: &str, metric_name: &str) -> Option<f64> {
+    parse_metric_lines(output).1.get(metric_name).copied()
 }

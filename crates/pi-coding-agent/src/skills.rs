@@ -2,6 +2,35 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+// ── built-in skills, embedded at compile time ────────────────────────────────
+
+/// Native skills that ship with pi-rs. Each is a `(folder_name, SKILL.md
+/// contents)` pair; on first use they are materialised to a stable temp
+/// directory so the existing on-disk skill loader works unchanged.
+const BUILTIN_SKILLS: &[(&str, &str)] = &[
+    (
+        "autoresearch-create",
+        include_str!("../skills/autoresearch-create/SKILL.md"),
+    ),
+];
+
+/// Materialise the built-in skills under `$PI_BUILTIN_SKILLS_DIR` (env
+/// override) or `<TMP>/pi-rs-builtin-skills/`. Returns the directory path
+/// once written; idempotent — re-running just overwrites the SKILL.md.
+pub fn ensure_builtin_skills_dir() -> std::io::Result<PathBuf> {
+    let base = match std::env::var_os("PI_BUILTIN_SKILLS_DIR") {
+        Some(p) => PathBuf::from(p),
+        None => std::env::temp_dir().join("pi-rs-builtin-skills"),
+    };
+    for (name, body) in BUILTIN_SKILLS {
+        let dir = base.join(name);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("SKILL.md");
+        std::fs::write(path, body)?;
+    }
+    Ok(base)
+}
+
 /// A skill loaded from the filesystem. Conforms to the
 /// [Agent Skills](https://agentskills.io) layout: a directory with
 /// `SKILL.md` (or a single `name.md` file).

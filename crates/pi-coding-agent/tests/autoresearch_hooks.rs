@@ -9,7 +9,6 @@ use tempfile::TempDir;
 
 use pi_coding_agent::autoresearch::{
     hooks::{run_before, run_after},
-    log::{JsonlLog, LogEntryKind},
     session::{MetricDirection, Session, SessionConfig},
 };
 
@@ -143,39 +142,10 @@ async fn run_after_captures_stdout_and_writes_sentinel() {
     assert_eq!(parsed["phase"], json!("after"));
 }
 
-// ── Hook entry appended to JSONL ──────────────────────────────────────────────
-
-#[cfg(unix)]
-#[tokio::test]
-async fn run_before_appends_hook_entry_to_log() {
-    let dir = TempDir::new().unwrap();
-    let session = make_session(&dir);
-
-    let hooks_dir = dir.path().join("autoresearch.hooks");
-    let sentinel = dir.path().join("log_sentinel.json");
-    make_hook_script(&hooks_dir, "before", &sentinel);
-
-    let state = json!({"check": true});
-    let _ = run_before(&session, &state).await;
-
-    // Read the JSONL log — should have a Hook entry.
-    let log = JsonlLog::new(session.jsonl_path(), MetricDirection::Lower);
-    let entries = log.read_all().unwrap();
-    let hook_entries: Vec<_> = entries
-        .iter()
-        .filter(|e| matches!(&e.kind, LogEntryKind::Hook { hook, .. } if hook == "before"))
-        .collect();
-
-    assert_eq!(
-        hook_entries.len(),
-        1,
-        "expected exactly one Hook entry; entries: {entries:?}"
-    );
-    if let LogEntryKind::Hook { hook, output } = &hook_entries[0].kind {
-        assert_eq!(hook, "before");
-        assert!(output.contains("hook-output"), "output: {output}");
-    }
-}
+// (Upstream pi-autoresearch hooks don't write their own log entries; the
+// agent records what it learned via `log_experiment`'s `asi` field. The
+// previous "Hook entry appended to JSONL" test was removed when the JSONL
+// schema was switched to upstream-faithful config + run entries.)
 
 // ── stdout capped at 8 KiB ────────────────────────────────────────────────────
 

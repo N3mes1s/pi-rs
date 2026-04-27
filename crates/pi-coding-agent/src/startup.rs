@@ -131,6 +131,13 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     // 10. skills.
     let mut skills = SkillRegistry::new();
     skills.load_all(&skills_dirs());
+    // Built-in skills shipped with the binary (autoresearch-create, etc.).
+    // We embed them as bytes at compile time and materialise into a temp
+    // directory at runtime so the existing on-disk skill loader works
+    // unchanged.
+    if let Ok(builtin_dir) = crate::skills::ensure_builtin_skills_dir() {
+        skills.load_dir(&builtin_dir);
+    }
 
     // 11. packages.
     let pkgs = packages::discover(&package_dir());

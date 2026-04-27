@@ -12,10 +12,7 @@
 use std::io::Write;
 use std::process::Stdio;
 
-use crate::autoresearch::{
-    log::{JsonlLog, LogEntryKind},
-    session::Session,
-};
+use crate::autoresearch::session::Session;
 
 const MAX_OUTPUT_BYTES: usize = 8 * 1024; // 8 KiB cap on hook stdout
 
@@ -96,12 +93,11 @@ async fn run_hook(
         raw.into_owned()
     };
 
-    // Append Hook entry to JSONL log.
-    let log = JsonlLog::new(session.jsonl_path(), session.config.direction);
-    let _ = log.append(LogEntryKind::Hook {
-        hook: hook_name.to_string(),
-        output: captured.clone(),
-    });
-
+    // Hooks don't appear in the upstream JSONL schema as their own entry
+    // type — the agent receives the captured stdout as a steer message and
+    // can record what it learned via `log_experiment`'s `asi` field. We
+    // intentionally don't write a hook entry here.
+    let _ = session;
+    let _ = hook_name;
     Some(captured)
 }
