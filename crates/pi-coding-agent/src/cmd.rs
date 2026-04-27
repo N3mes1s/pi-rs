@@ -434,3 +434,192 @@ pub async fn run_refresh_models() -> anyhow::Result<()> {
     println!("total: {} models across {} providers", total, cache.providers.len());
     Ok(())
 }
+
+/// `pi --policy <verb [arg]>` — manage `~/.pi/agent/auto-approve.json`
+/// without hand-editing JSON. Honours `PI_CODING_AGENT_DIR` for tests.
+///
+/// Grammar of the single string argument:
+///
+/// ```text
+/// list
+/// add    <tool>:<regex>     # append regex to bash-style command_allow_regex
+/// deny   <tool>:<regex>     # append regex to bash-style command_deny_regex
+/// allow  <tool>:<pattern>   # set always_approve=true on the matching rule
+/// remove <tool>:<entry>     # remove the first matching entry from the rule
+/// ```
+///
+/// The `<tool>:<…>` form mirrors how upstream pi pretty-prints rules in
+/// status output. We accept `bash:` for regex verbs; for `allow` / `remove`
+/// any tool name is fine. Regex strings are validated with the `regex`
+/// crate before saving so a typo can't poison the file.
+pub fn run_policy(spec: &str) -> anyhow::Result<()> {
+    use crate::auto_approve::Policy;
+    use crate::context::agent_dir;
+
+    let path = agent_dir().join("auto-approve.json");
+    let mut policy: Policy = if path.exists() {
+        Policy::load(&path)?
+    } else {
+        Policy::default_safe()
+    };
+
+    let trimmed = spec.trim();
+    let (verb, rest) = match trimmed.split_once(char::is_whitespace) {
+        Some((v, r)) => (v, r.trim()),
+        None => (trimmed, ""),
+    };
+
+    match verb {
+        "list" => {
+            print_policy(&path, &policy);
+            return Ok(());
+        }
+        "add" | "deny" | "allow" | "remove" => {}
+        other => anyhow::bail!(
+            "unknown --policy verb: {other} (expected: list, add, deny, allow, remove)"
+        ),
+    }
+
+    // All non-list verbs need a `<tool>:<value>` payload.
+    let (tool, value) = rest
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("--policy {verb}: expected `<tool>:<value>`, got `{rest}`"))?;
+    let tool = tool.trim();
+    let value = value.trim();
+    if tool.is_empty() {
+        anyhow::bail!("--policy {verb}: tool name is empty");
+    }
+    if value.is_empty() {
+        anyhow::bail!("--policy {verb}: value is empty");
+    }
+
+    // Regex verbs validate the pattern up-front so a malformed input
+    // never lands in the saved policy. `allow` / `remove` accept any
+    // string verbatim (the user may have written `*` as a UI gesture).
+    if matches!(verb, "add" | "deny") {
+        if let Err(e) = regex::Regex::new(value) {
+            anyhow::bail!("--policy {verb}: invalid regex `{value}`: {e}");
+        }
+    }
+
+    let summary = mutate_policy(&mut policy, verb, tool, value)?;
+    policy.save(&path)?;
+    println!("policy: {} (saved to {})", summary, path.display());
+    Ok(())
+}
+
+/// Apply one `add | deny | allow | remove` mutation in place. Returns
+/// a one-liner the caller can print as confirmation. Pure on the
+/// Policy struct — no I/O — so it's straightforward to unit-test.
+pub fn mutate_policy(
+    policy: &mut crate::auto_approve::Policy,
+    verb: &str,
+    tool: &str,
+    value: &str,
+) -> anyhow::Result<String> {
+    use crate::auto_approve::policy::ToolRule;
+
+    // Get-or-create the matching rule.
+    let idx = match policy.rules.iter().position(|r| r.tool == tool) {
+        Some(i) => i,
+        None => {
+            policy.rules.push(ToolRule {
+                tool: tool.into(),
+                ..Default::default()
+            });
+            policy.rules.len() - 1
+        }
+    };
+    let rule = &mut policy.rules[idx];
+
+    match verb {
+        "add" => {
+            if rule.command_allow_regex.iter().any(|p| p == value) {
+                return Ok(format!(
+                    "no-op: `{value}` already in {tool}.command_allow_regex"
+                ));
+            }
+            rule.command_allow_regex.push(value.into());
+            Ok(format!("added `{value}` to {tool}.command_allow_regex"))
+        }
+        "deny" => {
+            if rule.command_deny_regex.iter().any(|p| p == value) {
+                return Ok(format!(
+                    "no-op: `{value}` already in {tool}.command_deny_regex"
+                ));
+            }
+            rule.command_deny_regex.push(value.into());
+            Ok(format!("added `{value}` to {tool}.command_deny_regex"))
+        }
+        "allow" => {
+            rule.always_approve = true;
+            Ok(format!("set {tool}.always_approve = true"))
+        }
+        "remove" => {
+            // Search both regex lists for the first hit; we don't try to
+            // be smart about which list the user meant.
+            if let Some(pos) = rule.command_allow_regex.iter().position(|p| p == value) {
+                rule.command_allow_regex.remove(pos);
+                return Ok(format!("removed `{value}` from {tool}.command_allow_regex"));
+            }
+            if let Some(pos) = rule.command_deny_regex.iter().position(|p| p == value) {
+                rule.command_deny_regex.remove(pos);
+                return Ok(format!("removed `{value}` from {tool}.command_deny_regex"));
+            }
+            anyhow::bail!("--policy remove: `{value}` not found in {tool} rule")
+        }
+        other => anyhow::bail!("--policy: unknown verb `{other}`"),
+    }
+}
+
+fn print_policy(path: &std::path::Path, policy: &crate::auto_approve::Policy) {
+    println!("policy file: {}", path.display());
+    println!("default_decision: {:?}", policy.default_decision);
+    if policy.rules.is_empty() {
+        println!("(no rules)");
+        return;
+    }
+    println!("rules:");
+    for r in &policy.rules {
+        let mut flags = Vec::new();
+        if r.always_approve {
+            flags.push("always_approve".to_string());
+        }
+        if r.always_deny {
+            flags.push("always_deny".to_string());
+        }
+        let header = if flags.is_empty() {
+            format!("  {}:", r.tool)
+        } else {
+            format!("  {} [{}]:", r.tool, flags.join(", "))
+        };
+        println!("{header}");
+        if !r.command_allow_regex.is_empty() {
+            println!("    command_allow_regex:");
+            for p in &r.command_allow_regex {
+                println!("      - {p}");
+            }
+        }
+        if !r.command_deny_regex.is_empty() {
+            println!("    command_deny_regex:");
+            for p in &r.command_deny_regex {
+                println!("      - {p}");
+            }
+        }
+        if !r.path_allow_globs.is_empty() {
+            println!("    path_allow_globs:");
+            for g in &r.path_allow_globs {
+                println!("      - {g}");
+            }
+        }
+        if !r.path_deny_globs.is_empty() {
+            println!("    path_deny_globs:");
+            for g in &r.path_deny_globs {
+                println!("      - {g}");
+            }
+        }
+        if let Some(parent) = &r.inherit_from {
+            println!("    inherit_from: {parent}");
+        }
+    }
+}

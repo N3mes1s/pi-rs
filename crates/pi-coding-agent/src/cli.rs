@@ -128,6 +128,17 @@ pub struct Cli {
     #[arg(long = "flamegraph", value_name = "SESSION_OR_PATH")]
     pub flamegraph: Option<String>,
 
+    /// Manage the auto-approve policy file at
+    /// `~/.pi/agent/auto-approve.json`. Verbs:
+    ///
+    /// * `list` — pretty-print current policy.
+    /// * `add  bash:<regex>` — append <regex> to the bash command_allow_regex.
+    /// * `deny bash:<regex>` — append <regex> to the bash command_deny_regex.
+    /// * `allow <tool>:<pattern>` — set always_approve=true for <tool>.
+    /// * `remove <tool>:<entry>` — remove the first matching entry.
+    #[arg(long = "policy", value_name = "VERB[ ARG]")]
+    pub policy: Option<String>,
+
     /// Internal: run one autonomous evolve tick for the cwd and exit.
     /// Spawned by the modes/ exit hooks; not meant for direct user
     /// invocation. Hidden from help.

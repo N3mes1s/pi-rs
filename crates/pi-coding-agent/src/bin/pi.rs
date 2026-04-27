@@ -50,6 +50,9 @@ fn main() -> anyhow::Result<()> {
     if let Some(target) = &cli.flamegraph {
         return cmd::run_flamegraph(target);
     }
+    if let Some(spec) = &cli.policy {
+        return cmd::run_policy(spec);
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
