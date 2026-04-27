@@ -63,7 +63,16 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
     });
 
     let prompt = crate::modes::expand_slash(&prompt, &startup);
-    let _ = session.prompt(prompt).await;
+    // Register the parent handle so any `task` tool invocations made
+    // inside this turn can locate the calling runtime + session.
+    // (Non-interactive surface for now; interactive/rpc modes follow
+    // the same pattern when wired.)
+    let handle = crate::native::task::tool::ParentHandle {
+        parent_cfg: std::sync::Arc::new(startup.runtime_config.clone()),
+        parent_session: session.clone(),
+        current_agent: None,
+    };
+    let _ = crate::native::task::tool::with_runtime(handle, session.prompt(prompt)).await;
     printer.await.ok();
 
     // Trajectory recording: append an Outcome entry to the session JSONL
