@@ -73,6 +73,13 @@ pub struct Cli {
     #[arg(long = "no-context-files", short = 'n', action = ArgAction::SetTrue)]
     pub no_context_files: bool,
 
+    /// Override AGENTS.md content with the contents of `<path>`. Skips
+    /// the normal cwd/ancestors/global discovery — only this file is
+    /// fed to the model. Used by the evolution daemon to benchmark
+    /// candidate AGENTS.md files in-place without touching the live one.
+    #[arg(long = "agents-md", value_name = "PATH")]
+    pub agents_md: Option<PathBuf>,
+
     /// Disable extension loading.
     #[arg(long, action = ArgAction::SetTrue)]
     pub no_extensions: bool,
@@ -120,6 +127,12 @@ pub struct Cli {
     /// HTML and exit.
     #[arg(long = "flamegraph", value_name = "SESSION_OR_PATH")]
     pub flamegraph: Option<String>,
+
+    /// Internal: run one autonomous evolve tick for the cwd and exit.
+    /// Spawned by the modes/ exit hooks; not meant for direct user
+    /// invocation. Hidden from help.
+    #[arg(long = "internal-evolve-tick", action = ArgAction::SetTrue, hide = true)]
+    pub internal_evolve_tick: bool,
 
     /// Auto-approval mode: `ask` (default), `auto-policy`, `auto-judge`,
     /// or `yolo`. Policy file at `~/.pi/agent/auto-approve.json` is

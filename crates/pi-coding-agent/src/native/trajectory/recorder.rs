@@ -109,6 +109,12 @@ pub async fn finalize_session(
 /// from the runtime config + settings, then runs the full finalize.
 /// Never returns Err — failures are silently absorbed because
 /// trajectory recording is observational, not on the critical path.
+///
+/// After finalize, fire-and-forget spawns `pi --internal-evolve-tick`
+/// as a detached subprocess so the autonomous AGENTS.md evolution loop
+/// can run in the background without blocking pi's exit. The tick
+/// itself is gated by `should_run` (cost cap, sample threshold, time
+/// since last tick); most ticks are no-ops on the happy path.
 pub async fn finalize_for_runtime(
     cfg: &RuntimeConfig,
     settings: &Settings,
@@ -116,5 +122,29 @@ pub async fn finalize_for_runtime(
 ) -> Option<SessionEntryKind> {
     let judge =
         build_judge_from_settings(settings, &cfg.model_registry, &cfg.auth_storage);
-    finalize_session(&cfg.session_manager, session_id, judge.as_ref()).await
+    let outcome = finalize_session(&cfg.session_manager, session_id, judge.as_ref()).await;
+
+    if settings.evolve.enabled {
+        spawn_evolve_tick_detached();
+    }
+
+    outcome
+}
+
+/// Spawn `pi --internal-evolve-tick` detached from the parent. The
+/// child inherits no stdio, so it can outlive the parent without
+/// holding the terminal open. Errors are silently swallowed — this is
+/// best-effort background optimisation, not on any critical path.
+fn spawn_evolve_tick_detached() {
+    let pi = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let _ = std::process::Command::new(pi)
+        .arg("--internal-evolve-tick")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    // Don't wait — we're done. The OS will reap it.
 }

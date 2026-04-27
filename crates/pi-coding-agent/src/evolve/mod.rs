@@ -22,6 +22,7 @@ pub mod agents_md;
 pub mod apply;
 pub mod benchmark;
 pub mod mutate;
+pub mod orchestrator;
 pub mod tick;
 
 pub use agents_md::{AgentsMd, Section};
@@ -33,6 +34,7 @@ pub use mutate::{
     build_prompt, post_process, EvidenceItem, MutateError, Mutator, MutatorConfig,
     MutationEvidence,
 };
+pub use orchestrator::{check_rollback, run_tick, TickError, TickInputs, TickReport};
 pub use apply::{
     add_poison, append_generation, backup_and_apply, best_strict_improvement,
     is_poisoned, pareto_frontier, poisoned_hashes, read_generations, rollback,

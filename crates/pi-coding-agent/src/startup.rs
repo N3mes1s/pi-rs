@@ -124,6 +124,16 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     // 7. context files (AGENTS.md / CLAUDE.md).
     let context_files: Vec<ContextFile> = if cli.no_context_files {
         Vec::new()
+    } else if let Some(override_path) = &cli.agents_md {
+        // Evolution-daemon path: benchmark candidate AGENTS.md without
+        // touching the live one. Skip discovery, use only the override.
+        match std::fs::read_to_string(override_path) {
+            Ok(content) => vec![ContextFile {
+                path: override_path.clone(),
+                content,
+            }],
+            Err(_) => Vec::new(),
+        }
     } else {
         discover_context_files(&cwd, &agent_dir(), &["AGENTS.md", "CLAUDE.md"])
     };

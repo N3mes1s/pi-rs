@@ -52,6 +52,108 @@ pub fn run_update() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `pi --internal-evolve-tick` — spawned by the modes' exit hook.
+/// Runs one orchestrator pass and exits. Silent on the happy path so
+/// the daemon doesn't pollute the user's terminal; logs to
+/// `<cwd>/.pi/evolve/tick.log` for diagnostics.
+pub async fn run_internal_evolve_tick() -> anyhow::Result<()> {
+    use crate::context::{agent_dir, auth_path, sessions_dir, settings_paths};
+    use crate::evolve::{evolve_dir, run_tick, SubprocessReplay, TickInputs, TickReport};
+    use pi_agent_core::Settings;
+    use pi_ai::{AuthStorage, ModelRegistry};
+    use std::time::Duration;
+
+    let cwd = std::env::current_dir()?;
+
+    // Load settings (global + project) — same as startup::assemble.
+    let (global, project) = settings_paths();
+    let mut settings = Settings::load(&global);
+    settings.merge_project(&project);
+
+    // Auth: file then env.
+    let auth = AuthStorage::open(auth_path()).unwrap_or_else(|_| AuthStorage::in_memory());
+    let env = AuthStorage::from_env();
+    for (p, _) in AuthStorage::ENV_KEYS {
+        if let Some(m) = env.get(p) {
+            auth.set(p, m);
+        }
+    }
+    let registry = ModelRegistry::new(auth.clone());
+
+    // Locate AGENTS.md: project first, then ancestors, then global.
+    let agents_md_path = locate_agents_md(&cwd, &agent_dir());
+
+    // Tick log file.
+    let _ = evolve_dir(&cwd); // ensure dir exists
+    let log_path = cwd.join(".pi").join("evolve").join("tick.log");
+    let mut log_line = format!("[{}] tick start\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"));
+
+    // Pi binary path: prefer current_exe so the subprocess stays
+    // consistent across self-replacing installs.
+    let pi_binary = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("pi"));
+    let replay = SubprocessReplay {
+        pi_binary,
+        timeout: Duration::from_secs(180),
+        auto_approve: "auto-policy".into(),
+        cwd: Some(cwd.clone()),
+    };
+
+    let inputs = TickInputs {
+        cwd: &cwd,
+        sessions_root: &sessions_dir(),
+        agents_md_path,
+        settings: &settings,
+        registry: &registry,
+        auth: &auth,
+    };
+
+    match run_tick(inputs, &replay).await {
+        Ok(TickReport::Skipped(why)) => {
+            log_line.push_str(&format!("  skipped: {:?}\n", why));
+        }
+        Ok(TickReport::Ran {
+            baseline,
+            generations,
+            applied_hash,
+        }) => {
+            log_line.push_str(&format!(
+                "  ran: baseline pass={:.2}, {} generations, applied={:?}\n",
+                baseline.pass_rate,
+                generations.len(),
+                applied_hash
+            ));
+        }
+        Err(e) => {
+            log_line.push_str(&format!("  error: {}\n", e));
+        }
+    }
+
+    // Append to log; ignore failures (we're a background process).
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        use std::io::Write;
+        let _ = f.write_all(log_line.as_bytes());
+    }
+    Ok(())
+}
+
+fn locate_agents_md(cwd: &std::path::Path, agent_dir: &std::path::Path) -> std::path::PathBuf {
+    // Walk cwd ancestors looking for AGENTS.md.
+    for dir in cwd.ancestors() {
+        let p = dir.join("AGENTS.md");
+        if p.is_file() {
+            return p;
+        }
+    }
+    // Fall back to global. May not exist; orchestrator will gate-skip
+    // with NoAgentsMd if so.
+    agent_dir.join("AGENTS.md")
+}
+
 /// `pi --evolve {status,off,on}` — control the autonomous AGENTS.md
 /// evolution daemon for the current cwd.
 pub fn run_evolve(verb: &str) -> anyhow::Result<()> {
