@@ -227,6 +227,93 @@ impl LspEngine {
         let params = json!({ "textDocument": { "uri": Self::file_uri(file) }});
         Ok(client.send_request("textDocument/documentSymbol", params).await?)
     }
+
+    /// `textDocument/typeDefinition` — same wire shape as `definition`.
+    /// The reply is typically `Location | Location[] | LocationLink[] |
+    /// null` (LSP 3.17 §3.17.7) which we surface verbatim as JSON.
+    pub async fn type_definition(
+        &self,
+        file: &Path,
+        line: u32,
+        col: u32,
+    ) -> Result<Value, EngineError> {
+        let client = self.client_for(file).await?;
+        let params = json!({
+            "textDocument": { "uri": Self::file_uri(file) },
+            "position": { "line": line, "character": col },
+        });
+        Ok(client
+            .send_request("textDocument/typeDefinition", params)
+            .await?)
+    }
+
+    /// `textDocument/implementation` — locate concrete impls of the
+    /// symbol under the cursor. Same shape as `definition`.
+    pub async fn implementation(
+        &self,
+        file: &Path,
+        line: u32,
+        col: u32,
+    ) -> Result<Value, EngineError> {
+        let client = self.client_for(file).await?;
+        let params = json!({
+            "textDocument": { "uri": Self::file_uri(file) },
+            "position": { "line": line, "character": col },
+        });
+        Ok(client
+            .send_request("textDocument/implementation", params)
+            .await?)
+    }
+
+    /// `textDocument/rename` — return the workspace edit. We don't
+    /// apply it here; the caller (agent) decides whether to fan the
+    /// edits out to file tools.
+    pub async fn rename(
+        &self,
+        file: &Path,
+        line: u32,
+        col: u32,
+        new_name: &str,
+    ) -> Result<Value, EngineError> {
+        let client = self.client_for(file).await?;
+        let params = json!({
+            "textDocument": { "uri": Self::file_uri(file) },
+            "position": { "line": line, "character": col },
+            "newName": new_name,
+        });
+        Ok(client.send_request("textDocument/rename", params).await?)
+    }
+
+    /// `textDocument/codeAction` for `range` (a single zero-length
+    /// range at `(line, col)` if you only have a position). We pass an
+    /// empty `only` filter, which means *all* `CodeActionKind`s. We
+    /// also leave `diagnostics` empty — pure on-cursor refactors. The
+    /// caller is responsible for any subsequent `codeAction/resolve`
+    /// round-trip.
+    pub async fn code_actions(
+        &self,
+        file: &Path,
+        start_line: u32,
+        start_col: u32,
+        end_line: u32,
+        end_col: u32,
+    ) -> Result<Value, EngineError> {
+        let client = self.client_for(file).await?;
+        let params = json!({
+            "textDocument": { "uri": Self::file_uri(file) },
+            "range": {
+                "start": { "line": start_line, "character": start_col },
+                "end":   { "line": end_line,   "character": end_col   },
+            },
+            "context": {
+                "diagnostics": [],
+                // Empty `only` ⇒ server returns every kind it supports.
+            },
+        });
+        Ok(client
+            .send_request("textDocument/codeAction", params)
+            .await?)
+    }
 }
 
 #[cfg(test)]

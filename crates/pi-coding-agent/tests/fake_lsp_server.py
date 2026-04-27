@@ -102,6 +102,81 @@ def handle_message(msg):
         write_frame({"jsonrpc": "2.0", "id": msg_id, "result": None})
     elif method == "exit":
         os._exit(0)
+    elif method == "textDocument/typeDefinition":
+        # Return a single Location pointing at a synthetic type def.
+        write_frame(
+            {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "uri": params["textDocument"]["uri"],
+                    "range": {
+                        "start": {"line": 10, "character": 0},
+                        "end": {"line": 10, "character": 5},
+                    },
+                    "_marker": "type_definition",
+                },
+            }
+        )
+    elif method == "textDocument/implementation":
+        # Return an array of Locations.
+        write_frame(
+            {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": [
+                    {
+                        "uri": params["textDocument"]["uri"],
+                        "range": {
+                            "start": {"line": 20, "character": 0},
+                            "end": {"line": 20, "character": 8},
+                        },
+                        "_marker": "implementation",
+                    }
+                ],
+            }
+        )
+    elif method == "textDocument/rename":
+        # Echo the requested newName back inside a synthetic
+        # WorkspaceEdit so tests can assert on it.
+        uri = params["textDocument"]["uri"]
+        new_name = params.get("newName", "")
+        write_frame(
+            {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "changes": {
+                        uri: [
+                            {
+                                "range": {
+                                    "start": {"line": 0, "character": 0},
+                                    "end": {"line": 0, "character": 3},
+                                },
+                                "newText": new_name,
+                            }
+                        ]
+                    },
+                    "_marker": "rename",
+                },
+            }
+        )
+    elif method == "textDocument/codeAction":
+        # Echo the range back inside a single canned CodeAction.
+        write_frame(
+            {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": [
+                    {
+                        "title": "fake quickfix",
+                        "kind": "quickfix",
+                        "_marker": "code_actions",
+                        "_echo_range": params.get("range"),
+                    }
+                ],
+            }
+        )
     else:
         if msg_id is not None:
             write_frame(
