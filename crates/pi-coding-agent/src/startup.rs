@@ -104,6 +104,7 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
             system.push_str(&s);
         }
     }
+    // (skill manifest gets appended after skills are loaded — see step 10)
 
     // 7. context files (AGENTS.md / CLAUDE.md).
     let context_files: Vec<ContextFile> = if cli.no_context_files {
@@ -137,6 +138,19 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     // unchanged.
     if let Ok(builtin_dir) = crate::skills::ensure_builtin_skills_dir() {
         skills.load_dir(&builtin_dir);
+    }
+
+    // 10b. Append the available-skills block to the system prompt so the
+    // model knows which skills exist and can read their SKILL.md when a
+    // task matches the description (faithful port of upstream's
+    // formatSkillsForPrompt).
+    {
+        let names = skills.names();
+        let resolved: Vec<&crate::skills::Skill> = names
+            .iter()
+            .filter_map(|n| skills.get(n))
+            .collect();
+        system.push_str(&crate::skills::format_skills_for_prompt(&resolved));
     }
 
     // 11. packages.

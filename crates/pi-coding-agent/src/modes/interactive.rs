@@ -1287,20 +1287,18 @@ async fn handle_slash(
             let action = parse_action(args);
             match action {
                 AutoresearchAction::Start { text } => {
-                    let cwd_path = &startup.runtime_config.cwd;
-                    match ensure_session(cwd_path, &text) {
-                        Ok(_session) => {
-                            view.autoresearch_active = true;
-                            view.transcript.blocks.push(crate::renderer::Block::Note(
-                                "autoresearch active".to_string(),
-                            ));
-                        }
-                        Err(e) => {
-                            view.transcript.blocks.push(crate::renderer::Block::Error(
-                                format!("autoresearch: {e}"),
-                            ));
-                        }
-                    }
+                    // Faithful upstream pattern: just send a normal user
+                    // message describing the goal. The agent already has
+                    // the autoresearch-create skill listed in its
+                    // <available_skills> block (injected at startup), so
+                    // it reads SKILL.md via the `read` tool and follows
+                    // the protocol on its own. No hand-written prompt
+                    // scaffolding here.
+                    view.autoresearch_active = true;
+                    view.transcript
+                        .blocks
+                        .push(crate::renderer::Block::Note("autoresearch active".to_string()));
+                    return SlashOutcome::Submit(format!("autoresearch: {text}"));
                 }
                 AutoresearchAction::Off => {
                     view.autoresearch_active = false;

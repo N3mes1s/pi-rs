@@ -47,6 +47,51 @@ pub struct SkillRegistry {
     inner: BTreeMap<String, Skill>,
 }
 
+/// Format the available-skills block that gets prepended to the system
+/// prompt. Faithful port of upstream `formatSkillsForPrompt` (see
+/// `pi-mono/packages/coding-agent/src/core/skills.ts`):
+/// the agent receives a list of `<skill name=… description=… location=…>`
+/// entries, instructed to read the SKILL.md via the `read` tool when the
+/// task matches the description.
+pub fn format_skills_for_prompt(skills: &[&Skill]) -> String {
+    if skills.is_empty() {
+        return String::new();
+    }
+    let mut s = String::new();
+    s.push_str(
+        "\n\nThe following skills provide specialized instructions for specific tasks.\n",
+    );
+    s.push_str(
+        "Use the read tool to load a skill's file when the task matches its description.\n",
+    );
+    s.push_str(
+        "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n",
+    );
+    s.push_str("\n<available_skills>\n");
+    for skill in skills {
+        s.push_str("  <skill>\n");
+        s.push_str(&format!("    <name>{}</name>\n", xml_escape(&skill.name)));
+        s.push_str(&format!(
+            "    <description>{}</description>\n",
+            xml_escape(&skill.description)
+        ));
+        s.push_str(&format!(
+            "    <location>{}</location>\n",
+            xml_escape(&skill.path.display().to_string())
+        ));
+        s.push_str("  </skill>\n");
+    }
+    s.push_str("</available_skills>");
+    s
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 impl SkillRegistry {
     pub fn new() -> Self {
         Self::default()

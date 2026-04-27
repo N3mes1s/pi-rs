@@ -68,3 +68,25 @@ fn atty_stdin() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
 }
+
+/// Expand a leading slash command in the user prompt for non-TUI modes.
+///
+/// `/autoresearch <goal>` becomes a plain `autoresearch: <goal>` user
+/// message; the agent picks up the autoresearch-create skill from the
+/// `<available_skills>` block in the system prompt (injected at startup)
+/// and reads `SKILL.md` itself.  Other slash commands pass through
+/// unchanged.
+pub fn expand_slash(prompt: &str, _startup: &Startup) -> String {
+    let trimmed = prompt.trim_start();
+    let Some((name, args)) = crate::slash::parse(trimmed) else {
+        return prompt.to_string();
+    };
+    if name != "autoresearch" {
+        return prompt.to_string();
+    }
+    let goal = args.trim();
+    if goal.is_empty() || matches!(goal, "off" | "clear" | "export") {
+        return prompt.to_string();
+    }
+    format!("autoresearch: {goal}")
+}
