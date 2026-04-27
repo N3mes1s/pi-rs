@@ -63,6 +63,14 @@ pub struct ExtensionKeybinding {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionHook {
+    /// One of: "tool_call" | "tool_result" | "assistant_message" | "user_message"
+    pub event: String,
+    /// Path to the executable (relative paths resolved against the extension root).
+    pub executable: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionManifest {
     pub name: String,
     #[serde(default)]
@@ -76,6 +84,8 @@ pub struct ExtensionManifest {
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub keybindings: Vec<ExtensionKeybinding>,
+    #[serde(default)]
+    pub hooks: Vec<ExtensionHook>,
 }
 
 #[derive(Debug, Clone)]
@@ -272,6 +282,124 @@ pub fn extension_tools(exts: &[LoadedExtension]) -> Vec<Arc<dyn Tool>> {
         }
     }
     out
+}
+
+// ── HookDispatcher ────────────────────────────────────────────────────────────
+
+/// Dispatches lifecycle events to registered extension hooks.
+///
+/// Build once via [`HookDispatcher::from_extensions`] and call
+/// [`HookDispatcher::dispatch`] at each interesting event.
+pub struct HookDispatcher {
+    /// event name → list of (extension_root, hook_executable, timeout)
+    per_event: std::collections::HashMap<String, Vec<(PathBuf, PathBuf, std::time::Duration)>>,
+}
+
+impl HookDispatcher {
+    /// Build a dispatcher from a slice of already-loaded extensions.
+    ///
+    /// Hook executables that are relative paths are resolved against
+    /// `extension.root`, mirroring [`LoadedExtension::executable_path`].
+    pub fn from_extensions(exts: &[LoadedExtension]) -> Self {
+        let mut per_event: std::collections::HashMap<
+            String,
+            Vec<(PathBuf, PathBuf, std::time::Duration)>,
+        > = std::collections::HashMap::new();
+
+        for ext in exts {
+            let timeout = ext.timeout();
+            for hook in &ext.manifest.hooks {
+                let exe_path = {
+                    let p = Path::new(&hook.executable);
+                    if p.is_absolute() {
+                        p.to_path_buf()
+                    } else {
+                        ext.root.join(p)
+                    }
+                };
+                per_event
+                    .entry(hook.event.clone())
+                    .or_default()
+                    .push((ext.root.clone(), exe_path, timeout));
+            }
+        }
+
+        Self { per_event }
+    }
+
+    /// Fire all hooks registered for `event`, writing `payload` as a single
+    /// JSON line to each hook's stdin.  Hooks run concurrently; errors are
+    /// logged via [`tracing::warn!`] and never propagate.
+    pub async fn dispatch(&self, event: &str, payload: &serde_json::Value) {
+        let hooks = match self.per_event.get(event) {
+            Some(h) if !h.is_empty() => h,
+            _ => return,
+        };
+
+        let line = match serde_json::to_string(payload) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("hook_dispatcher: failed to serialize payload for event `{event}`: {e}");
+                return;
+            }
+        };
+
+        let futs: Vec<_> = hooks
+            .iter()
+            .map(|(root, exe, timeout)| {
+                let line = line.clone();
+                let root = root.clone();
+                let exe = exe.clone();
+                let timeout = *timeout;
+                let event = event.to_string();
+                async move {
+                    let mut cmd = tokio::process::Command::new(&exe);
+                    cmd.current_dir(&root)
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null());
+
+                    let mut child = match cmd.spawn() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!(
+                                "hook_dispatcher: failed to spawn hook `{}` for event `{event}`: {e}",
+                                exe.display()
+                            );
+                            return;
+                        }
+                    };
+
+                    if let Some(stdin) = child.stdin.take() {
+                        use tokio::io::AsyncWriteExt;
+                        let mut stdin = stdin;
+                        let _ = stdin.write_all(line.as_bytes()).await;
+                        let _ = stdin.write_all(b"\n").await;
+                        let _ = stdin.shutdown().await;
+                    }
+
+                    match tokio::time::timeout(timeout, child.wait()).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                "hook_dispatcher: hook `{}` for event `{event}` wait error: {e}",
+                                exe.display()
+                            );
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "hook_dispatcher: hook `{}` for event `{event}` timed out after {}ms",
+                                exe.display(),
+                                timeout.as_millis()
+                            );
+                        }
+                    }
+                }
+            })
+            .collect();
+
+        futures::future::join_all(futs).await;
+    }
 }
 
 /// Run an extension command (slash-command style). Returns stdout.
