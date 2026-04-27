@@ -234,6 +234,14 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         // and a structured `display.ask` payload otherwise (the TUI picker
         // wiring is still pending).
         tools.register(Arc::new(crate::native::ask::AskTool));
+        // RFD 0005: subagents + `task` tool. Always registered when
+        // tools are enabled — discovery (project / user / bundled)
+        // happens lazily on the first invocation. The host must wrap
+        // its `session.prompt(...)` call in
+        // `crate::native::task::tool::with_runtime(handle, …)` for
+        // the tool to find a parent handle; otherwise the call returns
+        // a clean `is_error: true` result.
+        tools.register(Arc::new(crate::native::task::TaskTool::new()));
         // Native lsp tool (D1 + H5). Wired through `Settings::lsp` so
         // users opt in via the `lsp` block in settings.json. Defaults
         // keep the master switch off; the tool stays registered so the

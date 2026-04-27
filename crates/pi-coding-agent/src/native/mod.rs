@@ -8,6 +8,7 @@
 
 pub mod ask;
 pub mod lsp;
+pub mod task;
 pub mod todo;
 pub mod trajectory;
 pub mod ttsr;
