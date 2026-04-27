@@ -4,5 +4,6 @@
 //! tools.
 
 pub mod ask;
+pub mod lsp;
 pub mod todo;
 pub mod ttsr;
