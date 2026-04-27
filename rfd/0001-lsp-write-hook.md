@@ -1,9 +1,9 @@
 # RFD 0001 — LSP-on-write hook
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-27
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** 369f3e4
 
 ## Summary
 

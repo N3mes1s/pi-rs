@@ -32,5 +32,6 @@ crosses crate boundaries.
 | RFD  | Title                                            | Status     |
 | ---- | ------------------------------------------------ | ---------- |
 | 0000 | Template                                         | n/a        |
-| 0001 | LSP-on-write hook                                | Discussion |
+| 0001 | LSP-on-write hook                                | Implemented |
 | 0002 | Tier-5 follow-ups                                | Draft      |
+| 0003 | Adaptive thinking (Opus 4.7+)                    | Implemented |
