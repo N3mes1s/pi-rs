@@ -1278,7 +1278,23 @@ async fn handle_slash(
             SlashOutcome::Continue
         }
         "login" => {
-            let ep = pi_ai::oauth::OAuthEndpoints::anthropic();
+            // Resolve provider: default to "anthropic" when no arg is given.
+            let provider_arg = args.trim();
+            let provider_name = if provider_arg.is_empty() {
+                "anthropic"
+            } else {
+                provider_arg
+            };
+            let ep = match pi_ai::endpoints_for_provider(provider_name) {
+                Some(ep) => ep,
+                None => {
+                    view.transcript.blocks.push(crate::renderer::Block::Error(format!(
+                        "unknown provider {:?}. Supported: anthropic (claude), openai (chatgpt), copilot (github), gemini, antigravity",
+                        provider_name
+                    )));
+                    return SlashOutcome::Continue;
+                }
+            };
             let pkce = pi_ai::oauth::Pkce::new();
             let state = format!("pi-{}", std::process::id());
             let url = pi_ai::build_authorize_url(&ep, &pkce, &state);
@@ -1297,10 +1313,12 @@ async fn handle_slash(
                             startup
                                 .runtime_config
                                 .auth_storage
-                                .set("anthropic", tok.into_auth_method());
+                                .set(provider_name, tok.into_auth_method());
                             view.transcript
                                 .blocks
-                                .push(crate::renderer::Block::Note("logged in".into()));
+                                .push(crate::renderer::Block::Note(format!(
+                                    "logged in as {provider_name}"
+                                )));
                         }
                         Err(e) => view
                             .transcript

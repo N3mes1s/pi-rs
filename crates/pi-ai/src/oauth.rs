@@ -35,6 +35,72 @@ impl OAuthEndpoints {
             scope: "org:create_api_key user:profile user:inference".into(),
         }
     }
+
+    /// ChatGPT Plus / Pro subscription OAuth endpoints.
+    pub fn openai_subscription() -> Self {
+        Self {
+            authorize_url: "https://auth.openai.com/oauth/authorize".into(),
+            token_url: "https://auth.openai.com/oauth/token".into(),
+            client_id: "app_eYqaQy3Gj4Sc9XUSfL2bWWxn".into(),
+            redirect_uri: "http://localhost:54545/callback".into(),
+            scope: "openid profile email offline_access".into(),
+        }
+    }
+
+    /// GitHub Copilot subscription OAuth endpoints.
+    pub fn github_copilot() -> Self {
+        Self {
+            authorize_url: "https://github.com/login/oauth/authorize".into(),
+            token_url: "https://github.com/login/oauth/access_token".into(),
+            client_id: "Iv1.b507a08c87ecfe98".into(),
+            redirect_uri: "http://localhost:54545/callback".into(),
+            scope: "copilot read:user".into(),
+        }
+    }
+
+    /// Gemini CLI subscription OAuth endpoints.
+    pub fn gemini_cli() -> Self {
+        Self {
+            authorize_url: "https://accounts.google.com/o/oauth2/v2/auth".into(),
+            token_url: "https://oauth2.googleapis.com/token".into(),
+            client_id: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+                .into(),
+            redirect_uri: "http://localhost:54545/callback".into(),
+            scope: "openid email profile https://www.googleapis.com/auth/cloud-platform".into(),
+        }
+    }
+
+    /// Antigravity subscription OAuth endpoints.
+    pub fn antigravity() -> Self {
+        Self {
+            authorize_url: "https://accounts.google.com/o/oauth2/v2/auth".into(),
+            token_url: "https://oauth2.googleapis.com/token".into(),
+            client_id: "32555940559.apps.googleusercontent.com".into(),
+            redirect_uri: "http://localhost:54545/callback".into(),
+            scope: "openid email profile https://www.googleapis.com/auth/cloud-platform".into(),
+        }
+    }
+}
+
+/// Return the pre-configured [`OAuthEndpoints`] for a provider name.
+///
+/// Supported names (case-sensitive):
+/// - `"anthropic"` / `"claude"` → Anthropic (Claude Pro/Max)
+/// - `"openai"` / `"chatgpt"` → OpenAI (ChatGPT Plus/Pro)
+/// - `"copilot"` / `"github"` → GitHub Copilot
+/// - `"gemini"` → Gemini CLI
+/// - `"antigravity"` → Antigravity
+///
+/// Returns `None` for any unrecognised name.
+pub fn endpoints_for_provider(name: &str) -> Option<OAuthEndpoints> {
+    match name {
+        "anthropic" | "claude" => Some(OAuthEndpoints::anthropic()),
+        "openai" | "chatgpt" => Some(OAuthEndpoints::openai_subscription()),
+        "copilot" | "github" => Some(OAuthEndpoints::github_copilot()),
+        "gemini" => Some(OAuthEndpoints::gemini_cli()),
+        "antigravity" => Some(OAuthEndpoints::antigravity()),
+        _ => None,
+    }
 }
 
 /// In-memory PKCE pair: verifier (kept private) and challenge (sent to
