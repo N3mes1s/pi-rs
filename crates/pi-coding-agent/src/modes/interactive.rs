@@ -960,6 +960,14 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
             }
         }
     }
+
+    // Print resume hint AFTER the RawGuard drops (terminal restored).
+    let session_id = session.id().to_string();
+    drop(_guard);
+    eprintln!();
+    eprintln!("To resume this session, run:");
+    eprintln!("  pi -c   # continue most recent");
+    eprintln!("  pi -r {session_id}   # resume specifically: {session_id}");
     Ok(())
 }
 
