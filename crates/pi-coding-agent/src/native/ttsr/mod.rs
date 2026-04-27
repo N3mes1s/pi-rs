@@ -18,8 +18,10 @@
 //! cross-crate refactor and is deferred. The current module is
 //! complete-and-tested in isolation so the wiring step is mechanical.
 
+pub mod interceptor;
 pub mod matcher;
 pub mod rule;
 
+pub use interceptor::TtsrInterceptor;
 pub use matcher::{Matcher, MatchResult};
 pub use rule::{render_reminder, Rule, RuleSet, default_dir};

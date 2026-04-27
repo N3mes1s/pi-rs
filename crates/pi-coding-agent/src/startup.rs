@@ -301,6 +301,25 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     ));
     let gate_ask_is_approve = matches!(cli.effective_mode(), crate::cli::Mode::Interactive);
 
+    // Load TTSR rules from `~/.pi/agent/ttsr/` (best-effort: missing
+    // dir, malformed frontmatter, or invalid regex are silently
+    // skipped). Wrapped in an `Arc<RuleSet>` so the interceptor and
+    // any debug surface can share it.
+    let stream_interceptor: Option<std::sync::Arc<dyn pi_agent_core::StreamInterceptor>> = {
+        let dir = crate::native::ttsr::default_dir();
+        let rs = match dir {
+            Some(d) if d.is_dir() => crate::native::ttsr::RuleSet::load_dir(&d),
+            _ => crate::native::ttsr::RuleSet::new(),
+        };
+        if rs.is_empty() {
+            None
+        } else {
+            let arc_rs = std::sync::Arc::new(rs);
+            Some(std::sync::Arc::new(crate::native::ttsr::TtsrInterceptor::new(arc_rs))
+                as std::sync::Arc<dyn pi_agent_core::StreamInterceptor>)
+        }
+    };
+
     let runtime_config = RuntimeConfig {
         session_manager,
         auth_storage: auth,
@@ -313,6 +332,7 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         provider_factory: None,
         tool_gate: Some(auto_gate as std::sync::Arc<dyn pi_agent_core::ToolGate>),
         gate_ask_is_approve,
+        stream_interceptor,
     };
 
     Ok(Startup {

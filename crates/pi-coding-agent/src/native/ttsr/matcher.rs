@@ -58,6 +58,19 @@ impl<'a> Matcher<'a> {
         self.fired.contains(&rule.name)
     }
 
+    /// Mutable access to the internal buffer — used by the
+    /// [`super::interceptor::TtsrInterceptor`] adapter to swap state
+    /// in and out across `&self` calls.
+    pub fn buffer_mut(&mut self) -> &mut String {
+        &mut self.buffer
+    }
+
+    /// Mutable access to the fired-set (same rationale as
+    /// [`Matcher::buffer_mut`]).
+    pub fn fired_mut(&mut self) -> &mut HashSet<String> {
+        &mut self.fired
+    }
+
     /// Feed one delta. Returns `Fired` for the *first* rule that matches
     /// against the accumulated buffer and hasn't fired yet. Once
     /// returned, the rule is recorded in `fired`.
