@@ -128,6 +128,14 @@ pub struct View {
     /// Cached snapshot of the autoresearch dashboard. `None` when no
     /// autoresearch session exists in the current cwd.
     pub dashboard_snapshot: Option<DashboardSnapshot>,
+    /// Cached `git status` for the powerline footer (2-second TTL).
+    /// Wrapped in `Arc` so the build_frame helper can borrow it cheaply
+    /// without forcing the rest of `View` to be `Sync`.
+    pub git_status_cache: std::sync::Arc<crate::footer::GitStatusCache>,
+    /// Resolved `context_window` for the active model — used to render
+    /// the `ctx:N%` segment in the powerline footer. `None` skips the
+    /// segment.
+    pub context_window: Option<u32>,
 }
 
 /// How the autoresearch dashboard should be rendered above the editor.
@@ -168,6 +176,8 @@ impl View {
             autoresearch_active: false,
             dashboard_mode: DashboardMode::Inline,
             dashboard_snapshot: None,
+            git_status_cache: std::sync::Arc::new(crate::footer::GitStatusCache::default()),
+            context_window: None,
         }
     }
 }
@@ -771,8 +781,15 @@ fn build_frame(
         }
     }
 
-    // Footer.
-    let mut footer = view.transcript.footer(theme, model, cwd);
+    // Footer (powerline-style: model ▶ cwd ▶ git ▶ usage ▶ ctx).
+    let git = view.git_status_cache.get(cwd);
+    let mut footer = view.transcript.footer_powerline(
+        theme,
+        model,
+        cwd,
+        git.as_ref(),
+        view.context_window,
+    );
     if view.scoped_models {
         // Highlight that model changes will only apply to the next message.
         footer.spans.push(Span::coloured(
@@ -838,6 +855,19 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
 
     let mut view = View::new(startup.keymap.clone(), startup.settings.thinking);
     view.scoped_models = startup.settings.scoped_models;
+    // Resolve context_window for the active model so the footer can
+    // render ctx:N%. Falls back to None when the model isn't in the
+    // registry (custom OpenAI-compat endpoints, etc.).
+    view.context_window = {
+        let s = &startup.settings;
+        let key = format!("{}/{}", s.provider, s.model);
+        startup
+            .runtime_config
+            .model_registry
+            .resolve(&key)
+            .or_else(|| startup.runtime_config.model_registry.resolve(&s.model))
+            .map(|(_, m)| m.context_window)
+    };
 
     // If the cwd already has an autoresearch session, populate the dashboard
     // widget so the user sees it on first render.

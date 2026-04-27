@@ -27,6 +27,7 @@ pub mod cli;
 pub mod cmd;
 pub mod context;
 pub mod extensions;
+pub mod footer;
 pub mod keymap;
 pub mod modes;
 pub mod native;
