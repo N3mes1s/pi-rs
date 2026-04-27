@@ -1525,6 +1525,29 @@ async fn handle_slash(
         }
         "__clone_pick" => SlashOutcome::Continue,
         other => {
+            // /skill:<name> [args] — explicit invocation of a registered skill.
+            // Injects the SKILL.md body + trailing args as the next user
+            // message so the agent receives the full instruction set.
+            if let Some(skill_name) = other.strip_prefix("skill:") {
+                if let Some(skill) = startup.skills.get(skill_name) {
+                    let arg = args.trim();
+                    let mut msg = String::new();
+                    msg.push_str(&format!("# Skill: {}\n\n", skill.name));
+                    msg.push_str(&skill.body);
+                    if !arg.is_empty() {
+                        msg.push_str("\n\n---\n\n");
+                        msg.push_str(arg);
+                    }
+                    return SlashOutcome::Submit(msg);
+                } else {
+                    view.transcript
+                        .blocks
+                        .push(crate::renderer::Block::Error(format!(
+                            "unknown skill: {skill_name}"
+                        )));
+                    return SlashOutcome::Continue;
+                }
+            }
             if let Some(cmd) = slash.get(other) {
                 match &cmd.kind {
                     SlashKind::Template { body } => {

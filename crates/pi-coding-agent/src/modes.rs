@@ -74,13 +74,39 @@ fn atty_stdin() -> bool {
 /// `/autoresearch <goal>` becomes a plain `autoresearch: <goal>` user
 /// message; the agent picks up the autoresearch-create skill from the
 /// `<available_skills>` block in the system prompt (injected at startup)
-/// and reads `SKILL.md` itself.  Other slash commands pass through
-/// unchanged.
-pub fn expand_slash(prompt: &str, _startup: &Startup) -> String {
+/// and reads `SKILL.md` itself.
+///
+/// `/skill:<name> [args]` injects the named skill's SKILL.md body
+/// (looked up in `startup.skills`) followed by the trailing args.
+/// Unknown skills pass through unchanged so the agent at least sees the
+/// raw text.
+///
+/// Other slash commands pass through unchanged.
+pub fn expand_slash(prompt: &str, startup: &Startup) -> String {
+    expand_slash_with(prompt, &startup.skills)
+}
+
+/// Lower-level variant of [`expand_slash`] taking just a [`SkillRegistry`].
+/// Exposed for unit testing without having to build a full [`Startup`].
+pub fn expand_slash_with(prompt: &str, skills: &crate::skills::SkillRegistry) -> String {
     let trimmed = prompt.trim_start();
     let Some((name, args)) = crate::slash::parse(trimmed) else {
         return prompt.to_string();
     };
+    if let Some(skill_name) = name.strip_prefix("skill:") {
+        if let Some(skill) = skills.get(skill_name) {
+            let arg = args.trim();
+            let mut msg = String::new();
+            msg.push_str(&format!("# Skill: {}\n\n", skill.name));
+            msg.push_str(&skill.body);
+            if !arg.is_empty() {
+                msg.push_str("\n\n---\n\n");
+                msg.push_str(arg);
+            }
+            return msg;
+        }
+        return prompt.to_string();
+    }
     if name != "autoresearch" {
         return prompt.to_string();
     }
