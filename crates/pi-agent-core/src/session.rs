@@ -47,6 +47,45 @@ pub enum SessionEntryKind {
         summary: String,
         replaced_ids: Vec<String>,
     },
+    /// Records that a context file (AGENTS.md / CLAUDE.md / @-ref) was
+    /// loaded into this session's prompt. Powers the trajectory recorder
+    /// and the AGENTS.md evolution oracle.
+    ContextLoad {
+        source: String,
+        bytes: u64,
+        tokens: Option<u64>,
+    },
+    /// Win/loss verdict appended at session end (or later, out-of-band by
+    /// the evolve daemon). Consumed by the benchmark harness.
+    Outcome {
+        success: bool,
+        source: OutcomeSource,
+        score: Option<f32>,
+        notes: Option<String>,
+    },
+    /// Identifies which AGENTS.md candidate was active for this session.
+    /// Used to attribute outcomes back to specific evolution generations.
+    EvolveMarker {
+        agents_md_hash: String,
+        generation: u32,
+        lineage: Vec<String>,
+    },
+}
+
+/// How an [`SessionEntryKind::Outcome`] was derived. Replay-sourced
+/// outcomes are tagged so the benchmark harness can exclude them from
+/// future generations (preventing self-reinforcing loops).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutcomeSource {
+    /// User explicitly tagged the session (`:up` / `:down`).
+    Explicit,
+    /// Derived from git / test / lint / loop-detection signals.
+    Heuristic,
+    /// Smol-model judge scored the session.
+    LlmJudge,
+    /// Synthetic rollout produced during evolution benchmarking.
+    Replay,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

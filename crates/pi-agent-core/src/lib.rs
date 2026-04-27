@@ -16,7 +16,7 @@ pub use runtime::{
     ProviderFactory, RuntimeConfig, ToolGate, ToolGateOutcome,
 };
 pub use session::{
-    SessionEntry, SessionEntryKind, SessionManager, SessionMeta, SessionTree,
+    OutcomeSource, SessionEntry, SessionEntryKind, SessionManager, SessionMeta, SessionTree,
 };
 pub use settings::Settings;
 pub use system::default_system_prompt;

@@ -75,6 +75,14 @@ pub fn format_tree_entry(entry: &pi_agent_core::SessionEntry) -> String {
         SessionEntryKind::Meta { .. } => ("meta", String::new()),
         SessionEntryKind::SystemPrompt { text } => ("system", text.clone()),
         SessionEntryKind::Usage { .. } => ("usage", String::new()),
+        SessionEntryKind::ContextLoad { source, .. } => ("context_load", source.clone()),
+        SessionEntryKind::Outcome { success, notes, .. } => (
+            if *success { "outcome:win" } else { "outcome:loss" },
+            notes.clone().unwrap_or_default(),
+        ),
+        SessionEntryKind::EvolveMarker { generation, .. } => {
+            return format!("evolve_marker  gen={generation}");
+        }
     };
 
     let snippet = short_text(&raw_text, 60);
