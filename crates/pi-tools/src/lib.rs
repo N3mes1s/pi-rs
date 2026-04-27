@@ -116,7 +116,7 @@ impl ToolRegistry {
     }
 }
 
-pub(crate) fn resolve_path(ctx: &ToolContext, p: &str) -> PathBuf {
+pub fn resolve_path(ctx: &ToolContext, p: &str) -> PathBuf {
     let expanded = shellexpand::tilde(p).into_owned();
     let path = Path::new(&expanded);
     if path.is_absolute() {

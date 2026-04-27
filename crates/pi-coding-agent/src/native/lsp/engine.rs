@@ -239,6 +239,25 @@ impl LspEngine {
         Ok(client.send_request("textDocument/diagnostic", params).await?)
     }
 
+    /// `textDocument/formatting` — full-document formatting (LSP 3.17
+    /// §3.17.13). Returns `TextEdit[]` (or `null`) verbatim. Sends
+    /// conventional defaults for `FormattingOptions`; per-file overrides
+    /// are out of scope (see RFD 0002 P1 0007).
+    pub async fn formatting(&self, file: &Path) -> Result<Value, EngineError> {
+        let client = self.prepare(file).await?;
+        let params = json!({
+            "textDocument": { "uri": Self::file_uri(file) },
+            "options": {
+                "tabSize": 4,
+                "insertSpaces": true,
+                "trimTrailingWhitespace": true,
+                "insertFinalNewline": true,
+                "trimFinalNewlines": true,
+            },
+        });
+        Ok(client.send_request("textDocument/formatting", params).await?)
+    }
+
     pub async fn definition(
         &self,
         file: &Path,
