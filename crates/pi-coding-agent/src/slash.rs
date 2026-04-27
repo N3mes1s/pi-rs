@@ -60,6 +60,14 @@ impl SlashRegistry {
                 "autoresearch",
                 "Autonomous experiment loop (off | clear | export | <text>)",
             ),
+            (
+                "background",
+                "Detach UI but keep the agent running (not yet implemented)",
+            ),
+            (
+                "skill",
+                "Invoke an agent-skill explicitly: /skill:<name> [args]",
+            ),
         ] {
             self.inner.insert(
                 name.into(),

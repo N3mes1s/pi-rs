@@ -1671,6 +1671,14 @@ async fn handle_slash(
             SlashOutcome::Continue
         }
         "__clone_pick" => SlashOutcome::Continue,
+        "background" => {
+            view.transcript.blocks.push(crate::renderer::Block::Note(
+                "[/background: detach mode is not yet implemented. \
+                 The agent keeps running here in the foreground.]"
+                    .to_string(),
+            ));
+            SlashOutcome::Continue
+        }
         other => {
             // /skill:<name> [args] — explicit invocation of a registered skill.
             // Injects the SKILL.md body + trailing args as the next user
