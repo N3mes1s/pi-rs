@@ -144,16 +144,12 @@ impl Provider for AnthropicProvider {
                     .collect(),
             );
         }
-        match req.thinking {
-            ThinkingLevel::Off => {}
-            level => {
-                let budget = match level {
-                    ThinkingLevel::Low => 4_000,
-                    ThinkingLevel::Medium => 16_000,
-                    ThinkingLevel::High => 32_000,
-                    _ => 0,
-                };
-                body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+        if !matches!(req.thinking, ThinkingLevel::Off) {
+            let fragments = body_thinking_fields(req.thinking, &model.id);
+            if let Some(obj) = fragments.as_object() {
+                for (k, v) in obj {
+                    body[k] = v.clone();
+                }
             }
         }
 
@@ -350,5 +346,79 @@ impl Provider for AnthropicProvider {
 
         let _ = tool_inputs;
         Ok(Box::pin(s))
+    }
+}
+
+fn uses_adaptive_thinking(model_id: &str) -> bool {
+    matches!(
+        model_id,
+        "claude-opus-4-7" | "claude-opus-4-6" | "claude-opus-4-5" | "claude-sonnet-4-6"
+    ) || model_id.starts_with("claude-mythos-")
+}
+
+fn body_thinking_fields(level: ThinkingLevel, model_id: &str) -> Value {
+    if matches!(level, ThinkingLevel::Off) {
+        return json!({});
+    }
+    if uses_adaptive_thinking(model_id) {
+        let effort = match level {
+            ThinkingLevel::Low => "low",
+            ThinkingLevel::Medium => "medium",
+            ThinkingLevel::High => "high",
+            ThinkingLevel::Off => unreachable!(),
+        };
+        json!({
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": effort},
+        })
+    } else {
+        let budget = match level {
+            ThinkingLevel::Low => 4_000,
+            ThinkingLevel::Medium => 16_000,
+            ThinkingLevel::High => 32_000,
+            ThinkingLevel::Off => unreachable!(),
+        };
+        json!({
+            "thinking": {"type": "enabled", "budget_tokens": budget},
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adaptive_thinking_model_detection() {
+        assert!(uses_adaptive_thinking("claude-opus-4-7"));
+        assert!(uses_adaptive_thinking("claude-opus-4-6"));
+        assert!(uses_adaptive_thinking("claude-opus-4-5"));
+        assert!(uses_adaptive_thinking("claude-sonnet-4-6"));
+        assert!(uses_adaptive_thinking("claude-mythos-foo"));
+        assert!(!uses_adaptive_thinking("claude-haiku-4-5-20251001"));
+        assert!(!uses_adaptive_thinking("claude-3-7-sonnet-20250219"));
+    }
+
+    #[test]
+    fn thinking_fields_adaptive_for_opus_4_7() {
+        let v = body_thinking_fields(ThinkingLevel::Medium, "claude-opus-4-7");
+        assert_eq!(
+            v,
+            json!({
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": "medium"},
+            })
+        );
+    }
+
+    #[test]
+    fn thinking_fields_legacy_for_haiku() {
+        let v = body_thinking_fields(ThinkingLevel::Medium, "claude-haiku-4-5-20251001");
+        assert_eq!(
+            v,
+            json!({
+                "thinking": {"type": "enabled", "budget_tokens": 16000},
+            })
+        );
     }
 }
