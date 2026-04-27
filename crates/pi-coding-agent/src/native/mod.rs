@@ -11,3 +11,4 @@ pub mod lsp;
 pub mod todo;
 pub mod trajectory;
 pub mod ttsr;
+pub mod worktree;

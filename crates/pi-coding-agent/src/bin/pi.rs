@@ -70,12 +70,62 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(async move {
-        let startup = startup::assemble(cli.clone()).await?;
-        match cli.effective_mode() {
+        let mut startup = startup::assemble(cli.clone()).await?;
+
+        // RFD 0006: --worktree wraps the whole agent run in an
+        // isolated git worktree. We swap the runtime config's cwd to
+        // the worktree dir, run normally, then reconcile the result.
+        let mut wt_guard: Option<pi_coding_agent::native::worktree::WorktreeGuard> = None;
+        let mut wt_finish: Option<(
+            std::path::PathBuf,
+            std::path::PathBuf,
+            pi_coding_agent::native::worktree::WorktreeBaseline,
+            String,
+            pi_coding_agent::native::worktree::ReconcileMode,
+        )> = None;
+        if cli.worktree {
+            use pi_coding_agent::native::worktree as wt;
+            let repo_root = wt::git::repo_root(&startup.runtime_config.cwd)
+                .await
+                .unwrap_or_else(|_| startup.runtime_config.cwd.clone());
+            let id = cli
+                .worktree_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let dir = wt::ensure(&repo_root, &id).await?;
+            let baseline = wt::capture_baseline(&repo_root).await?;
+            wt::apply_baseline(&dir, &baseline).await?;
+            startup.runtime_config.cwd = dir.clone();
+            let mode = match cli.worktree_mode.as_deref() {
+                Some("patch") => wt::ReconcileMode::Patch,
+                _ => wt::ReconcileMode::Branch,
+            };
+            wt_guard = Some(wt::WorktreeGuard::new(dir.clone()));
+            wt_finish = Some((repo_root, dir, baseline, id, mode));
+        }
+
+        let agent_result = match cli.effective_mode() {
             pi_coding_agent::cli::Mode::Print => modes::print::run(startup).await,
             pi_coding_agent::cli::Mode::Json => modes::json::run(startup).await,
             pi_coding_agent::cli::Mode::Rpc => modes::rpc::run(startup).await,
             pi_coding_agent::cli::Mode::Interactive => modes::interactive::run(startup).await,
+        };
+
+        if let Some((repo_root, dir, baseline, id, mode)) = wt_finish {
+            use pi_coding_agent::native::worktree as wt;
+            match wt::finish(&repo_root, &dir, &baseline, &id, mode).await {
+                Ok(rec) => {
+                    if let Ok(s) = serde_json::to_string(&rec) {
+                        println!("{s}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("worktree reconcile failed: {e}");
+                }
+            }
         }
+        // Drop guard ⇒ cleanup.
+        drop(wt_guard);
+        agent_result
     })
 }
