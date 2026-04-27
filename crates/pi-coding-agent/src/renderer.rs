@@ -206,6 +206,74 @@ impl Transcript {
         }
     }
 
+    /// Powerline-style footer used by the interactive TUI. Format:
+    ///
+    /// ```text
+    ///  model ▶ cwd ▶ git: branch ●S+M ▶ in:N out:N $X.XXXX ▶ ctx:N%
+    /// ```
+    ///
+    /// Sections that don't apply (no git repo, no `context_window`)
+    /// are skipped. The ▶ separator is rendered in the muted theme
+    /// colour; segment text uses the accent / muted palette.
+    pub fn footer_powerline(
+        &self,
+        theme: &Theme,
+        model: &str,
+        cwd: &std::path::Path,
+        git: Option<&crate::footer::GitStatus>,
+        context_window: Option<u32>,
+    ) -> Line {
+        let muted = theme.muted.to_crossterm();
+        let accent = theme.accent.to_crossterm();
+        let mut spans: Vec<Span> = Vec::new();
+        // leading space so the first arrow doesn't kiss the edge
+        spans.push(Span::plain(" ".to_string()));
+
+        let push_sep = |spans: &mut Vec<Span>| {
+            spans.push(Span::coloured(" ▶ ".to_string(), muted));
+        };
+
+        // 1. model
+        spans.push(Span::coloured(model.to_string(), accent));
+
+        // 2. cwd (compact: replace $HOME with ~)
+        let cwd_display = compact_cwd(cwd);
+        push_sep(&mut spans);
+        spans.push(Span::coloured(cwd_display, muted));
+
+        // 3. git
+        if let Some(g) = git {
+            push_sep(&mut spans);
+            spans.push(Span::coloured(crate::footer::format_git(g), muted));
+        }
+
+        // 4. usage
+        push_sep(&mut spans);
+        spans.push(Span::coloured(
+            format!(
+                "in:{} out:{} ${:.4}",
+                self.usage_total.input_tokens,
+                self.usage_total.output_tokens,
+                self.usage_total.cost_usd,
+            ),
+            muted,
+        ));
+
+        // 5. ctx percentage (input-tokens / context_window)
+        if let Some(cw) = context_window {
+            if cw > 0 {
+                let pct = (self.usage_total.input_tokens as f64 / cw as f64) * 100.0;
+                let pct = pct.clamp(0.0, 100.0);
+                push_sep(&mut spans);
+                spans.push(Span::coloured(format!("ctx:{:.0}%", pct), muted));
+            }
+        }
+
+        // trailing space so the closing edge breathes
+        spans.push(Span::plain(" ".to_string()));
+        Line { spans }
+    }
+
     pub fn tail(&self, n: usize) -> &[Block] {
         let len = self.blocks.len();
         let start = len.saturating_sub(n);
@@ -268,4 +336,19 @@ fn wrap_line(s: &str, width: usize) -> Vec<String> {
         out.push(current);
     }
     out
+}
+
+/// Replace the user's `$HOME` with `~` for a tidier footer. If `cwd`
+/// can't be made relative to home (e.g. /tmp/foo) the absolute path
+/// is returned unchanged.
+fn compact_cwd(cwd: &std::path::Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rest) = cwd.strip_prefix(&home) {
+            if rest.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", rest.display());
+        }
+    }
+    cwd.display().to_string()
 }

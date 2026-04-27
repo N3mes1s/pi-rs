@@ -38,6 +38,24 @@ fn main() -> anyhow::Result<()> {
             .build()?;
         return rt.block_on(cmd::run_refresh_models());
     }
+    if cli.internal_evolve_tick {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return rt.block_on(cmd::run_internal_evolve_tick());
+    }
+    if let Some(verb) = &cli.evolve {
+        return cmd::run_evolve(verb);
+    }
+    if let Some(target) = &cli.flamegraph {
+        return cmd::run_flamegraph(target);
+    }
+    if let Some(target) = &cli.share {
+        return cmd::run_share(target);
+    }
+    if let Some(spec) = &cli.policy {
+        return cmd::run_policy(spec);
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(

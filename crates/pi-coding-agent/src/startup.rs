@@ -68,6 +68,16 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     if let Some(t) = &cli.tools {
         settings.tools = t.split(',').map(|s| s.trim().to_string()).collect();
     }
+    // CLI / env overrides for model role routing (B1).
+    if let Some(s) = &cli.smol {
+        settings.roles.smol = Some(s.clone());
+    }
+    if let Some(s) = &cli.slow {
+        settings.roles.slow = Some(s.clone());
+    }
+    if let Some(s) = &cli.plan {
+        settings.roles.plan = Some(s.clone());
+    }
 
     // (autoresearch tools are registered after the base ToolRegistry is built; see below)
 
@@ -114,6 +124,16 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     // 7. context files (AGENTS.md / CLAUDE.md).
     let context_files: Vec<ContextFile> = if cli.no_context_files {
         Vec::new()
+    } else if let Some(override_path) = &cli.agents_md {
+        // Evolution-daemon path: benchmark candidate AGENTS.md without
+        // touching the live one. Skip discovery, use only the override.
+        match std::fs::read_to_string(override_path) {
+            Ok(content) => vec![ContextFile {
+                path: override_path.clone(),
+                content,
+            }],
+            Err(_) => Vec::new(),
+        }
     } else {
         discover_context_files(&cwd, &agent_dir(), &["AGENTS.md", "CLAUDE.md"])
     };
@@ -208,6 +228,21 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         tools.register(Arc::new(crate::autoresearch::tools::InitExperimentTool));
         tools.register(Arc::new(crate::autoresearch::tools::RunExperimentTool));
         tools.register(Arc::new(crate::autoresearch::tools::LogExperimentTool));
+        // Native todo tool (B2). Persists to <cwd>/.pi/todo.json.
+        tools.register(Arc::new(crate::native::todo::TodoTool));
+        // Native ask tool (B3). Returns is_error in non-interactive modes
+        // and a structured `display.ask` payload otherwise (the TUI picker
+        // wiring is still pending).
+        tools.register(Arc::new(crate::native::ask::AskTool));
+        // Native lsp tool (D1). Inert by default — the master switch in
+        // `LspConfig::default()` is off, so the engine won't spawn any
+        // language servers until a user opts in (currently via
+        // per-process config; settings.toml wiring is a follow-up). The
+        // tool itself is always registered so the agent can at least
+        // call the `status` op and see "no servers running".
+        tools.register(Arc::new(crate::native::lsp::LspTool::new(
+            crate::native::lsp::LspConfig::default(),
+        )));
     }
 
     let loaded_exts = extensions::discover(&ext_roots);
@@ -252,13 +287,35 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         crate::auto_approve::Policy::default_safe()
     };
     auto_policy.resolve_inheritance();
+    // Default mode per surface:
+    // - interactive  → Ask (every call confirmed in UI)
+    // - print/json/rpc → AutoPolicy (no UI to ask in, so default to
+    //   policy-only — denies dangerous calls but doesn't block on
+    //   benign ones the policy allows). Previously defaulted to Ask
+    //   here too which made non-interactive bash unusable without
+    //   `--auto-approve yolo`.
     let auto_mode = cli
         .auto_approve
         .as_deref()
         .and_then(crate::auto_approve::Mode::parse)
-        .unwrap_or_default();
+        .unwrap_or_else(|| match cli.effective_mode() {
+            crate::cli::Mode::Interactive => crate::auto_approve::Mode::Ask,
+            _ => crate::auto_approve::Mode::AutoPolicy,
+        });
     let judge = if matches!(auto_mode, crate::auto_approve::Mode::AutoJudge) {
         let mut jc = crate::auto_approve::JudgeConfig::default();
+        // Default the judge to settings.roles.smol when present (B1):
+        // the smol role is *the* place to put a cheap structured-output
+        // model, so the judge picks it up automatically.
+        if let Some(smol) = &settings.roles.smol {
+            if let Some((p, m)) = smol.split_once('/') {
+                jc.provider = p.to_string();
+                jc.model = m.to_string();
+            } else {
+                jc.model = smol.clone();
+            }
+        }
+        // CLI flag still wins if explicitly given.
         if let Some(m) = &cli.auto_approve_model {
             jc.model = m.clone();
         }
@@ -273,6 +330,25 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     ));
     let gate_ask_is_approve = matches!(cli.effective_mode(), crate::cli::Mode::Interactive);
 
+    // Load TTSR rules from `~/.pi/agent/ttsr/` (best-effort: missing
+    // dir, malformed frontmatter, or invalid regex are silently
+    // skipped). Wrapped in an `Arc<RuleSet>` so the interceptor and
+    // any debug surface can share it.
+    let stream_interceptor: Option<std::sync::Arc<dyn pi_agent_core::StreamInterceptor>> = {
+        let dir = crate::native::ttsr::default_dir();
+        let rs = match dir {
+            Some(d) if d.is_dir() => crate::native::ttsr::RuleSet::load_dir(&d),
+            _ => crate::native::ttsr::RuleSet::new(),
+        };
+        if rs.is_empty() {
+            None
+        } else {
+            let arc_rs = std::sync::Arc::new(rs);
+            Some(std::sync::Arc::new(crate::native::ttsr::TtsrInterceptor::new(arc_rs))
+                as std::sync::Arc<dyn pi_agent_core::StreamInterceptor>)
+        }
+    };
+
     let runtime_config = RuntimeConfig {
         session_manager,
         auth_storage: auth,
@@ -285,6 +361,7 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         provider_factory: None,
         tool_gate: Some(auto_gate as std::sync::Arc<dyn pi_agent_core::ToolGate>),
         gate_ask_is_approve,
+        stream_interceptor,
     };
 
     Ok(Startup {

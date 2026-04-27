@@ -13,10 +13,10 @@ pub use context::{discover_context_files, ContextFile};
 pub use event::{AgentEvent, AgentEventKind, EventSender};
 pub use runtime::{
     create_agent_session, AgentSession, AgentSessionRuntime, DefaultProviderFactory,
-    ProviderFactory, RuntimeConfig, ToolGate, ToolGateOutcome,
+    InterceptAction, ProviderFactory, RuntimeConfig, StreamInterceptor, ToolGate, ToolGateOutcome,
 };
 pub use session::{
-    SessionEntry, SessionEntryKind, SessionManager, SessionMeta, SessionTree,
+    OutcomeSource, SessionEntry, SessionEntryKind, SessionManager, SessionMeta, SessionTree,
 };
-pub use settings::Settings;
+pub use settings::{EvolveSettings, Settings};
 pub use system::default_system_prompt;

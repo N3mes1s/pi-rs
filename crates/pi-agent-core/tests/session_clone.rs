@@ -76,6 +76,9 @@ fn clone_branch_returns_new_id_and_replays_entries() {
             SessionEntryKind::Compaction { .. } => "compaction",
             SessionEntryKind::SystemPrompt { .. } => "system_prompt",
             SessionEntryKind::Usage { .. } => "usage",
+            SessionEntryKind::ContextLoad { .. } => "context_load",
+            SessionEntryKind::Outcome { .. } => "outcome",
+            SessionEntryKind::EvolveMarker { .. } => "evolve_marker",
         })
         .collect();
     assert_eq!(

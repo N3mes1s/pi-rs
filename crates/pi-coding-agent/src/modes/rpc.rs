@@ -66,6 +66,14 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
         }
     }
     printer.abort();
+
+    let _ = crate::native::trajectory::finalize_for_runtime(
+        &startup.runtime_config,
+        &startup.settings,
+        session.id(),
+    )
+    .await;
+
     Ok(())
 }
 

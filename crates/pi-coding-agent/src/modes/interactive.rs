@@ -128,6 +128,14 @@ pub struct View {
     /// Cached snapshot of the autoresearch dashboard. `None` when no
     /// autoresearch session exists in the current cwd.
     pub dashboard_snapshot: Option<DashboardSnapshot>,
+    /// Cached `git status` for the powerline footer (2-second TTL).
+    /// Wrapped in `Arc` so the build_frame helper can borrow it cheaply
+    /// without forcing the rest of `View` to be `Sync`.
+    pub git_status_cache: std::sync::Arc<crate::footer::GitStatusCache>,
+    /// Resolved `context_window` for the active model — used to render
+    /// the `ctx:N%` segment in the powerline footer. `None` skips the
+    /// segment.
+    pub context_window: Option<u32>,
 }
 
 /// How the autoresearch dashboard should be rendered above the editor.
@@ -168,6 +176,8 @@ impl View {
             autoresearch_active: false,
             dashboard_mode: DashboardMode::Inline,
             dashboard_snapshot: None,
+            git_status_cache: std::sync::Arc::new(crate::footer::GitStatusCache::default()),
+            context_window: None,
         }
     }
 }
@@ -771,8 +781,15 @@ fn build_frame(
         }
     }
 
-    // Footer.
-    let mut footer = view.transcript.footer(theme, model, cwd);
+    // Footer (powerline-style: model ▶ cwd ▶ git ▶ usage ▶ ctx).
+    let git = view.git_status_cache.get(cwd);
+    let mut footer = view.transcript.footer_powerline(
+        theme,
+        model,
+        cwd,
+        git.as_ref(),
+        view.context_window,
+    );
     if view.scoped_models {
         // Highlight that model changes will only apply to the next message.
         footer.spans.push(Span::coloured(
@@ -838,6 +855,19 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
 
     let mut view = View::new(startup.keymap.clone(), startup.settings.thinking);
     view.scoped_models = startup.settings.scoped_models;
+    // Resolve context_window for the active model so the footer can
+    // render ctx:N%. Falls back to None when the model isn't in the
+    // registry (custom OpenAI-compat endpoints, etc.).
+    view.context_window = {
+        let s = &startup.settings;
+        let key = format!("{}/{}", s.provider, s.model);
+        startup
+            .runtime_config
+            .model_registry
+            .resolve(&key)
+            .or_else(|| startup.runtime_config.model_registry.resolve(&s.model))
+            .map(|(_, m)| m.context_window)
+    };
 
     // If the cwd already has an autoresearch session, populate the dashboard
     // widget so the user sees it on first render.
@@ -1039,6 +1069,16 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
     // Print resume hint AFTER the RawGuard drops (terminal restored).
     let session_id = session.id().to_string();
     drop(_guard);
+
+    // Trajectory finalize before the resume hint so the user sees the
+    // hint last (most useful when they're scrolling back).
+    let _ = crate::native::trajectory::finalize_for_runtime(
+        &startup.runtime_config,
+        &startup.settings,
+        &session_id,
+    )
+    .await;
+
     eprintln!();
     eprintln!("To resume this session, run:");
     eprintln!("  pi -c   # continue most recent");
@@ -1206,24 +1246,47 @@ async fn handle_slash(
         "model" => {
             let target = args.trim();
             if target.is_empty() {
-                let items: Vec<PickItem<String>> = startup
-                    .runtime_config
-                    .model_registry
-                    .providers()
-                    .flat_map(|p| {
-                        p.models.iter().map(move |m| PickItem {
-                            label: format!("{}/{}", p.name, m.id),
-                            value: format!("{}/{}", p.name, m.id),
-                        })
-                    })
-                    .collect();
+                // Use the picker_model helper so labels carry the alias
+                // and role badges. We default to the All tab; future
+                // wiring will let the user toggle to Canonical.
+                let picker = crate::picker_model::picker_for(
+                    &startup.runtime_config.model_registry,
+                    &startup.settings.roles,
+                    crate::picker_model::ModelTab::All,
+                );
                 view.picker = Some(PickerOverlay {
                     kind: PickerKind::Model,
-                    picker: Picker::new(items),
+                    picker,
                     title: "model".into(),
                 });
                 SlashOutcome::Continue
             } else {
+                // `/model role:<name>` (e.g. `/model role:smol`) routes via
+                // settings.roles instead of treating the arg as a model id.
+                if let Some(role_str) = target.strip_prefix("role:") {
+                    if let Some(role) = pi_agent_core::settings::Role::parse(role_str) {
+                        let chosen = session.set_role(role, &startup.settings.roles).await;
+                        *current_model = if chosen.contains('/') {
+                            chosen.clone()
+                        } else {
+                            format!("{}/{}", startup.settings.provider, chosen)
+                        };
+                        view.transcript
+                            .blocks
+                            .push(crate::renderer::Block::Note(format!(
+                                "[model set to {} via role {}]",
+                                current_model, role_str
+                            )));
+                        return SlashOutcome::Continue;
+                    } else {
+                        view.transcript
+                            .blocks
+                            .push(crate::renderer::Block::Error(format!(
+                                "unknown role: {role_str} (expected default|smol|slow|plan|commit)"
+                            )));
+                        return SlashOutcome::Continue;
+                    }
+                }
                 let (p, m) = split_model(target);
                 // If scoped-models is enabled, remember the model we are
                 // about to replace so the TUI can revert after the next
@@ -1387,28 +1450,39 @@ async fn handle_slash(
             SlashOutcome::Continue
         }
         "share" => {
+            // Per upstream pi-on-pi.dev, `/share` was originally a gist
+            // upload helper; in this fork pi.dev infrastructure is not
+            // available, so we mirror `pi --share <id>`: render the
+            // session as self-contained HTML and write it into the
+            // agent's shares dir. The file path is reported inline so
+            // the user can attach / mail it.
             let mgr = startup.runtime_config.session_manager.clone();
             let branch = mgr.current_branch(session.id());
             let meta = mgr.meta(session.id());
             let (provider, model) = meta
                 .map(|m| (m.provider, m.model))
                 .unwrap_or_else(|| (startup.settings.provider.clone(), startup.settings.model.clone()));
-            let body = crate::share::render_markdown(session.id(), &provider, &model, &branch);
-            match crate::share::run_gh_gist(&body) {
-                Ok(url) => view
-                    .transcript
-                    .blocks
-                    .push(crate::renderer::Block::Note(format!("[shared: {url}]"))),
+            let html =
+                crate::share::render_session_html(&branch, session.id(), &provider, &model);
+            let shares_dir = crate::context::agent_dir().join("shares");
+            let res = std::fs::create_dir_all(&shares_dir).and_then(|_| {
+                let p = shares_dir.join(format!("{}.html", session.id()));
+                std::fs::write(&p, &html).map(|_| p)
+            });
+            match res {
+                Ok(path) => view.transcript.blocks.push(crate::renderer::Block::Note(
+                    format!("[shared: {}]", path.display()),
+                )),
                 Err(e) => view
                     .transcript
                     .blocks
-                    .push(crate::renderer::Block::Error(e)),
+                    .push(crate::renderer::Block::Error(format!("share: {e}"))),
             }
             SlashOutcome::Continue
         }
         "autoresearch" => {
             use crate::autoresearch::slash_helpers::{
-                parse_action, AutoresearchAction, clear_artefacts, ensure_session, export_dashboard,
+                parse_action, AutoresearchAction, clear_artefacts, export_dashboard,
             };
             let action = parse_action(args);
             match action {
@@ -1645,6 +1719,14 @@ async fn handle_slash(
             SlashOutcome::Continue
         }
         "__clone_pick" => SlashOutcome::Continue,
+        "background" => {
+            view.transcript.blocks.push(crate::renderer::Block::Note(
+                "[/background: detach mode is not yet implemented. \
+                 The agent keeps running here in the foreground.]"
+                    .to_string(),
+            ));
+            SlashOutcome::Continue
+        }
         other => {
             // /skill:<name> [args] — explicit invocation of a registered skill.
             // Injects the SKILL.md body + trailing args as the next user

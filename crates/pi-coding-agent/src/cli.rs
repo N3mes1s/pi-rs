@@ -73,6 +73,13 @@ pub struct Cli {
     #[arg(long = "no-context-files", short = 'n', action = ArgAction::SetTrue)]
     pub no_context_files: bool,
 
+    /// Override AGENTS.md content with the contents of `<path>`. Skips
+    /// the normal cwd/ancestors/global discovery — only this file is
+    /// fed to the model. Used by the evolution daemon to benchmark
+    /// candidate AGENTS.md files in-place without touching the live one.
+    #[arg(long = "agents-md", value_name = "PATH")]
+    pub agents_md: Option<PathBuf>,
+
     /// Disable extension loading.
     #[arg(long, action = ArgAction::SetTrue)]
     pub no_extensions: bool,
@@ -111,6 +118,38 @@ pub struct Cli {
     #[arg(long = "refresh-models", action = ArgAction::SetTrue)]
     pub refresh_models: bool,
 
+    /// AGENTS.md auto-evolution control: `status` (print state),
+    /// `off` (disable for cwd), `on` (re-enable for cwd).
+    #[arg(long = "evolve", value_parser = clap::builder::PossibleValuesParser::new(["status", "off", "on", "dry-run"]))]
+    pub evolve: Option<String>,
+
+    /// Render a trajectory flamegraph for a session id (or path) to
+    /// HTML and exit.
+    #[arg(long = "flamegraph", value_name = "SESSION_OR_PATH")]
+    pub flamegraph: Option<String>,
+
+    /// Render a session as a self-contained HTML transcript and write
+    /// it to `~/.pi/agent/shares/<id>.html` (path printed on stdout).
+    #[arg(long = "share", value_name = "SESSION_OR_PATH")]
+    pub share: Option<String>,
+
+    /// Manage the auto-approve policy file at
+    /// `~/.pi/agent/auto-approve.json`. Verbs:
+    ///
+    /// * `list` — pretty-print current policy.
+    /// * `add  bash:<regex>` — append <regex> to the bash command_allow_regex.
+    /// * `deny bash:<regex>` — append <regex> to the bash command_deny_regex.
+    /// * `allow <tool>:<pattern>` — set always_approve=true for <tool>.
+    /// * `remove <tool>:<entry>` — remove the first matching entry.
+    #[arg(long = "policy", value_name = "VERB[ ARG]")]
+    pub policy: Option<String>,
+
+    /// Internal: run one autonomous evolve tick for the cwd and exit.
+    /// Spawned by the modes/ exit hooks; not meant for direct user
+    /// invocation. Hidden from help.
+    #[arg(long = "internal-evolve-tick", action = ArgAction::SetTrue, hide = true)]
+    pub internal_evolve_tick: bool,
+
     /// Auto-approval mode: `ask` (default), `auto-policy`, `auto-judge`,
     /// or `yolo`. Policy file at `~/.pi/agent/auto-approve.json` is
     /// always consulted first.
@@ -120,6 +159,20 @@ pub struct Cli {
     /// Override the judge model (only effective with `auto-judge`).
     #[arg(long = "auto-approve-model")]
     pub auto_approve_model: Option<String>,
+
+    /// Cheap "smol" role model id (e.g. `haiku`, `gpt-4o-mini`,
+    /// `provider/model`). Overrides `settings.roles.smol`.
+    #[arg(long, env = "PI_SMOL_MODEL")]
+    pub smol: Option<String>,
+
+    /// Slow / heavyweight reasoning role model id.
+    /// Overrides `settings.roles.slow`.
+    #[arg(long, env = "PI_SLOW_MODEL")]
+    pub slow: Option<String>,
+
+    /// Planning role model id. Overrides `settings.roles.plan`.
+    #[arg(long, env = "PI_PLAN_MODEL")]
+    pub plan: Option<String>,
 
     /// Free-form positional args. `@file` references add attachments.
     #[arg(value_name = "MESSAGE_OR_AT_FILES")]

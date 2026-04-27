@@ -38,6 +38,149 @@ pub struct Settings {
     /// for the rest of the session.
     #[serde(default)]
     pub scoped_models: bool,
+    /// Cheap-model routing. Each role is a model id (a plain `"haiku"`
+    /// alias or a fully-qualified `"provider/model"`). When unset, the
+    /// caller falls back to [`Settings::model`].
+    #[serde(default)]
+    pub roles: ModelRoles,
+    /// Autonomous AGENTS.md evolution daemon settings.
+    #[serde(default)]
+    pub evolve: EvolveSettings,
+}
+
+/// Configuration for the autonomous evolution loop (G8).
+///
+/// Defaults are conservative: enabled by default, modest daily cost
+/// cap, large minimum-sample threshold so the loop only runs after
+/// the user has accumulated enough trajectory data for meaningful
+/// reflection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EvolveSettings {
+    /// Master switch. When `false`, no tick runs; trajectory recording
+    /// continues as normal.
+    #[serde(default = "default_evolve_enabled")]
+    pub enabled: bool,
+    /// Hard $ cap per cwd per UTC day. Tick refuses to spend more.
+    #[serde(default = "default_daily_cost_cap")]
+    pub daily_cost_cap_usd: f32,
+    /// Minimum number of outcome-labelled (non-Replay) trajectories
+    /// before the first tick fires.
+    #[serde(default = "default_min_samples")]
+    pub min_samples: u32,
+    /// Number of generations per tick. Each generation mutates one
+    /// section of one candidate.
+    #[serde(default = "default_generations_per_tick")]
+    pub generations_per_tick: u32,
+    /// Cap on benchmark cases per generation. More = better signal,
+    /// linearly more cost.
+    #[serde(default = "default_benchmark_size")]
+    pub benchmark_size: u32,
+    /// Minimum hours between successful ticks for a given cwd.
+    #[serde(default = "default_min_hours_between_ticks")]
+    pub min_hours_between_ticks: u32,
+    /// New outcome-labelled trajectories required to re-fire the tick
+    /// before the time threshold.
+    #[serde(default = "default_min_new_outcomes")]
+    pub min_new_outcomes_to_retick: u32,
+}
+
+impl Default for EvolveSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_evolve_enabled(),
+            daily_cost_cap_usd: default_daily_cost_cap(),
+            min_samples: default_min_samples(),
+            generations_per_tick: default_generations_per_tick(),
+            benchmark_size: default_benchmark_size(),
+            min_hours_between_ticks: default_min_hours_between_ticks(),
+            min_new_outcomes_to_retick: default_min_new_outcomes(),
+        }
+    }
+}
+
+fn default_evolve_enabled() -> bool {
+    true
+}
+fn default_daily_cost_cap() -> f32 {
+    0.50
+}
+fn default_min_samples() -> u32 {
+    30
+}
+fn default_generations_per_tick() -> u32 {
+    3
+}
+fn default_benchmark_size() -> u32 {
+    10
+}
+fn default_min_hours_between_ticks() -> u32 {
+    24
+}
+fn default_min_new_outcomes() -> u32 {
+    5
+}
+
+/// Role-based model routing. Lets the user pick a different cheap model
+/// for short / structured / planning tasks without changing the default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelRoles {
+    /// Optional override of `Settings::model`. Most callers ignore this
+    /// field — `Settings::model` is the canonical default — but we keep
+    /// it so a `roles` block can be self-contained in JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// Tiny model for cheap structured calls (auto-approve judge,
+    /// summary generation, classification).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smol: Option<String>,
+    /// Slow / large-context model used when reasoning depth matters more
+    /// than latency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow: Option<String>,
+    /// Planning model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Commit-message model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+}
+
+/// Named cheap-model role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Default,
+    Smol,
+    Slow,
+    Plan,
+    Commit,
+}
+
+impl Role {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "default" | "" => Some(Role::Default),
+            "smol" => Some(Role::Smol),
+            "slow" => Some(Role::Slow),
+            "plan" => Some(Role::Plan),
+            "commit" => Some(Role::Commit),
+            _ => None,
+        }
+    }
+}
+
+impl ModelRoles {
+    /// Resolve `role` to a model id, falling back to `default_model` when
+    /// the role-specific override is not set.
+    pub fn resolve<'a>(&'a self, role: Role, default_model: &'a str) -> &'a str {
+        let opt = match role {
+            Role::Default => self.default.as_deref(),
+            Role::Smol => self.smol.as_deref(),
+            Role::Slow => self.slow.as_deref(),
+            Role::Plan => self.plan.as_deref(),
+            Role::Commit => self.commit.as_deref(),
+        };
+        opt.unwrap_or(default_model)
+    }
 }
 
 impl Default for Settings {
@@ -56,6 +199,8 @@ impl Default for Settings {
             no_tools: false,
             session_dir: None,
             scoped_models: false,
+            roles: ModelRoles::default(),
+            evolve: EvolveSettings::default(),
         }
     }
 }

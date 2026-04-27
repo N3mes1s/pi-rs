@@ -118,3 +118,74 @@ fn auth_accessor_returns_storage() {
     // Just ensure it compiles and is callable.
     assert!(reg.auth().provider_names().is_empty());
 }
+
+// ── E1: reasoning-family additions (o3, o3-pro, o4-mini, gpt-5*) ──────────
+
+#[test]
+fn registry_includes_o3_o3_pro_and_o4_mini() {
+    let reg = pi_ai::ModelRegistry::new(pi_ai::AuthStorage::in_memory());
+    for id in &["o3", "o3-pro", "o4-mini"] {
+        let (provider, m) = reg
+            .resolve(&format!("openai/{id}"))
+            .unwrap_or_else(|| panic!("missing openai/{id}"));
+        assert_eq!(provider.name, "openai");
+        assert_eq!(m.id, *id);
+        assert!(m.supports_thinking, "{id} should advertise supports_thinking");
+    }
+}
+
+#[test]
+fn registry_includes_gpt_5_family_with_thinking() {
+    let reg = pi_ai::ModelRegistry::new(pi_ai::AuthStorage::in_memory());
+    for id in &["gpt-5", "gpt-5-mini", "gpt-5-nano"] {
+        let (_, m) = reg
+            .resolve(&format!("openai/{id}"))
+            .unwrap_or_else(|| panic!("missing openai/{id}"));
+        assert!(m.supports_thinking, "{id} should advertise supports_thinking");
+        assert!(m.supports_vision, "{id} should advertise vision");
+    }
+}
+
+#[test]
+fn anthropic_reasoning_models_carry_thinking_flag() {
+    let reg = pi_ai::ModelRegistry::new(pi_ai::AuthStorage::in_memory());
+    for alias in &["opus", "sonnet", "haiku"] {
+        let (_, m) = reg
+            .resolve(alias)
+            .unwrap_or_else(|| panic!("missing alias {alias}"));
+        assert!(
+            m.supports_thinking,
+            "anthropic {alias} should advertise supports_thinking"
+        );
+    }
+}
+
+#[test]
+fn google_pro_reasoning_carries_thinking_flag() {
+    let reg = pi_ai::ModelRegistry::new(pi_ai::AuthStorage::in_memory());
+    let (_, m) = reg.resolve("gemini-pro").expect("gemini-pro");
+    assert!(m.supports_thinking, "gemini-pro should advertise thinking");
+}
+
+#[test]
+fn bedrock_anthropic_reasoning_models_carry_thinking_flag() {
+    let reg = pi_ai::ModelRegistry::new(pi_ai::AuthStorage::in_memory());
+    for alias in &["bedrock-opus", "bedrock-sonnet", "bedrock-haiku"] {
+        let (_, m) = reg
+            .resolve(alias)
+            .unwrap_or_else(|| panic!("missing alias {alias}"));
+        assert!(
+            m.supports_thinking,
+            "bedrock {alias} should advertise supports_thinking"
+        );
+    }
+}
+
+#[test]
+fn gpt_4o_remains_non_thinking() {
+    // Sanity check that we didn't accidentally flip the flag on
+    // non-reasoning models.
+    let reg = pi_ai::ModelRegistry::new(pi_ai::AuthStorage::in_memory());
+    let (_, m) = reg.resolve("openai/gpt-4o").expect("gpt-4o");
+    assert!(!m.supports_thinking);
+}

@@ -68,6 +68,9 @@ fn clone_branch_replays_multiple_tool_pairs_in_order() {
             SessionEntryKind::Compaction { .. } => "compaction",
             SessionEntryKind::SystemPrompt { .. } => "system_prompt",
             SessionEntryKind::Usage { .. } => "usage",
+            SessionEntryKind::ContextLoad { .. } => "context_load",
+            SessionEntryKind::Outcome { .. } => "outcome",
+            SessionEntryKind::EvolveMarker { .. } => "evolve_marker",
         })
         .collect();
     assert_eq!(

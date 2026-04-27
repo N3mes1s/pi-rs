@@ -3,14 +3,59 @@ use pi_tui::{Theme, ThemeRegistry};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// Themes shipped in the binary so users get a useful default catalogue
+/// without having to hand-author JSON. Sourced from oh-my-pi
+/// (catppuccin {mocha,latte}, dracula, nord, gruvbox {dark,light},
+/// tokyo-night, poimandres). Each entry is `(name, json)` — the name is
+/// only used for diagnostics; the canonical name is the `"name"` field
+/// inside the JSON which is what `ThemeRegistry::install` keys on.
+pub const BUILTIN_THEMES: &[(&str, &str)] = &[
+    (
+        "catppuccin-mocha",
+        include_str!("../themes/catppuccin-mocha.json"),
+    ),
+    (
+        "catppuccin-latte",
+        include_str!("../themes/catppuccin-latte.json"),
+    ),
+    ("dracula", include_str!("../themes/dracula.json")),
+    ("nord", include_str!("../themes/nord.json")),
+    (
+        "gruvbox-dark",
+        include_str!("../themes/gruvbox-dark.json"),
+    ),
+    (
+        "gruvbox-light",
+        include_str!("../themes/gruvbox-light.json"),
+    ),
+    (
+        "tokyo-night",
+        include_str!("../themes/tokyo-night.json"),
+    ),
+    ("poimandres", include_str!("../themes/poimandres.json")),
+];
+
 /// Loads themes from the global and project directories. Themes are JSON
-/// files matching `Theme`'s schema.
+/// files matching `Theme`'s schema. Built-in themes are installed first
+/// (so user themes with the same name override them).
 pub fn load_themes(dirs: &[PathBuf]) -> ThemeRegistry {
     let mut reg = ThemeRegistry::new();
+    install_builtins(&mut reg);
     for d in dirs {
         load_into(d, &mut reg);
     }
     reg
+}
+
+/// Install the compiled-in [`BUILTIN_THEMES`]. Malformed entries are
+/// silently skipped — they're build-time data so a failure here is
+/// effectively a programming error, not a runtime concern.
+pub fn install_builtins(reg: &mut ThemeRegistry) {
+    for (_label, json) in BUILTIN_THEMES {
+        if let Ok(theme) = serde_json::from_str::<Theme>(json) {
+            reg.install(theme);
+        }
+    }
 }
 
 pub fn load_into(d: &Path, reg: &mut ThemeRegistry) {
