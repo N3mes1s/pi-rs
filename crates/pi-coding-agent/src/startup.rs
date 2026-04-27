@@ -69,6 +69,8 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         settings.tools = t.split(',').map(|s| s.trim().to_string()).collect();
     }
 
+    // (autoresearch tools are registered after the base ToolRegistry is built; see below)
+
     // 3. auth.
     let auth = AuthStorage::open(auth_path()).unwrap_or_else(|_| AuthStorage::in_memory());
     // overlay env keys (env wins for fresh shells).
@@ -174,6 +176,14 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
             ext_roots.push(e.clone());
         }
     }
+    // Register autoresearch tools (init_experiment, run_experiment, log_experiment).
+    if !settings.no_tools {
+        use std::sync::Arc;
+        tools.register(Arc::new(crate::autoresearch::tools::InitExperimentTool));
+        tools.register(Arc::new(crate::autoresearch::tools::RunExperimentTool));
+        tools.register(Arc::new(crate::autoresearch::tools::LogExperimentTool));
+    }
+
     let loaded_exts = extensions::discover(&ext_roots);
     if !loaded_exts.is_empty() {
         // Strip any builtins that extensions declare they replace, *before*
