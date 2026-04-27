@@ -1117,11 +1117,7 @@ async fn handle_slash(
                     t.entries
                         .iter()
                         .map(|e| PickItem {
-                            label: format!(
-                                "{}  {:?}",
-                                &e.id.chars().take(8).collect::<String>(),
-                                std::mem::discriminant(&e.kind)
-                            ),
+                            label: crate::picker::format_tree_entry(e),
                             value: e.id.clone(),
                         })
                         .collect()
@@ -1141,7 +1137,7 @@ async fn handle_slash(
                 .list()
                 .into_iter()
                 .map(|s| PickItem {
-                    label: format!("{}  {}", s.id, s.path.display()),
+                    label: crate::picker::format_session_label(&s),
                     value: s.id,
                 })
                 .collect();
