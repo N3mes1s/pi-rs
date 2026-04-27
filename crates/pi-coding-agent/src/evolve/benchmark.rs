@@ -231,14 +231,18 @@ pub fn summarize(results: &[RolloutResult]) -> BenchmarkSummary {
 // ─── default subprocess Replay (used by the evolve daemon, G8) ─────────
 
 /// Default subprocess-based Replay. Spawns
-/// `<pi_binary> --print --no-session --auto-approve <mode> --agents-md <candidate>`
+/// `<pi_binary> --print --session-dir <tmp> --auto-approve <mode> --agents-md <candidate>`
 /// with the case's user prompt as positional. Writes the candidate
-/// AGENTS.md to a tempfile, lets pi run, scores the resulting session
-/// JSONL with the trajectory judge.
+/// AGENTS.md to a tempfile, lets pi run, then mines the per-rollout
+/// session JSONL the child wrote into the tempdir for usage + outcome.
 ///
-/// Cost is read from the JSONL `Usage` entries that pi writes mid-session.
-/// `is_error` falls back to checking the process exit code when no JSONL
-/// is produced.
+/// Usage (`SessionEntryKind::Usage`) entries are summed across the whole
+/// session to populate `tokens_in` / `tokens_out` / `cost_usd` faithfully
+/// — no more `chars/4` approximation. The most-recent `Outcome` entry
+/// (produced by the modes/ exit-hook + trajectory judge) is the score
+/// of record; if no outcome was emitted (subprocess crashed before the
+/// hook fired, or the judge declined to score), we fall back to the
+/// exit-code heuristic so the benchmark can still make forward progress.
 ///
 /// `auto_approve` defaults to "auto-policy" — safe for benchmark replays
 /// (denies dangerous calls per policy) but doesn't block on benign ones
@@ -282,6 +286,14 @@ impl Replay for SubprocessReplay {
             .map_err(BenchmarkError::Io)?;
         let agents_md_path = tmpfile.path().to_path_buf();
 
+        // Per-rollout session dir. Replaces `--no-session`: the child
+        // pi process now writes a real JSONL we can mine for Usage +
+        // Outcome. Kept inside a TempDir so it auto-cleans on drop.
+        let session_root = tempfile::Builder::new()
+            .prefix("pi-evolve-session-")
+            .tempdir()
+            .map_err(BenchmarkError::Io)?;
+
         let cwd = self.cwd.clone().unwrap_or_else(|| {
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
         });
@@ -289,7 +301,8 @@ impl Replay for SubprocessReplay {
         let started = std::time::Instant::now();
         let mut cmd = tokio::process::Command::new(&self.pi_binary);
         cmd.arg("--print")
-            .arg("--no-session")
+            .arg("--session-dir")
+            .arg(session_root.path())
             .arg("--auto-approve")
             .arg(&self.auto_approve)
             .arg("--agents-md")
@@ -327,37 +340,174 @@ impl Replay for SubprocessReplay {
 
         let duration_ms = started.elapsed().as_millis() as u64;
 
-        // We disabled session persistence (--no-session) so there's no
-        // JSONL to parse usage from. Approximate from output length and
-        // exit code. The agentic judge wiring is best done in-process by
-        // the daemon (which has the registry + auth) — for the v1
-        // SubprocessReplay we report a coarse success/failure based on
-        // exit code and produce zero-cost defaults. The benchmark axis
-        // that matters most (pass_rate from exit code) is faithful.
-        let success = status.success();
-        let tokens_in = (case.user_prompt.chars().count() / 4) as u64
-            + (agents_md_text.chars().count() / 4) as u64;
-        let tokens_out = (stdout_buf.chars().count() / 4) as u64;
+        let exit_success = status.success();
+        let exit_code = status.code().unwrap_or(-1);
+
+        // Mine Usage + Outcome entries from any JSONL the child wrote.
+        let mined = mine_session_dir(session_root.path()).unwrap_or_default();
+
+        // Score: prefer judged Outcome score; then Outcome.success;
+        // then exit-code fallback (the historical 0.7/0.3).
+        let (success, score, notes) = match mined.outcome {
+            Some(o) => {
+                let score = o.score.unwrap_or(if o.success { 0.7 } else { 0.3 });
+                let notes = o.notes.unwrap_or_else(|| {
+                    if o.success { "outcome: success".into() } else { "outcome: failure".into() }
+                });
+                (o.success, score, notes)
+            }
+            None => {
+                let notes = if exit_success {
+                    "exit=0 (no Outcome recorded)".to_string()
+                } else {
+                    format!(
+                        "exit={} (no Outcome) stderr={}",
+                        exit_code,
+                        stderr_buf.chars().take(200).collect::<String>()
+                    )
+                };
+                (
+                    exit_success,
+                    if exit_success { 0.7 } else { 0.3 },
+                    notes,
+                )
+            }
+        };
+
+        // Tokens / cost: prefer summed Usage entries; fall back to the
+        // chars/4 approximation only if the child wrote nothing (e.g.
+        // it crashed before the first model turn).
+        let (tokens_in, tokens_out, cost_usd) = if mined.had_usage {
+            (
+                mined.tokens_in,
+                mined.tokens_out,
+                mined.cost_usd as f32,
+            )
+        } else {
+            let approx_in = (case.user_prompt.chars().count() / 4) as u64
+                + (agents_md_text.chars().count() / 4) as u64;
+            let approx_out = (stdout_buf.chars().count() / 4) as u64;
+            (approx_in, approx_out, 0.0)
+        };
 
         Ok(RolloutResult {
             session_id: case.session_id.clone(),
             success,
-            score: if success { 0.7 } else { 0.3 },
+            score,
             tokens_in,
             tokens_out,
-            cost_usd: 0.0,
+            cost_usd,
             duration_ms,
-            notes: if status.success() {
-                "exit=0".into()
-            } else {
-                format!(
-                    "exit={} stderr={}",
-                    status.code().unwrap_or(-1),
-                    stderr_buf.chars().take(200).collect::<String>()
-                )
-            },
+            notes,
         })
     }
+}
+
+/// What we mine out of a SubprocessReplay's per-rollout session dir.
+#[derive(Debug, Default, Clone)]
+struct MinedSession {
+    /// True if at least one Usage entry was found (used to decide
+    /// whether to trust the sums or fall back to chars/4).
+    had_usage: bool,
+    tokens_in: u64,
+    tokens_out: u64,
+    cost_usd: f64,
+    /// Most-recent Outcome entry, if any.
+    outcome: Option<MinedOutcome>,
+}
+
+#[derive(Debug, Clone)]
+struct MinedOutcome {
+    success: bool,
+    score: Option<f32>,
+    notes: Option<String>,
+}
+
+/// Walk `dir` recursively for `*.jsonl` files and aggregate Usage +
+/// Outcome entries from every one of them. Returns `None` if no JSONL
+/// files exist (subprocess crashed too early to materialise a session).
+///
+/// The session manager places the child's JSONL at
+/// `<dir>/<cwd_slug>/<uuid>.jsonl` so we descend one level. We tolerate
+/// malformed lines individually rather than failing the whole rollout.
+fn mine_session_dir(dir: &Path) -> Option<MinedSession> {
+    let mut acc = MinedSession::default();
+    let mut latest_outcome_ts: i64 = i64::MIN;
+    let mut found_any_jsonl = false;
+
+    for path in walk_jsonl(dir) {
+        found_any_jsonl = true;
+        let Ok(txt) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in txt.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(entry) = serde_json::from_str::<SessionEntry>(line) else {
+                continue;
+            };
+            match &entry.kind {
+                SessionEntryKind::Usage { usage } => {
+                    acc.had_usage = true;
+                    acc.tokens_in = acc.tokens_in.saturating_add(usage.input_tokens);
+                    acc.tokens_out = acc.tokens_out.saturating_add(usage.output_tokens);
+                    acc.cost_usd += usage.cost_usd;
+                }
+                SessionEntryKind::Outcome {
+                    success,
+                    score,
+                    notes,
+                    ..
+                } => {
+                    if entry.timestamp >= latest_outcome_ts {
+                        latest_outcome_ts = entry.timestamp;
+                        acc.outcome = Some(MinedOutcome {
+                            success: *success,
+                            score: *score,
+                            notes: notes.clone(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !found_any_jsonl {
+        return None;
+    }
+    Some(acc)
+}
+
+/// Iterative walker that yields every `*.jsonl` under `root`. Bounded
+/// depth (we only descend a handful of subdirectories — the session
+/// layout is `<root>/<cwd_slug>/<uuid>.jsonl`) and ignores symlinks to
+/// avoid loops.
+fn walk_jsonl(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for ent in read.flatten() {
+            let p = ent.path();
+            let Ok(meta) = ent.metadata() else { continue };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(p);
+            } else if meta.is_file()
+                && p.extension().and_then(|s| s.to_str()) == Some("jsonl")
+            {
+                out.push(p);
+            }
+        }
+    }
+    out
 }
 
 // ─── synthesise a User message from a prompt string ────────────────────
@@ -366,4 +516,170 @@ impl Replay for SubprocessReplay {
 /// through pi as if it came from the user.
 pub fn user_message(text: &str) -> Message {
     Message::user_text(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pi_agent_core::SessionEntry;
+    use pi_ai::Usage;
+    use serde_json::json;
+    use std::io::Write;
+
+    /// Helper: write a fake session JSONL with the given entries to
+    /// `<dir>/<sub>/<id>.jsonl`, mirroring the layout the real
+    /// SessionManager produces.
+    fn write_session(dir: &Path, sub: &str, entries: &[serde_json::Value]) -> PathBuf {
+        let subdir = dir.join(sub);
+        std::fs::create_dir_all(&subdir).unwrap();
+        let path = subdir.join(format!("session-{sub}.jsonl"));
+        let mut f = std::fs::File::create(&path).unwrap();
+        for e in entries {
+            writeln!(f, "{}", e.to_string()).unwrap();
+        }
+        path
+    }
+
+    fn entry(ts: i64, kind: serde_json::Value) -> serde_json::Value {
+        // SessionEntry is { id, parent_id, timestamp, ...flatten kind }.
+        let mut v = json!({
+            "id": format!("e-{ts}"),
+            "parent_id": null,
+            "timestamp": ts,
+        });
+        if let serde_json::Value::Object(o) = kind {
+            for (k, val) in o {
+                v[k] = val;
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn mine_session_dir_returns_none_when_no_jsonl() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Write a non-jsonl file — should still be ignored.
+        std::fs::write(tmp.path().join("not-a-session.txt"), "hi").unwrap();
+        assert!(mine_session_dir(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn mine_session_dir_sums_usage_across_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_session(
+            tmp.path(),
+            "_home_user_proj",
+            &[
+                entry(1, json!({ "kind": "meta", "cwd": "/x", "provider": "p", "model": "m", "title": null })),
+                entry(2, json!({ "kind": "usage", "usage": Usage { input_tokens: 100, output_tokens: 30, cost_usd: 0.0025, ..Default::default() }})),
+                entry(3, json!({ "kind": "usage", "usage": Usage { input_tokens: 50, output_tokens: 15, cost_usd: 0.0010, ..Default::default() }})),
+            ],
+        );
+        let mined = mine_session_dir(tmp.path()).expect("had a jsonl");
+        assert!(mined.had_usage);
+        assert_eq!(mined.tokens_in, 150);
+        assert_eq!(mined.tokens_out, 45);
+        assert!((mined.cost_usd - 0.0035).abs() < 1e-9);
+        assert!(mined.outcome.is_none());
+    }
+
+    #[test]
+    fn mine_session_dir_takes_latest_outcome_by_timestamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_session(
+            tmp.path(),
+            "slug",
+            &[
+                entry(10, json!({ "kind": "outcome", "success": false, "source": "heuristic", "score": 0.2, "notes": "older" })),
+                entry(20, json!({ "kind": "outcome", "success": true, "source": "llm_judge", "score": 0.91, "notes": "newer" })),
+                entry(15, json!({ "kind": "outcome", "success": false, "source": "heuristic", "score": 0.4, "notes": "middle" })),
+            ],
+        );
+        let o = mine_session_dir(tmp.path())
+            .expect("dir")
+            .outcome
+            .expect("outcome");
+        assert!(o.success, "newest outcome wins");
+        assert_eq!(o.score, Some(0.91));
+        assert_eq!(o.notes.as_deref(), Some("newer"));
+    }
+
+    #[test]
+    fn mine_session_dir_skips_malformed_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let subdir = tmp.path().join("slug");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let path = subdir.join("s.jsonl");
+        let usage = entry(2, json!({ "kind": "usage", "usage": Usage { input_tokens: 7, output_tokens: 0, ..Default::default() }}));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{{this is not valid json").unwrap();
+        writeln!(f, "").unwrap();
+        writeln!(f, "{}", usage).unwrap();
+        writeln!(f, "{{\"id\":\"x\",\"parent_id\":null,\"timestamp\":3,\"kind\":\"unknown_variant\"}}").unwrap();
+        let mined = mine_session_dir(tmp.path()).expect("dir");
+        assert_eq!(mined.tokens_in, 7);
+    }
+
+    #[test]
+    fn walk_jsonl_descends_one_level_and_filters_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("slug")).unwrap();
+        std::fs::write(tmp.path().join("slug").join("a.jsonl"), "").unwrap();
+        std::fs::write(tmp.path().join("slug").join("b.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("top.jsonl"), "").unwrap();
+        let mut found: Vec<_> = walk_jsonl(tmp.path())
+            .into_iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        assert_eq!(found, vec!["a.jsonl".to_string(), "top.jsonl".into()]);
+    }
+
+    #[test]
+    fn summarize_uses_real_usage_fields() {
+        let r = vec![
+            RolloutResult {
+                session_id: "a".into(),
+                success: true,
+                score: 0.9,
+                tokens_in: 1000,
+                tokens_out: 200,
+                cost_usd: 0.012,
+                duration_ms: 4000,
+                notes: "ok".into(),
+            },
+            RolloutResult {
+                session_id: "b".into(),
+                success: false,
+                score: 0.3,
+                tokens_in: 1500,
+                tokens_out: 100,
+                cost_usd: 0.018,
+                duration_ms: 2000,
+                notes: "fail".into(),
+            },
+        ];
+        let s = summarize(&r);
+        assert_eq!(s.n_cases, 2);
+        assert!((s.pass_rate - 0.5).abs() < 1e-6);
+        assert!((s.mean_tokens_in - 1250.0).abs() < 1e-6);
+        assert!((s.total_cost_usd - 0.030).abs() < 1e-6);
+        assert_eq!(s.p95_tokens_in, 1500);
+    }
+
+    /// Round-trip a single SessionEntry through serde_json to make sure
+    /// the canned JSON shape we use in tests matches the real type — if
+    /// the schema drifts (e.g. a field renamed), this test fails fast
+    /// instead of the mining tests silently treating entries as
+    /// malformed.
+    #[test]
+    fn canned_entries_round_trip_through_session_entry() {
+        let v = entry(
+            42,
+            json!({ "kind": "usage", "usage": Usage { input_tokens: 1, output_tokens: 2, ..Default::default() }}),
+        );
+        let _: SessionEntry = serde_json::from_value(v).unwrap();
+        let v = entry(7, json!({ "kind": "outcome", "success": true, "source": "heuristic", "score": 0.5, "notes": null }));
+        let _: SessionEntry = serde_json::from_value(v).unwrap();
+    }
 }
