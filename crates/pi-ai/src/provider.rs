@@ -16,6 +16,7 @@ pub enum ProviderKind {
     Anthropic,
     OpenAi,
     OpenAiCompat,
+    Google,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,7 +105,9 @@ pub trait Provider: Send + Sync {
 }
 
 pub mod anthropic;
+pub mod google;
 pub mod openai;
 
 pub use anthropic::AnthropicProvider;
+pub use google::GoogleProvider;
 pub use openai::{OpenAiCompatProvider, OpenAiProvider};

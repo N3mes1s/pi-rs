@@ -2,8 +2,8 @@ use chrono::Utc;
 use futures::StreamExt;
 use pi_ai::{
     AnthropicProvider, AuthMethod, AuthStorage, ContentBlock, FinishReason, GenerateRequest,
-    Message, ModelInfo, ModelRegistry, OpenAiCompatProvider, OpenAiProvider, Provider,
-    ProviderConfig, ProviderKind, Role, ThinkingLevel, ToolCall, ToolResult, Usage,
+    GoogleProvider, Message, ModelInfo, ModelRegistry, OpenAiCompatProvider, OpenAiProvider,
+    Provider, ProviderConfig, ProviderKind, Role, ThinkingLevel, ToolCall, ToolResult, Usage,
 };
 use pi_tools::{ToolContext, ToolRegistry};
 use std::path::PathBuf;
@@ -32,6 +32,7 @@ impl ProviderFactory for DefaultProviderFactory {
             ProviderKind::Anthropic => Box::new(AnthropicProvider::new(cfg, auth)),
             ProviderKind::OpenAi => Box::new(OpenAiProvider::new(cfg, auth)),
             ProviderKind::OpenAiCompat => Box::new(OpenAiCompatProvider::new(cfg, auth)),
+            ProviderKind::Google => Box::new(GoogleProvider::new(cfg, auth)),
         })
     }
 }

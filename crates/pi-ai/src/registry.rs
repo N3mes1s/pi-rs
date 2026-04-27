@@ -148,6 +148,17 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
             ],
         },
         ProviderConfig {
+            name: "google".into(),
+            kind: ProviderKind::Google,
+            base_url: "https://generativelanguage.googleapis.com".into(),
+            auth_header: "x-goog-api-key".into(),
+            auth_format: "{token}".into(),
+            models: vec![
+                m("google", "gemini-2.5-pro", Some("gemini-pro"), 1_000_000, 8_192, true, true, 1.25, 5.0),
+                m("google", "gemini-2.5-flash", Some("gemini"), 1_000_000, 8_192, false, true, 0.075, 0.30),
+            ],
+        },
+        ProviderConfig {
             name: "fireworks".into(),
             kind: ProviderKind::OpenAiCompat,
             base_url: "https://api.fireworks.ai/inference/v1".into(),
