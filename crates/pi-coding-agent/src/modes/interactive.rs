@@ -15,7 +15,7 @@ use crossterm::terminal::{
 use crossterm::{cursor, execute, queue, style::Print};
 use futures::StreamExt;
 use pi_agent_core::{settings::ThinkingSetting, AgentEvent, AgentEventKind};
-use pi_tui::{DiffRenderer, Editor, Frame, Line, Span, Theme};
+use pi_tui::{DiffRenderer, Editor, EditorEvent, Frame, Line, Span, Theme};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -168,6 +168,9 @@ pub enum KeyOutcome {
     /// The `@`-filename completion picker resolved: replace the `@<query>`
     /// token with the chosen path.
     AtComplete { picked: String },
+    /// User typed `!command` (silent=false) or `!!command` (silent=true) and
+    /// pressed Enter. The outer loop should run `command` via a shell.
+    Bang { command: String, silent: bool },
 }
 
 /// Pure key handler — no I/O. Returns what the outer loop must drive.
@@ -274,6 +277,18 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
     if let Some(action) = view.keymap.lookup(ev) {
         match action {
             Action::Submit => {
+                // Peek at the buffer BEFORE draining it so we can check for
+                // bang commands (which also consume the buffer).
+                if let Some(pi_tui::EditorEvent::BangCommand { command, silent }) =
+                    view.editor.special_command()
+                {
+                    // Drain the editor (mirrors what submit() does).
+                    view.editor.text.clear();
+                    view.editor.cursor = 0;
+                    view.history_idx = None;
+                    view.last_quit = None;
+                    return KeyOutcome::Bang { command, silent };
+                }
                 let buf = std::mem::take(&mut view.editor.text);
                 view.editor.cursor = 0;
                 view.history_idx = None;
@@ -870,6 +885,21 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                                 // by handle_key. Nothing more to do in the
                                 // TUI loop.
                             }
+                            KeyOutcome::Bang { command, silent } => {
+                                let output = run_bang_command(&command).await;
+                                if silent {
+                                    view.transcript.blocks.push(crate::renderer::Block::Note(
+                                        format!("$ {} → {} bytes", command, output.len()),
+                                    ));
+                                } else {
+                                    // Feed the captured output as the next user prompt.
+                                    view.turn_in_progress = true;
+                                    let s = session.clone();
+                                    tokio::spawn(async move {
+                                        let _ = s.prompt(output).await;
+                                    });
+                                }
+                            }
                         }
                     }
                     CtEvent::Resize(c, r) => {
@@ -946,6 +976,31 @@ fn run_external_editor(initial: &str) -> Option<String> {
     let content = std::fs::read_to_string(&path).ok();
     let _ = std::fs::remove_file(&path);
     content
+}
+
+/// Run `command` via `bash -lc` with a 30-second timeout. Returns the combined
+/// stdout+stderr output as a `String`. On error or timeout, returns an error
+/// message string so the caller can surface it to the user.
+async fn run_bang_command(command: &str) -> String {
+    use tokio::process::Command;
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        Command::new("bash")
+            .arg("-lc")
+            .arg(command)
+            .output(),
+    )
+    .await;
+    match result {
+        Ok(Ok(out)) => {
+            let mut combined = String::new();
+            combined.push_str(&String::from_utf8_lossy(&out.stdout));
+            combined.push_str(&String::from_utf8_lossy(&out.stderr));
+            combined
+        }
+        Ok(Err(e)) => format!("[bang error: {}]", e),
+        Err(_) => format!("[bang timeout: {} (30s)]", command),
+    }
 }
 
 // ─── slash commands ────────────────────────────────────────────────────────
@@ -1389,6 +1444,21 @@ async fn run_line_based(mut startup: Startup) -> anyhow::Result<()> {
         };
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            continue;
+        }
+        // Bang command detection: `!cmd` or `!!cmd`.
+        if let Some(EditorEvent::BangCommand { command, silent }) = {
+            let tmp_editor = Editor { text: trimmed.to_string(), cursor: trimmed.len() };
+            tmp_editor.special_command()
+        } {
+            let output = run_bang_command(&command).await;
+            if silent {
+                println!("$ {} → {} bytes", command, output.len());
+            } else {
+                handle.abort();
+                let _ = session.prompt(output).await;
+                handle = tokio::spawn(async move {});
+            }
             continue;
         }
         if let Some((name, args)) = slash::parse(trimmed) {
