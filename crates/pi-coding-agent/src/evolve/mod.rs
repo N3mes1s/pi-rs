@@ -21,6 +21,7 @@
 pub mod agents_md;
 pub mod benchmark;
 pub mod mutate;
+pub mod tick;
 
 pub use agents_md::{AgentsMd, Section};
 pub use benchmark::{
@@ -30,4 +31,7 @@ pub use benchmark::{
 pub use mutate::{
     build_prompt, post_process, EvidenceItem, MutateError, Mutator, MutatorConfig,
     MutationEvidence,
+};
+pub use tick::{
+    evolve_dir, is_disabled, should_run, CostLedger, Lock, SkipReason, State, TickDecision,
 };

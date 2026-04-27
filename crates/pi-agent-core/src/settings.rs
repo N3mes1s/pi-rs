@@ -43,6 +43,81 @@ pub struct Settings {
     /// caller falls back to [`Settings::model`].
     #[serde(default)]
     pub roles: ModelRoles,
+    /// Autonomous AGENTS.md evolution daemon settings.
+    #[serde(default)]
+    pub evolve: EvolveSettings,
+}
+
+/// Configuration for the autonomous evolution loop (G8).
+///
+/// Defaults are conservative: enabled by default, modest daily cost
+/// cap, large minimum-sample threshold so the loop only runs after
+/// the user has accumulated enough trajectory data for meaningful
+/// reflection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EvolveSettings {
+    /// Master switch. When `false`, no tick runs; trajectory recording
+    /// continues as normal.
+    #[serde(default = "default_evolve_enabled")]
+    pub enabled: bool,
+    /// Hard $ cap per cwd per UTC day. Tick refuses to spend more.
+    #[serde(default = "default_daily_cost_cap")]
+    pub daily_cost_cap_usd: f32,
+    /// Minimum number of outcome-labelled (non-Replay) trajectories
+    /// before the first tick fires.
+    #[serde(default = "default_min_samples")]
+    pub min_samples: u32,
+    /// Number of generations per tick. Each generation mutates one
+    /// section of one candidate.
+    #[serde(default = "default_generations_per_tick")]
+    pub generations_per_tick: u32,
+    /// Cap on benchmark cases per generation. More = better signal,
+    /// linearly more cost.
+    #[serde(default = "default_benchmark_size")]
+    pub benchmark_size: u32,
+    /// Minimum hours between successful ticks for a given cwd.
+    #[serde(default = "default_min_hours_between_ticks")]
+    pub min_hours_between_ticks: u32,
+    /// New outcome-labelled trajectories required to re-fire the tick
+    /// before the time threshold.
+    #[serde(default = "default_min_new_outcomes")]
+    pub min_new_outcomes_to_retick: u32,
+}
+
+impl Default for EvolveSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_evolve_enabled(),
+            daily_cost_cap_usd: default_daily_cost_cap(),
+            min_samples: default_min_samples(),
+            generations_per_tick: default_generations_per_tick(),
+            benchmark_size: default_benchmark_size(),
+            min_hours_between_ticks: default_min_hours_between_ticks(),
+            min_new_outcomes_to_retick: default_min_new_outcomes(),
+        }
+    }
+}
+
+fn default_evolve_enabled() -> bool {
+    true
+}
+fn default_daily_cost_cap() -> f32 {
+    0.50
+}
+fn default_min_samples() -> u32 {
+    30
+}
+fn default_generations_per_tick() -> u32 {
+    3
+}
+fn default_benchmark_size() -> u32 {
+    10
+}
+fn default_min_hours_between_ticks() -> u32 {
+    24
+}
+fn default_min_new_outcomes() -> u32 {
+    5
 }
 
 /// Role-based model routing. Lets the user pick a different cheap model
@@ -125,6 +200,7 @@ impl Default for Settings {
             session_dir: None,
             scoped_models: false,
             roles: ModelRoles::default(),
+            evolve: EvolveSettings::default(),
         }
     }
 }
