@@ -1,23 +1,38 @@
 use pi_agent_core::AgentEventKind;
 
 use crate::modes::{build_session, read_stdin_if_piped};
+use crate::prompts;
 use crate::startup::Startup;
 
 /// Print mode: run a single prompt, stream tokens to stdout, exit when done.
 pub async fn run(startup: Startup) -> anyhow::Result<()> {
     let (session, mut rx) = build_session(&startup)?;
-    let stdin_text = read_stdin_if_piped();
-    let prompt_text = match (startup.cli.prompt_text(), stdin_text) {
-        (Some(p), Some(stdin)) => format!("{p}\n\n{stdin}"),
-        (Some(p), None) => p,
-        (None, Some(stdin)) => stdin,
-        (None, None) => {
-            eprintln!("error: no prompt provided");
-            std::process::exit(2);
+
+    // If a prompt template was specified, resolve it and use it as the sole
+    // prompt, ignoring positional args + stdin.
+    let prompt = if let Some(spec) = &startup.cli.prompt_template {
+        let joined = startup.cli.prompt_text().unwrap_or_default();
+        match prompts::resolve(spec, &startup.prompts, &joined) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
         }
+    } else {
+        let stdin_text = read_stdin_if_piped();
+        let prompt_text = match (startup.cli.prompt_text(), stdin_text) {
+            (Some(p), Some(stdin)) => format!("{p}\n\n{stdin}"),
+            (Some(p), None) => p,
+            (None, Some(stdin)) => stdin,
+            (None, None) => {
+                eprintln!("error: no prompt provided");
+                std::process::exit(2);
+            }
+        };
+        expand_at_files(&startup.cli.at_files(), &prompt_text)
     };
 
-    let prompt = expand_at_files(&startup.cli.at_files(), &prompt_text);
 
     let printer = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {

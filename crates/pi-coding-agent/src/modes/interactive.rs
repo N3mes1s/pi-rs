@@ -758,6 +758,17 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
 
     let mut view = View::new(startup.keymap.clone(), startup.settings.thinking);
     view.scoped_models = startup.settings.scoped_models;
+
+    // If --prompt-template was supplied, pre-fill the editor buffer so the
+    // user sees (and can edit) the resolved prompt before submitting.
+    if let Some(spec) = &startup.cli.prompt_template {
+        let joined = startup.cli.prompt_text().unwrap_or_default();
+        if let Ok(resolved) = crate::prompts::resolve(spec, &startup.prompts, &joined) {
+            view.editor.text = resolved.clone();
+            view.editor.cursor = resolved.len();
+        }
+    }
+
     let mut current_model = format!("{}/{}", startup.settings.provider, startup.settings.model);
     let cwd = startup.runtime_config.cwd.clone();
 
@@ -1367,6 +1378,21 @@ async fn run_line_based(mut startup: Startup) -> anyhow::Result<()> {
 
     print_header(&startup);
 
+    // If --prompt-template was supplied, resolve it and use it as the first
+    // (pre-filled) message so the user sees the resolved text immediately.
+    let prefill: Option<String> = if let Some(spec) = &startup.cli.prompt_template {
+        let joined = startup.cli.prompt_text().unwrap_or_default();
+        match crate::prompts::resolve(spec, &startup.prompts, &joined) {
+            Ok(resolved) => Some(resolved),
+            Err(e) => {
+                eprintln!("error: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let printer = tokio::spawn(async move {
         let mut current_line_open = false;
         while let Some(ev) = rx.recv().await {
@@ -1449,6 +1475,15 @@ async fn run_line_based(mut startup: Startup) -> anyhow::Result<()> {
     use tokio::io::AsyncBufReadExt;
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     let mut handle = printer;
+
+    // If a prefill was resolved, display it and send it as the first prompt.
+    if let Some(text) = prefill {
+        println!("you> {text}");
+        handle.abort();
+        let _ = session.prompt(text).await;
+        handle = tokio::spawn(async move {});
+    }
+
     loop {
         if handle.is_finished() {
             // idle.

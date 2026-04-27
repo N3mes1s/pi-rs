@@ -79,3 +79,27 @@ impl PromptRegistry {
         self.inner.keys().cloned().collect()
     }
 }
+
+/// Resolve a prompt-template spec and render it with the given `args` string.
+///
+/// - If `spec` starts with `@`, the remainder is treated as a filesystem path.
+///   The file is read and `{{args}}` / `{{ARGS}}` placeholders are substituted
+///   with `args`.
+/// - Otherwise `spec` is looked up in `registry`. If found, it is rendered
+///   with `args` substituted for `{{args}}` / `{{ARGS}}`. If not found,
+///   `Err("template not found: <spec>")` is returned.
+pub fn resolve(spec: &str, registry: &PromptRegistry, args: &str) -> Result<String, String> {
+    let body = if let Some(path) = spec.strip_prefix('@') {
+        std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read template file '{}': {}", path, e))?
+    } else {
+        match registry.get(spec) {
+            Some(t) => t.body.clone(),
+            None => return Err(format!("template not found: {spec}")),
+        }
+    };
+    let out = body
+        .replace("{{args}}", args)
+        .replace("{{ARGS}}", args);
+    Ok(out)
+}

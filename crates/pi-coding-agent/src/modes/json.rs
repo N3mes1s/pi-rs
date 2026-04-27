@@ -1,16 +1,32 @@
 use crate::modes::{build_session, read_stdin_if_piped};
+use crate::prompts;
 use crate::startup::Startup;
 
 /// JSON event stream mode: emit one event per line, JSON encoded.
 pub async fn run(startup: Startup) -> anyhow::Result<()> {
     let (session, mut rx) = build_session(&startup)?;
-    let stdin_text = read_stdin_if_piped();
-    let prompt = match (startup.cli.prompt_text(), stdin_text) {
-        (Some(p), Some(s)) => format!("{p}\n\n{s}"),
-        (Some(p), None) => p,
-        (None, Some(s)) => s,
-        (None, None) => return Ok(()),
+
+    // If a prompt template was specified, resolve it and use it as the sole
+    // prompt, ignoring positional args + stdin.
+    let prompt = if let Some(spec) = &startup.cli.prompt_template {
+        let joined = startup.cli.prompt_text().unwrap_or_default();
+        match prompts::resolve(spec, &startup.prompts, &joined) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return Ok(());
+            }
+        }
+    } else {
+        let stdin_text = read_stdin_if_piped();
+        match (startup.cli.prompt_text(), stdin_text) {
+            (Some(p), Some(s)) => format!("{p}\n\n{s}"),
+            (Some(p), None) => p,
+            (None, Some(s)) => s,
+            (None, None) => return Ok(()),
+        }
     };
+
 
     let printer = tokio::spawn(async move {
         use std::io::Write;
