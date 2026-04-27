@@ -19,6 +19,7 @@ fn mock_extension(commands: Vec<ExtensionCommandManifest>, executable: &str) -> 
             tools: vec![],
             commands,
             timeout_ms: None,
+            keybindings: vec![],
         },
         root: PathBuf::from("/tmp"),
     }
@@ -138,6 +139,7 @@ async fn extensions_slash_run_command_captures_stdout_with_args() {
                 description: "echoes args".into(),
             }],
             timeout_ms: Some(5_000),
+            keybindings: vec![],
         },
         root: dir.path().to_path_buf(),
     };

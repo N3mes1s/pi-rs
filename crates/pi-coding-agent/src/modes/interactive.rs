@@ -80,7 +80,7 @@ enum PickerKind {
 }
 
 #[derive(Debug)]
-pub(crate) struct PickerOverlay {
+pub struct PickerOverlay {
     kind: PickerKind,
     picker: Picker<String>,
     title: String,
@@ -90,7 +90,7 @@ pub(crate) struct PickerOverlay {
 /// without a real TTY. Holds the transcript, keymap, optional picker, and
 /// editor history. The TUI loop owns one of these and mutates it in response
 /// to events; on each tick it asks for a render.
-pub(crate) struct View {
+pub struct View {
     pub transcript: Transcript,
     pub keymap: Keymap,
     pub picker: Option<PickerOverlay>,
@@ -135,7 +135,7 @@ impl View {
 /// Outcome of `handle_key` — tells the outer loop what (if anything) to do
 /// in addition to local state mutations.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum KeyOutcome {
+pub enum KeyOutcome {
     None,
     Submit(String),
     Queue(String),
@@ -150,12 +150,18 @@ pub(crate) enum KeyOutcome {
     CycleThinking,
     /// Spawn external editor.
     EditExternal,
+    /// An extension-registered keybinding fired.
+    ExtensionCommand {
+        extension_index: usize,
+        command_name: String,
+        args: String,
+    },
 }
 
 /// Pure key handler — no I/O. Returns what the outer loop must drive.
 /// Mutates `view` (editor buffer, picker query, history index, transcript
 /// collapse flags, quit-confirm timer).
-pub(crate) fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
+pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
     view.dirty = true;
 
     // If a picker is open, route everything through it first.
@@ -335,6 +341,15 @@ pub(crate) fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
                 return KeyOutcome::None;
             }
         }
+    }
+
+    // Extension-registered keybinding fallback.
+    if let Some((idx, name)) = view.keymap.lookup_extension(ev) {
+        return KeyOutcome::ExtensionCommand {
+            extension_index: idx,
+            command_name: name,
+            args: String::new(),
+        };
     }
 
     // Bare Ctrl+T toggles thinking-collapse. Override default mapping at the
@@ -693,6 +708,20 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                                         view.turn_in_progress = true;
                                         let s = session.clone();
                                         tokio::spawn(async move { let _ = s.prompt(text).await; });
+                                    }
+                                }
+                            }
+                            KeyOutcome::ExtensionCommand { extension_index, command_name, args } => {
+                                if let Some(ext) = startup.extensions.get(extension_index) {
+                                    match extensions::run_command(ext, &command_name, &args).await {
+                                        Ok(stdout) => {
+                                            view.transcript.blocks.push(crate::renderer::Block::Note(stdout));
+                                        }
+                                        Err(e) => {
+                                            view.transcript.blocks.push(crate::renderer::Block::Error(format!(
+                                                "extension command {command_name}: {e}"
+                                            )));
+                                        }
                                     }
                                 }
                             }

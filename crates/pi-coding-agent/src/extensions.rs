@@ -57,6 +57,12 @@ pub struct ExtensionCommandManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionKeybinding {
+    pub chord: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionManifest {
     pub name: String,
     #[serde(default)]
@@ -68,6 +74,8 @@ pub struct ExtensionManifest {
     pub commands: Vec<ExtensionCommandManifest>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub keybindings: Vec<ExtensionKeybinding>,
 }
 
 #[derive(Debug, Clone)]

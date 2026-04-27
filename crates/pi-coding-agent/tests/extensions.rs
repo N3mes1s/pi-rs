@@ -43,6 +43,7 @@ fn discover_walks_nested_extension_dirs() {
                 }],
                 commands: vec![],
                 timeout_ms: Some(5_000),
+                keybindings: vec![],
             },
         );
     }
@@ -73,6 +74,7 @@ fn discover_walks_single_extension_root_with_manifest_at_root() {
             }],
             commands: vec![],
             timeout_ms: Some(5_000),
+            keybindings: vec![],
         },
     );
     let exts = discover(&[root.path().to_path_buf()]);
@@ -99,6 +101,7 @@ async fn extension_tool_converts_json_output_to_tool_result() {
         }],
         commands: vec![],
         timeout_ms: Some(5_000),
+        keybindings: vec![],
     };
     write_manifest(root.path(), &manifest);
 

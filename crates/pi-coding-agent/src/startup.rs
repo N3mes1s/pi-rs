@@ -177,6 +177,13 @@ pub fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         }
     }
 
+    // Register extension keybindings.
+    for (ext_idx, ext) in loaded_exts.iter().enumerate() {
+        for kb in &ext.manifest.keybindings {
+            keymap.bind_extension(&kb.chord, ext_idx, kb.command.clone());
+        }
+    }
+
     // Build slash registry with extension commands registered.
     let mut slash_registry = SlashRegistry::new();
     slash_registry.register_templates(&prompts);

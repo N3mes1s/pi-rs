@@ -36,6 +36,7 @@ pub enum Action {
 #[derive(Debug, Clone, Default)]
 pub struct Keymap {
     pub bindings: BTreeMap<Chord, Action>,
+    pub extension_bindings: BTreeMap<Chord, (usize, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -122,6 +123,23 @@ impl Keymap {
                 }
             }
         }
+    }
+
+    /// Register an extension keybinding. Returns `true` if the chord parsed
+    /// successfully, `false` (and does nothing) if it did not.
+    pub fn bind_extension(&mut self, chord: &str, ext_idx: usize, command_name: String) -> bool {
+        if let Some(c) = parse_chord(chord) {
+            self.extension_bindings.insert(c, (ext_idx, command_name));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Look up an extension binding for the given key event.
+    pub fn lookup_extension(&self, ev: &KeyEvent) -> Option<(usize, String)> {
+        let c = chord_from_event(ev);
+        self.extension_bindings.get(&c).cloned()
     }
 }
 
