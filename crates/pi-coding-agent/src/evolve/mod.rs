@@ -19,9 +19,14 @@
 //! candidate that regresses on previously-winning prompts.
 
 pub mod agents_md;
+pub mod benchmark;
 pub mod mutate;
 
 pub use agents_md::{AgentsMd, Section};
+pub use benchmark::{
+    load_cases, run_all, summarize, BenchmarkCase, BenchmarkError, BenchmarkSummary, Replay,
+    RolloutResult, SubprocessReplay,
+};
 pub use mutate::{
     build_prompt, post_process, EvidenceItem, MutateError, Mutator, MutatorConfig,
     MutationEvidence,
