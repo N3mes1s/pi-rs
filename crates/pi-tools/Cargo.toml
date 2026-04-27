@@ -8,6 +8,7 @@ description = "Built-in tools for the pi-rs coding agent"
 tempfile.workspace = true
 base64.workspace = true
 tokio = { workspace = true, features = ["full"] }
+wiremock.workspace = true
 
 [dependencies]
 pi-ai.workspace = true
@@ -25,3 +26,4 @@ glob.workspace = true
 shellexpand.workspace = true
 base64.workspace = true
 chrono.workspace = true
+reqwest.workspace = true
