@@ -26,6 +26,7 @@ pub mod autoresearch;
 pub mod cli;
 pub mod cmd;
 pub mod context;
+pub mod evolve;
 pub mod extensions;
 pub mod keymap;
 pub mod modes;

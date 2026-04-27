@@ -41,6 +41,7 @@ nucleo-matcher.workspace = true
 notify.workspace = true
 unicode-segmentation.workspace = true
 ignore.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
