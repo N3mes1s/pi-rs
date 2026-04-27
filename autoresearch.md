@@ -82,15 +82,47 @@ emits `METRIC build_s=…`, `METRIC size_kib=…`.
 
 ## What's Been Tried
 
-(populated during the loop)
+| # | Change | build_s | size_kib | verdict |
+|---|--------|---------|----------|---------|
+| 1 | **Baseline** (lto=fat, cgu=1, opt=z, ld) | **73.26** | **4261** | kept |
+| 2 | lto=thin + cgu=16 + mold | 60.58 | 6291 | size +2030 KiB → discard |
+| 3 | lto=thin + cgu=1 + mold | 49.87 | 5614 | size +1353 KiB → discard |
+| 4 | fat LTO + opt=s + mold | 79.29 | 5175 | slower AND bigger → discard |
+| 5 | deps profile opt=0 cgu=256 + fat LTO | 102.07 | 4901 | unoptimised dep IR explodes LTO step → discard |
+| 6 | fat LTO + opt=3 (hoping LTO skips slow size passes) | 104.43 | 6205 | -O3 inlining explodes IR → discard |
+| 7 | fat LTO + cgu=16 on deps via release.package.* | 76.27 | 4337 | within noise, no win → discard |
 
-## Ideas Backlog
+### Conclusions
 
-1. `lto = "thin"` + `codegen-units = 16` baseline-buster.
-2. `lto = false` (no LTO) + `codegen-units = 16` + still `opt-level = "z"`.
-3. mold linker on the musl static target.
-4. Drop reqwest features we don't use (`stream` if unused, etc.) — but
-   careful of behaviour change.
-5. Move `[profile.release]` to keep `opt-level = "z"` only on
-   `pi-coding-agent` and let deps build at `s` (or vice-versa).
-6. Combination: thin LTO + cgu=16 + mold.
+- **The 73 s baseline is at the size-optimal Pareto front** under the
+  4700 KiB ceiling. Every lever that bought build-time speed cost
+  >900 KiB of binary size that the size guardrail rejects.
+- **Fat LTO is doing 1.3+ MB of dead-code elimination we cannot lose.**
+  Switching to ThinLTO (any cgu, any linker) regresses size by
+  900–2000 KiB — far past the 4700 KiB ceiling.
+- The 35 s `pi-coding-agent` fat-LTO step is the **serial bottleneck**.
+  Nothing we can do at the `Cargo.toml` / `.cargo/config.toml` /
+  per-package-profile level shortens it without losing fat LTO.
+- Within fat LTO, **`opt-level = "z"` is paradoxically the fastest**
+  setting we tried: `s` and `3` both inflate IR before/during LTO,
+  so the LLVM whole-program pass does *more* work, not less.
+- **Mold linker** had no measurable effect on link time — the
+  release link is dominated by rustc/LLVM's LTO step, not the
+  system linker pass that follows it.
+- Per-dep `codegen-units = 16` (parallelise within slow deps like
+  rustls/tokio/regex-automata) had no wall-clock benefit because dep
+  builds already overlap each other on the 4-core box; the critical
+  path is the final LTO step.
+
+### Untried but unlikely-to-help (dead-end backlog)
+
+- **Nightly `-Z threads=N`** (parallel rustc frontend) — not on this
+  toolchain and the bottleneck is LLVM, not rustc.
+- **Aggressive feature pruning of `tokio` / `reqwest`** — tried in
+  prior r3 session, regressed (slow startup-test gain didn't pay back
+  in build-time terms). Source uses `tokio::{fs,io,net,process,sync,
+  time,runtime,spawn}` so we'd lose at most one feature gate.
+- **Splitting `pi-coding-agent` into smaller crates** — would just
+  shift the LTO cost; fat LTO unifies the whole tree anyway.
+- **PGO** — tried in r3, regressed score; orthogonal to build-time
+  goal here.
