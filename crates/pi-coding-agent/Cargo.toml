@@ -43,6 +43,7 @@ unicode-segmentation.workspace = true
 ignore.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
+pi-stats.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
