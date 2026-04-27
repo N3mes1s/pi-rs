@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Settings persisted to `~/.pi/agent/settings.json` (with project overrides
@@ -52,6 +53,36 @@ pub struct Settings {
     /// `From<&LspSettings>` at startup.
     #[serde(default)]
     pub lsp: LspSettings,
+    /// Subagent (`task` tool) settings — fan-out cap and per-agent
+    /// model overrides. See `pi_coding_agent::native::task` (RFD 0005).
+    #[serde(default)]
+    pub task: TaskSettings,
+}
+
+/// Configuration for the `task` tool / subagent system. Lives here so
+/// `Settings` is self-contained; consumed by
+/// `pi_coding_agent::native::task`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskSettings {
+    /// Default subagent fan-out cap (matches oh-my-pi).
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: usize,
+    /// Per-agent overrides — agent name → model id/alias.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_models: BTreeMap<String, String>,
+}
+
+impl Default for TaskSettings {
+    fn default() -> Self {
+        Self {
+            max_concurrency: default_max_concurrency(),
+            agent_models: BTreeMap::new(),
+        }
+    }
+}
+
+fn default_max_concurrency() -> usize {
+    5
 }
 
 /// Configuration for the autonomous evolution loop (G8).
@@ -208,6 +239,7 @@ impl Default for Settings {
             roles: ModelRoles::default(),
             evolve: EvolveSettings::default(),
             lsp: LspSettings::default(),
+            task: TaskSettings::default(),
         }
     }
 }
