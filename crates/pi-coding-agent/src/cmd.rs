@@ -179,6 +179,7 @@ pub fn run_evolve(verb: &str) -> anyhow::Result<()> {
             println!("evolve: enabled for {}", cwd.display());
             Ok(())
         }
+        "dry-run" => run_evolve_dry_run(&cwd),
         "status" => {
             let mut ledger = CostLedger::load(&cwd);
             let state = State::load(&cwd);
@@ -220,8 +221,135 @@ pub fn run_evolve(verb: &str) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        other => anyhow::bail!("unknown --evolve verb: {other} (expected: status, off, on)"),
+        other => anyhow::bail!("unknown --evolve verb: {other} (expected: status, off, on, dry-run)"),
     }
+}
+
+/// `pi --evolve dry-run` — preview what the daemon *would* do for the
+/// current cwd without spending a single token. Loads past trajectories,
+/// the on-disk AGENTS.md, builds evidence, picks the next mutable
+/// section, and prints the prompt that would be sent to the slow model.
+/// Also surfaces the cost ledger + every gate decision.
+fn run_evolve_dry_run(cwd: &std::path::Path) -> anyhow::Result<()> {
+    use crate::context::{agent_dir, sessions_dir, settings_paths};
+    use crate::evolve::{
+        build_prompt, evolve_dir, is_disabled, load_cases, should_run, AgentsMd, CostLedger,
+        EvidenceItem, MutationEvidence, State, TickDecision,
+    };
+    use pi_agent_core::Settings;
+
+    let _ = evolve_dir(cwd); // ensure dir exists for ledger/state
+    let (global, project) = settings_paths();
+    let mut settings = Settings::load(&global);
+    settings.merge_project(&project);
+
+    let agents_md_path = locate_agents_md(cwd, &agent_dir());
+    let has_agents_md = agents_md_path.is_file();
+
+    let cwd_slug = cwd.display().to_string().replace(['/', '\\', ':'], "_");
+    let cases = load_cases(
+        &sessions_dir(),
+        &cwd_slug,
+        settings.evolve.benchmark_size as usize,
+    )
+    .unwrap_or_default();
+
+    let mut cost = CostLedger::load(cwd);
+    let state = State::load(cwd);
+    let decision = should_run(
+        &settings.evolve,
+        &mut cost,
+        &state,
+        cwd,
+        cases.len() as u32,
+        has_agents_md,
+    );
+
+    println!("evolve --dry-run for {}", cwd.display());
+    println!("  agents_md:        {}", agents_md_path.display());
+    println!("  has_agents_md:    {}", has_agents_md);
+    println!("  cases_loaded:     {}", cases.len());
+    println!("  ticks_run:        {}", state.ticks_run);
+    println!("  spent_today:      ${:.4}", cost.today_spend());
+    println!("  daily_cost_cap:   ${:.4}", settings.evolve.daily_cost_cap_usd);
+    println!("  generations/tick: {}", settings.evolve.generations_per_tick);
+    println!("  min_samples:      {}", settings.evolve.min_samples);
+    println!(
+        "  disabled_locally: {}",
+        if is_disabled(cwd) { "yes" } else { "no" }
+    );
+
+    match &decision {
+        TickDecision::Run => println!("  gate:             would RUN"),
+        TickDecision::Skip(why) => println!("  gate:             would SKIP — {:?}", why),
+    }
+
+    if !has_agents_md {
+        println!("\n(no AGENTS.md found — nothing to mutate)");
+        return Ok(());
+    }
+
+    let baseline_text = std::fs::read_to_string(&agents_md_path)?;
+    let baseline_doc = AgentsMd::parse(&baseline_text);
+    let mutable: Vec<(usize, String)> = baseline_doc
+        .mutable_sections()
+        .map(|(i, s)| (i, s.heading.trim_end().to_string()))
+        .collect();
+
+    println!("\nMutable sections ({}):", mutable.len());
+    for (i, h) in &mutable {
+        println!("  [{}] {}", i, h);
+    }
+    if mutable.is_empty() {
+        println!("(every section is pi:keep — daemon would log + exit cleanly)");
+        return Ok(());
+    }
+
+    // Mirror orchestrator: target_idx = mutable_indices[gen % len]
+    // for gen=0 — the *next* mutation.
+    let next_target_idx = mutable[0].0;
+    println!(
+        "\nNext mutation target (gen 0): section [{}] {}",
+        mutable[0].0, mutable[0].1
+    );
+
+    // Build evidence the same way the orchestrator does.
+    let mut wins = Vec::new();
+    let mut losses = Vec::new();
+    for c in &cases {
+        let item = EvidenceItem {
+            user_request: c.user_prompt.clone(),
+            verdict_reason: c
+                .historical_score
+                .map(|s| format!("score={s:.2}"))
+                .unwrap_or_else(|| "no score".into()),
+        };
+        match c.historical_success {
+            Some(true) => wins.push(item),
+            Some(false) => losses.push(item),
+            None => {}
+        }
+    }
+    let evidence = MutationEvidence { wins, losses };
+    println!(
+        "  evidence:         {} win(s), {} loss(es)",
+        evidence.wins.len(),
+        evidence.losses.len()
+    );
+
+    let section = &baseline_doc.sections[next_target_idx];
+    let prompt = build_prompt(&baseline_doc, next_target_idx, section, &evidence);
+
+    println!("\n──── sample mutator prompt ────────────────────────────────");
+    println!("{}", prompt);
+    println!("──── end prompt ───────────────────────────────────────────");
+
+    // Cost cap proximity gauge.
+    let remaining = (settings.evolve.daily_cost_cap_usd - cost.today_spend()).max(0.0);
+    println!("\n  budget remaining today: ${:.4}", remaining);
+    println!("(no model call made; AGENTS.md untouched)");
+
+    Ok(())
 }
 
 /// `pi --flamegraph <session-id-or-path>` — render trajectory flamegraph

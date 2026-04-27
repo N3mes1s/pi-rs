@@ -88,3 +88,61 @@ fn evolve_with_unknown_verb_rejected_by_clap() {
     // we even reach run_evolve — exit code 2.
     assert!(!out.status.success());
 }
+
+#[test]
+fn evolve_dry_run_in_empty_cwd_reports_no_agents_md_and_exits_zero() {
+    // No AGENTS.md, no past trajectories. Dry-run should still succeed
+    // — it's a preview, not a hard failure — and surface the missing
+    // file so the user understands why the daemon would skip.
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(pi_binary())
+        .args(["--evolve", "dry-run"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path()) // isolate global AGENTS.md fallback
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("evolve --dry-run for"));
+    assert!(stdout.contains("has_agents_md:    false"));
+    assert!(stdout.contains("would SKIP"));
+    // Confirms we never reached the prompt-rendering branch.
+    assert!(!stdout.contains("sample mutator prompt"));
+}
+
+#[test]
+fn evolve_dry_run_with_agents_md_renders_sample_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    // Minimal AGENTS.md with one mutable section.
+    std::fs::write(
+        dir.path().join("AGENTS.md"),
+        "# AGENTS\n\n## Tools\n\nPrefer `rg` over `grep`.\n",
+    )
+    .unwrap();
+    let out = Command::new(pi_binary())
+        .args(["--evolve", "dry-run"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("has_agents_md:    true"));
+    assert!(stdout.contains("Mutable sections"));
+    assert!(stdout.contains("Next mutation target"));
+    assert!(stdout.contains("sample mutator prompt"));
+    // build_prompt always emits the heading + current_body XML wrappers.
+    assert!(stdout.contains("<heading>"));
+    assert!(stdout.contains("<current_body>"));
+    // We never reach the slow model.
+    assert!(stdout.contains("no model call made"));
+    assert!(stdout.contains("AGENTS.md untouched"));
+}
