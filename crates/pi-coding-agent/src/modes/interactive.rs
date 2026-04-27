@@ -79,6 +79,10 @@ pub(crate) enum PickerKind {
     Fork,
     Clone,
     AtCompletion,
+    /// First step of `/settings`: choose a field name.
+    SettingsField,
+    /// Second step of `/settings`: choose a value for the previously chosen field.
+    SettingsValue,
 }
 
 #[derive(Debug)]
@@ -542,6 +546,8 @@ fn picker_outcome(kind: PickerKind, value: String) -> KeyOutcome {
         PickerKind::Fork => KeyOutcome::SlashCommand("fork".into(), value),
         PickerKind::Clone => KeyOutcome::SlashCommand("__clone_pick".into(), value),
         PickerKind::AtCompletion => KeyOutcome::AtComplete { picked: value },
+        PickerKind::SettingsField => KeyOutcome::SlashCommand("__settings_field".into(), value),
+        PickerKind::SettingsValue => KeyOutcome::SlashCommand("__settings_value".into(), value),
     }
 }
 
@@ -1284,12 +1290,107 @@ async fn handle_slash(
             SlashOutcome::Continue
         }
         "settings" => {
-            view.transcript
-                .blocks
-                .push(crate::renderer::Block::Note(format!(
-                    "settings: {}",
-                    crate::context::settings_paths().0.display()
-                )));
+            // Step 1: open a field-name picker.
+            let theme_names: Vec<String> = startup.themes.names();
+            let sf = crate::settings_ui::fields(&startup.settings, &theme_names);
+            let items: Vec<PickItem<String>> = sf
+                .into_iter()
+                .map(|f| PickItem {
+                    label: format!("{}: {}", f.name, f.current),
+                    value: f.name.to_string(),
+                })
+                .collect();
+            view.picker = Some(PickerOverlay {
+                kind: PickerKind::SettingsField,
+                picker: Picker::new(items),
+                title: "settings: choose field".into(),
+            });
+            SlashOutcome::Continue
+        }
+        // Step 2 (internal): a field was chosen — open the value picker.
+        "__settings_field" => {
+            let chosen_field = args.trim().to_string();
+            let theme_names: Vec<String> = startup.themes.names();
+            let sf = crate::settings_ui::fields(&startup.settings, &theme_names);
+            if let Some(field) = sf.into_iter().find(|f| f.name == chosen_field) {
+                let items: Vec<PickItem<String>> = field
+                    .options
+                    .into_iter()
+                    .map(|opt| PickItem {
+                        label: opt.clone(),
+                        // Encode "fieldname\x00value" so __settings_value can recover both.
+                        value: format!("{}\x00{}", chosen_field, opt),
+                    })
+                    .collect();
+                view.picker = Some(PickerOverlay {
+                    kind: PickerKind::SettingsValue,
+                    picker: Picker::new(items),
+                    title: format!("settings: {}", chosen_field),
+                });
+            } else {
+                view.transcript
+                    .blocks
+                    .push(crate::renderer::Block::Error(format!(
+                        "settings: unknown field {:?}",
+                        chosen_field
+                    )));
+            }
+            SlashOutcome::Continue
+        }
+        // Step 3 (internal): a value was chosen — apply and persist.
+        "__settings_value" => {
+            // The value arg is encoded as "fieldname\x00optionvalue" by the
+            // SettingsValue picker items built in __settings_field above.
+            let encoded = args;
+            let (field_name, field_value) = if let Some(idx) = encoded.find('\x00') {
+                (&encoded[..idx], &encoded[idx + 1..])
+            } else {
+                view.transcript
+                    .blocks
+                    .push(crate::renderer::Block::Error(
+                        "settings: internal error (no field encoding)".into(),
+                    ));
+                return SlashOutcome::Continue;
+            };
+            match crate::settings_ui::apply(&mut startup.settings, field_name, field_value) {
+                Ok(()) => {
+                    // Sync the runtime_config copy too.
+                    startup.runtime_config.settings = startup.settings.clone();
+                    // Persist.
+                    let settings_path = crate::context::settings_path();
+                    if let Err(e) = startup.settings.save(&settings_path) {
+                        view.transcript
+                            .blocks
+                            .push(crate::renderer::Block::Error(format!(
+                                "settings: persist failed: {e}"
+                            )));
+                    } else {
+                        view.transcript
+                            .blocks
+                            .push(crate::renderer::Block::Note(format!(
+                                "[settings: {field_name} = {field_value}]"
+                            )));
+                    }
+                    // Live-apply certain fields.
+                    if field_name == "scoped_models" {
+                        view.scoped_models = startup.settings.scoped_models;
+                        if !view.scoped_models {
+                            view.scoped_previous_model = None;
+                        }
+                    }
+                    if field_name == "thinking" {
+                        view.thinking = startup.settings.thinking;
+                        let level: pi_ai::ThinkingLevel = startup.settings.thinking.into();
+                        let s = session.clone();
+                        tokio::spawn(async move { s.set_thinking(level).await; });
+                    }
+                }
+                Err(e) => {
+                    view.transcript
+                        .blocks
+                        .push(crate::renderer::Block::Error(format!("settings: {e}")));
+                }
+            }
             SlashOutcome::Continue
         }
         // Internal slash names produced by picker resolution.

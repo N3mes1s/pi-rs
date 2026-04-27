@@ -24,6 +24,12 @@ pub fn settings_paths() -> (PathBuf, PathBuf) {
     (agent_dir().join("settings.json"), project_dir().join("settings.json"))
 }
 
+/// Returns the global (user-level) settings.json path.
+/// Equivalent to `settings_paths().0`.
+pub fn settings_path() -> PathBuf {
+    settings_paths().0
+}
+
 pub fn auth_path() -> PathBuf {
     agent_dir().join("auth.json")
 }
