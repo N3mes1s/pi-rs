@@ -174,6 +174,18 @@ pub struct Cli {
     #[arg(long, env = "PI_PLAN_MODEL")]
     pub plan: Option<String>,
 
+    /// Stats subcommand: `server` (default — bind dashboard on
+    /// `--stats-port`), `sync` (ingest then exit), or `json` (ingest
+    /// then dump `DashboardStats` to stdout). Short-circuits the
+    /// agent loop. RFD 0004.
+    #[arg(long = "stats", value_name = "VERB", num_args = 0..=1,
+          default_missing_value = "server")]
+    pub stats: Option<String>,
+
+    /// Port for `--stats server` (default 3847).
+    #[arg(long = "stats-port", default_value_t = 3847)]
+    pub stats_port: u16,
+
     /// Free-form positional args. `@file` references add attachments.
     #[arg(value_name = "MESSAGE_OR_AT_FILES")]
     pub positionals: Vec<String>,

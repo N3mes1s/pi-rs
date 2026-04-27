@@ -56,6 +56,17 @@ fn main() -> anyhow::Result<()> {
     if let Some(spec) = &cli.policy {
         return cmd::run_policy(spec);
     }
+    if let Some(verb) = cli.stats.clone() {
+        let parsed = pi_stats::cli::StatsVerb::parse(&verb)?;
+        let cfg = pi_stats::cli::StatsConfig {
+            port: cli.stats_port,
+            ..Default::default()
+        };
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return rt.block_on(pi_stats::cli::run(parsed, cfg));
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
