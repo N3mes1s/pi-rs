@@ -220,6 +220,10 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         tools.register(Arc::new(crate::autoresearch::tools::LogExperimentTool));
         // Native todo tool (B2). Persists to <cwd>/.pi/todo.json.
         tools.register(Arc::new(crate::native::todo::TodoTool));
+        // Native ask tool (B3). Returns is_error in non-interactive modes
+        // and a structured `display.ask` payload otherwise (the TUI picker
+        // wiring is still pending).
+        tools.register(Arc::new(crate::native::ask::AskTool));
     }
 
     let loaded_exts = extensions::discover(&ext_roots);
