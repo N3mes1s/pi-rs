@@ -1231,6 +1231,32 @@ async fn handle_slash(
                 )));
             SlashOutcome::Continue
         }
+        "export" => {
+            let mgr = startup.runtime_config.session_manager.clone();
+            let branch = mgr.current_branch(session.id());
+            let meta = mgr.meta(session.id());
+            let (provider, model) = meta
+                .map(|m| (m.provider, m.model))
+                .unwrap_or_else(|| (startup.settings.provider.clone(), startup.settings.model.clone()));
+            let html = crate::share::render_session_html(&branch, session.id(), &provider, &model);
+            // Write to a temp file and report the path.
+            let mut path = std::env::temp_dir();
+            path.push(format!("pi-export-{}.html", session.id().chars().take(8).collect::<String>()));
+            match std::fs::write(&path, html) {
+                Ok(()) => view
+                    .transcript
+                    .blocks
+                    .push(crate::renderer::Block::Note(format!(
+                        "[exported: {}]",
+                        path.display()
+                    ))),
+                Err(e) => view
+                    .transcript
+                    .blocks
+                    .push(crate::renderer::Block::Error(format!("export: {e}"))),
+            }
+            SlashOutcome::Continue
+        }
         "share" => {
             let mgr = startup.runtime_config.session_manager.clone();
             let branch = mgr.current_branch(session.id());

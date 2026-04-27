@@ -1,8 +1,12 @@
 //! `/share` helper — renders the active branch of a session as Markdown
 //! and uploads it as a GitHub Gist via the `gh` CLI.
 //!
-//! Pure rendering is exposed via [`render_markdown`] so it can be
-//! unit-tested without a real session manager or process invocation.
+//! Also provides [`render_session_html`] for the `/export` command which
+//! produces a self-contained HTML document with role-coloured blocks.
+//!
+//! Pure rendering is exposed via [`render_markdown`] and
+//! [`render_session_html`] so they can be unit-tested without a real
+//! session manager or process invocation.
 
 use pi_agent_core::{SessionEntry, SessionEntryKind};
 
@@ -70,6 +74,143 @@ pub fn render_markdown(
         }
     }
     out
+}
+
+// ─── HTML export ─────────────────────────────────────────────────────────────
+
+/// HTML-escape `s`: replace `&`, `<`, `>`, and `"` so the text is safe to
+/// embed in HTML attributes and CDATA.
+pub fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Render a session branch as a self-contained HTML document.
+///
+/// Each conversational block is wrapped in a `<div class="block role-X">`
+/// element with a `<header>` showing the role and (for tool calls) the tool
+/// name.  The message body is placed in a `<pre>` so whitespace is preserved.
+///
+/// The document includes a small embedded CSS block with role-coloured left
+/// borders:
+/// - `role-user`        → cyan  (`#00bcd4`)
+/// - `role-assistant`   → green (`#4caf50`)
+/// - `role-tool_call`   → yellow(`#ffc107`)
+/// - `role-tool_result` → dark grey (`#607d8b`)
+/// - `role-compaction`  → orange (`#ff9800`)
+///
+/// All text bodies are HTML-escaped before insertion.
+pub fn render_session_html(
+    messages: &[SessionEntry],
+    session_id: &str,
+    provider: &str,
+    model: &str,
+) -> String {
+    let short_id = if session_id.len() > 8 {
+        &session_id[..8]
+    } else {
+        session_id
+    };
+
+    let mut body = String::new();
+
+    for e in messages {
+        match &e.kind {
+            SessionEntryKind::User { message } => {
+                let text = html_escape(message.text().trim_end());
+                body.push_str(&format!(
+                    "<div class=\"block role-user\">\
+                      <header>user</header>\
+                      <pre>{text}</pre>\
+                    </div>\n"
+                ));
+            }
+            SessionEntryKind::Assistant { message } => {
+                let text = html_escape(message.text().trim_end());
+                body.push_str(&format!(
+                    "<div class=\"block role-assistant\">\
+                      <header>assistant</header>\
+                      <pre>{text}</pre>\
+                    </div>\n"
+                ));
+            }
+            SessionEntryKind::ToolCall { call } => {
+                let name = html_escape(&call.name);
+                let input = serde_json::to_string_pretty(&call.input).unwrap_or_else(|_| "{}".into());
+                let input_escaped = html_escape(input.trim_end());
+                body.push_str(&format!(
+                    "<div class=\"block role-tool_call\">\
+                      <header>tool_call: {name}</header>\
+                      <pre>{input_escaped}</pre>\
+                    </div>\n"
+                ));
+            }
+            SessionEntryKind::ToolResult { result } => {
+                let output = html_escape(result.model_output.trim_end());
+                let extra_class = if result.is_error { " role-error" } else { "" };
+                body.push_str(&format!(
+                    "<div class=\"block role-tool_result{extra_class}\">\
+                      <header>tool_result</header>\
+                      <pre>{output}</pre>\
+                    </div>\n"
+                ));
+            }
+            SessionEntryKind::Compaction { summary, .. } => {
+                let text = html_escape(summary.trim_end());
+                body.push_str(&format!(
+                    "<div class=\"block role-compaction\">\
+                      <header>compaction</header>\
+                      <pre>{text}</pre>\
+                    </div>\n"
+                ));
+            }
+            // Meta / SystemPrompt / Usage are header info; skip.
+            _ => {}
+        }
+    }
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pi-rs session {short_id}</title>
+<style>
+body {{ font-family: monospace; background: #1e1e1e; color: #d4d4d4; margin: 1rem 2rem; }}
+.block {{ border-left: 4px solid #555; margin: 0.75rem 0; padding: 0.5rem 1rem; background: #252526; border-radius: 2px; }}
+.block header {{ font-weight: bold; margin-bottom: 0.25rem; font-size: 0.85em; opacity: 0.8; }}
+.block pre {{ margin: 0; white-space: pre-wrap; word-break: break-word; }}
+.role-user        {{ border-color: #00bcd4; }}
+.role-assistant   {{ border-color: #4caf50; }}
+.role-tool_call   {{ border-color: #ffc107; }}
+.role-tool_result {{ border-color: #607d8b; }}
+.role-compaction  {{ border-color: #ff9800; }}
+.role-error       {{ border-color: #f44336; }}
+h1 {{ color: #9cdcfe; margin-bottom: 0.25rem; }}
+p.meta {{ color: #888; margin-top: 0; font-size: 0.9em; }}
+</style>
+</head>
+<body>
+<h1>pi-rs session {session_id}</h1>
+<p class="meta">{provider}/{model}</p>
+{body}</body>
+</html>
+"#,
+        short_id = short_id,
+        session_id = html_escape(session_id),
+        provider = html_escape(provider),
+        model = html_escape(model),
+        body = body,
+    )
 }
 
 /// Run `gh gist create -d 'pi-rs session' -` with `body` on stdin.
