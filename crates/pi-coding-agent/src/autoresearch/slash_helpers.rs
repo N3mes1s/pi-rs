@@ -93,6 +93,71 @@ pub fn ensure_session(cwd: &Path, text: &str) -> std::io::Result<Session> {
 
 // ── export ────────────────────────────────────────────────────────────────────
 
+/// Build a [`DashboardState`] + run rows from a session on disk.
+///
+/// Returns `Ok(None)` when no `autoresearch.config.json` exists in `cwd`
+/// (i.e. there is no active autoresearch session). Errors only surface
+/// genuine I/O failures.
+///
+/// Used by both `/autoresearch export` (writes HTML) and the TUI dashboard
+/// widget (renders inline above the editor).
+pub fn load_snapshot(
+    cwd: &Path,
+) -> std::io::Result<
+    Option<(
+        crate::autoresearch::dashboard::DashboardState,
+        Vec<(String, f64, bool)>,
+    )>,
+> {
+    if !cwd.join("autoresearch.config.json").exists() {
+        return Ok(None);
+    }
+    let session = Session::load(cwd)?;
+    let log = crate::autoresearch::log::JsonlLog::new(session.jsonl_path());
+    let runs = log.read_runs()?;
+
+    let mut run_rows: Vec<(String, f64, bool)> = Vec::new();
+    let mut sample_values: Vec<f64> = Vec::new();
+    for r in &runs {
+        let kept = r.status == crate::autoresearch::log::RunStatus::Keep;
+        run_rows.push((r.description.clone(), r.metric, kept));
+        sample_values.push(r.metric);
+    }
+    let baseline = sample_values.first().copied().unwrap_or(0.0);
+    let current_best = match session.config.direction {
+        MetricDirection::Lower => sample_values
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min),
+        MetricDirection::Higher => sample_values
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max),
+    };
+    let current_best = if current_best.is_infinite() {
+        baseline
+    } else {
+        current_best
+    };
+    let confidence = crate::autoresearch::confidence::compute(
+        &sample_values,
+        baseline,
+        session.config.direction,
+    );
+    let kept_count = run_rows.iter().filter(|(_, _, k)| *k).count();
+    let state = crate::autoresearch::dashboard::DashboardState {
+        session_name: session.config.name.clone(),
+        runs: run_rows.len(),
+        kept: kept_count,
+        metric_name: session.config.metric.clone(),
+        baseline,
+        current_best,
+        direction: session.config.direction,
+        confidence,
+    };
+    Ok(Some((state, run_rows)))
+}
+
 /// Render the autoresearch dashboard table and write it to
 /// `<cwd>/autoresearch-dashboard.html`.
 ///

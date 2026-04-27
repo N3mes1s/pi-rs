@@ -123,6 +123,28 @@ pub struct View {
     pub at_query_start: Option<usize>,
     /// Whether the autoresearch loop is currently active.
     pub autoresearch_active: bool,
+    /// Toggle state for the autoresearch dashboard widget (Ctrl+Shift+T).
+    pub dashboard_mode: DashboardMode,
+    /// Cached snapshot of the autoresearch dashboard. `None` when no
+    /// autoresearch session exists in the current cwd.
+    pub dashboard_snapshot: Option<DashboardSnapshot>,
+}
+
+/// How the autoresearch dashboard should be rendered above the editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardMode {
+    /// Hidden — render nothing.
+    Hidden,
+    /// One-line widget on top of the editor.
+    Inline,
+    /// Multi-line table.
+    Expanded,
+}
+
+/// Cached state for the autoresearch dashboard.
+pub struct DashboardSnapshot {
+    pub state: crate::autoresearch::DashboardState,
+    pub runs: Vec<(String, f64, bool)>,
 }
 
 impl View {
@@ -144,6 +166,8 @@ impl View {
             at_active: false,
             at_query_start: None,
             autoresearch_active: false,
+            dashboard_mode: DashboardMode::Inline,
+            dashboard_snapshot: None,
         }
     }
 }
@@ -424,7 +448,31 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
     // request layer, since Ctrl+T in defaults() goes to OpenTree. The dogfood
     // spec asks for Ctrl+T → ToggleThinking-output here.
     if ev.code == KeyCode::Char('t') && ev.modifiers.contains(KeyModifiers::CONTROL) {
+        // Ctrl+Shift+T cycles the autoresearch dashboard widget instead.
+        if ev.modifiers.contains(KeyModifiers::SHIFT) {
+            view.dashboard_mode = match view.dashboard_mode {
+                DashboardMode::Inline => DashboardMode::Expanded,
+                DashboardMode::Expanded => DashboardMode::Hidden,
+                DashboardMode::Hidden => DashboardMode::Inline,
+            };
+            view.dirty = true;
+            return KeyOutcome::None;
+        }
         view.transcript.thinking_collapsed = !view.transcript.thinking_collapsed;
+        return KeyOutcome::None;
+    }
+    // Ctrl+Shift+T sometimes arrives as `Char('T')` (uppercase) due to the
+    // SHIFT modifier even on terminals that normalise the case.
+    if ev.code == KeyCode::Char('T')
+        && ev.modifiers.contains(KeyModifiers::CONTROL)
+        && ev.modifiers.contains(KeyModifiers::SHIFT)
+    {
+        view.dashboard_mode = match view.dashboard_mode {
+            DashboardMode::Inline => DashboardMode::Expanded,
+            DashboardMode::Expanded => DashboardMode::Hidden,
+            DashboardMode::Hidden => DashboardMode::Inline,
+        };
+        view.dirty = true;
         return KeyOutcome::None;
     }
     // Ctrl+O collapses tool output (matches dogfood).
@@ -632,14 +680,37 @@ fn build_frame(
 ) -> Frame {
     let mut frame = view.transcript.render(theme, cols);
 
-    // Limit transcript to rows minus chrome (editor + footer + separator).
+    // Autoresearch dashboard widget (Ctrl+Shift+T toggles).
+    let dashboard_lines: Vec<Line> = match (view.dashboard_mode, view.dashboard_snapshot.as_ref()) {
+        (DashboardMode::Hidden, _) | (_, None) => Vec::new(),
+        (DashboardMode::Inline, Some(snap)) => {
+            let s = crate::autoresearch::dashboard::render_inline(&snap.state);
+            vec![Line {
+                spans: vec![Span::coloured(s, theme.accent.to_crossterm())],
+            }]
+        }
+        (DashboardMode::Expanded, Some(snap)) => {
+            let s = crate::autoresearch::dashboard::render_table(&snap.state, &snap.runs);
+            s.lines()
+                .map(|l| Line {
+                    spans: vec![Span::coloured(l.to_string(), theme.fg.to_crossterm())],
+                })
+                .collect()
+        }
+    };
+
+    // Limit transcript to rows minus chrome (editor + footer + separator + dashboard).
     let editor_lines = std::cmp::max(1, view.editor.text.lines().count()) as u16;
-    let chrome = editor_lines + 2; // separator + footer
+    let dash_lines = dashboard_lines.len() as u16;
+    let chrome = editor_lines + 2 + dash_lines; // separator + footer + dashboard
     let max_transcript = rows.saturating_sub(chrome) as usize;
     if frame.lines.len() > max_transcript {
         let drop = frame.lines.len() - max_transcript;
         frame.lines.drain(0..drop);
     }
+
+    // Dashboard renders ABOVE the editor separator.
+    frame.lines.extend(dashboard_lines);
 
     // Separator.
     frame.lines.push(Line {
@@ -767,6 +838,10 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
 
     let mut view = View::new(startup.keymap.clone(), startup.settings.thinking);
     view.scoped_models = startup.settings.scoped_models;
+
+    // If the cwd already has an autoresearch session, populate the dashboard
+    // widget so the user sees it on first render.
+    refresh_autoresearch_dashboard(&mut view, &startup.runtime_config.cwd);
 
     // If --prompt-template was supplied, pre-fill the editor buffer so the
     // user sees (and can edit) the resolved prompt before submitting.
@@ -932,7 +1007,7 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
             }
             maybe_ag = rx.recv() => {
                 let Some(ev) = maybe_ag else { continue; };
-                ingest_event(&mut view, &ev, &mut current_model);
+                ingest_event_and_refresh_dashboard(&mut view, &ev, &mut current_model, &startup.runtime_config.cwd);
                 view.dirty = true;
             }
             _ = tick.tick() => {
@@ -983,6 +1058,49 @@ fn ingest_event(view: &mut View, ev: &AgentEvent, current_model: &mut String) {
         if let Some(prev) = view.scoped_previous_model.take() {
             *current_model = prev.clone();
             view.transcript.model_label = prev;
+        }
+    }
+}
+
+/// Convenience wrapper: ingest the event, then refresh the autoresearch
+/// dashboard if the turn just completed (autoresearch tools may have
+/// appended to autoresearch.jsonl).
+fn ingest_event_and_refresh_dashboard(
+    view: &mut View,
+    ev: &AgentEvent,
+    current_model: &mut String,
+    cwd: &std::path::Path,
+) {
+    let was_turn_end = matches!(
+        ev.kind,
+        AgentEventKind::TurnComplete | AgentEventKind::Aborted
+    );
+    ingest_event(view, ev, current_model);
+    if was_turn_end {
+        refresh_autoresearch_dashboard(view, cwd);
+    }
+}
+
+/// Re-load `<cwd>/autoresearch.{config.json,jsonl}` into `view.dashboard_snapshot`.
+/// Sets `dashboard_snapshot = None` and leaves `dashboard_mode` alone when
+/// no session exists. Marks the view dirty so the next render redraws.
+pub(crate) fn refresh_autoresearch_dashboard(view: &mut View, cwd: &std::path::Path) {
+    match crate::autoresearch::slash_helpers::load_snapshot(cwd) {
+        Ok(Some((state, runs))) => {
+            view.dashboard_snapshot = Some(DashboardSnapshot { state, runs });
+            view.dirty = true;
+        }
+        Ok(None) => {
+            if view.dashboard_snapshot.is_some() {
+                view.dirty = true;
+            }
+            view.dashboard_snapshot = None;
+        }
+        Err(_) => {
+            // Treat I/O errors as "no dashboard" — silent. The export
+            // command (which surfaces errors) is the right place for
+            // diagnostics.
+            view.dashboard_snapshot = None;
         }
     }
 }
@@ -1348,6 +1466,9 @@ async fn handle_slash(
                     }
                 }
             }
+            // Any autoresearch action may have created/cleared session
+            // artefacts on disk — re-read so the inline widget is fresh.
+            refresh_autoresearch_dashboard(view, &startup.runtime_config.cwd);
             SlashOutcome::Continue
         }
         "login" => {
@@ -2718,5 +2839,198 @@ mod tests {
         assert_eq!(r2, ChordCode::Tab);
         // Plus the no-op `_force_link`.
         _force_link();
+    }
+
+    // ── A4: dashboard widget + Ctrl+Shift+T cycling ─────────────────────────
+
+    #[test]
+    fn dashboard_default_mode_is_inline() {
+        let v = fresh_view();
+        assert_eq!(v.dashboard_mode, DashboardMode::Inline);
+        assert!(v.dashboard_snapshot.is_none());
+    }
+
+    #[test]
+    fn ctrl_shift_t_cycles_dashboard_mode_inline_to_expanded_to_hidden() {
+        let mut v = fresh_view();
+        // lowercase 't' with CONTROL+SHIFT — common terminal mapping.
+        let chord = ke(KeyCode::Char('t'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        let _ = handle_key(&mut v, &chord);
+        assert_eq!(v.dashboard_mode, DashboardMode::Expanded);
+        let _ = handle_key(&mut v, &chord);
+        assert_eq!(v.dashboard_mode, DashboardMode::Hidden);
+        let _ = handle_key(&mut v, &chord);
+        assert_eq!(v.dashboard_mode, DashboardMode::Inline);
+    }
+
+    #[test]
+    fn ctrl_shift_t_uppercase_variant_also_cycles() {
+        let mut v = fresh_view();
+        // Some terminals deliver Ctrl+Shift+T as KeyCode::Char('T') instead.
+        let chord = ke(KeyCode::Char('T'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        let _ = handle_key(&mut v, &chord);
+        assert_eq!(v.dashboard_mode, DashboardMode::Expanded);
+    }
+
+    #[test]
+    fn bare_ctrl_t_does_not_change_dashboard_mode() {
+        // Ctrl+T (no Shift) is consumed by the keymap as OpenTree and
+        // returns early, so the dashboard cycle must not fire.
+        let mut v = fresh_view();
+        let _ = handle_key(&mut v, &ke(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(v.dashboard_mode, DashboardMode::Inline);
+    }
+
+    #[test]
+    fn build_frame_includes_inline_dashboard_when_snapshot_present() {
+        use crate::autoresearch::dashboard::DashboardState;
+        use crate::autoresearch::confidence::{ConfidenceBand, ConfidenceScore};
+        use crate::autoresearch::session::MetricDirection;
+        let mut v = fresh_view();
+        v.dashboard_snapshot = Some(DashboardSnapshot {
+            state: DashboardState {
+                session_name: "demo".into(),
+                runs: 3,
+                kept: 2,
+                metric_name: "total_us".into(),
+                baseline: 100.0,
+                current_best: 80.0,
+                direction: MetricDirection::Lower,
+                confidence: ConfidenceScore {
+                    multiplier: 1.5,
+                    band: ConfidenceBand::Green,
+                },
+            },
+            runs: vec![("baseline".into(), 100.0, true), ("delta".into(), 80.0, true)],
+        });
+        let theme = pi_tui::ThemeRegistry::new().get("dark").cloned().unwrap();
+        let frame = build_frame(&v, &theme, 80, 24, "openai/gpt-4o", std::path::Path::new("/tmp"));
+        let dump = frame
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(dump.contains("autoresearch"), "missing autoresearch line: {dump}");
+        assert!(dump.contains("3 runs"));
+    }
+
+    #[test]
+    fn build_frame_omits_dashboard_when_hidden() {
+        use crate::autoresearch::dashboard::DashboardState;
+        use crate::autoresearch::confidence::{ConfidenceBand, ConfidenceScore};
+        use crate::autoresearch::session::MetricDirection;
+        let mut v = fresh_view();
+        v.dashboard_mode = DashboardMode::Hidden;
+        v.dashboard_snapshot = Some(DashboardSnapshot {
+            state: DashboardState {
+                session_name: "demo".into(),
+                runs: 1,
+                kept: 1,
+                metric_name: "x".into(),
+                baseline: 1.0,
+                current_best: 1.0,
+                direction: MetricDirection::Lower,
+                confidence: ConfidenceScore {
+                    multiplier: 0.0,
+                    band: ConfidenceBand::Insufficient,
+                },
+            },
+            runs: vec![],
+        });
+        let theme = pi_tui::ThemeRegistry::new().get("dark").cloned().unwrap();
+        let frame = build_frame(&v, &theme, 80, 24, "m", std::path::Path::new("/tmp"));
+        let dump = frame
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(!dump.contains("🔬"));
+    }
+
+    #[test]
+    fn refresh_dashboard_loads_session_from_disk() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Write a minimal autoresearch.config.json + jsonl.
+        let cfg = serde_json::json!({
+            "name": "loader-test",
+            "metric": "total_us",
+            "unit": "µs",
+            "direction": "lower",
+            "max_iterations": null,
+            "working_dir": null
+        });
+        std::fs::write(
+            dir.path().join("autoresearch.config.json"),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+        let mut f = std::fs::File::create(dir.path().join("autoresearch.jsonl")).unwrap();
+        // Two runs, both kept; matches upstream JSONL run schema.
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "run": 1,
+                "description": "baseline",
+                "metric": 100.0,
+                "metrics": {},
+                "status": "keep",
+                "commit": "aaa",
+                "timestamp": 0i64
+            })
+        )
+        .unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({
+                "run": 2,
+                "description": "first opt",
+                "metric": 80.0,
+                "metrics": {},
+                "status": "keep",
+                "commit": "bbb",
+                "timestamp": 0i64
+            })
+        )
+        .unwrap();
+        let mut v = fresh_view();
+        refresh_autoresearch_dashboard(&mut v, dir.path());
+        let snap = v.dashboard_snapshot.expect("snapshot");
+        assert_eq!(snap.state.runs, 2);
+        assert_eq!(snap.state.kept, 2);
+        assert_eq!(snap.state.baseline, 100.0);
+        assert_eq!(snap.state.current_best, 80.0);
+    }
+
+    #[test]
+    fn refresh_dashboard_clears_snapshot_when_no_session() {
+        use crate::autoresearch::dashboard::DashboardState;
+        use crate::autoresearch::confidence::{ConfidenceBand, ConfidenceScore};
+        use crate::autoresearch::session::MetricDirection;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut v = fresh_view();
+        // Pre-populate so we can assert it's cleared.
+        v.dashboard_snapshot = Some(DashboardSnapshot {
+            state: DashboardState {
+                session_name: "stale".into(),
+                runs: 0,
+                kept: 0,
+                metric_name: "x".into(),
+                baseline: 0.0,
+                current_best: 0.0,
+                direction: MetricDirection::Lower,
+                confidence: ConfidenceScore {
+                    multiplier: 0.0,
+                    band: ConfidenceBand::Insufficient,
+                },
+            },
+            runs: vec![],
+        });
+        refresh_autoresearch_dashboard(&mut v, dir.path());
+        assert!(v.dashboard_snapshot.is_none());
     }
 }
