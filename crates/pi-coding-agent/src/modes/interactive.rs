@@ -121,6 +121,8 @@ pub struct View {
     /// Byte index in `editor.text` where the `@` character was inserted.
     /// Everything from this index onwards (inclusive) is the `@<query>` token.
     pub at_query_start: Option<usize>,
+    /// Whether the autoresearch loop is currently active.
+    pub autoresearch_active: bool,
 }
 
 impl View {
@@ -141,6 +143,7 @@ impl View {
             dirty: true,
             at_active: false,
             at_query_start: None,
+            autoresearch_active: false,
         }
     }
 }
@@ -1274,6 +1277,70 @@ async fn handle_slash(
                     .transcript
                     .blocks
                     .push(crate::renderer::Block::Error(e)),
+            }
+            SlashOutcome::Continue
+        }
+        "autoresearch" => {
+            use crate::autoresearch::slash_helpers::{
+                parse_action, AutoresearchAction, clear_artefacts, ensure_session, export_dashboard,
+            };
+            let action = parse_action(args);
+            match action {
+                AutoresearchAction::Start { text } => {
+                    let cwd_path = &startup.runtime_config.cwd;
+                    match ensure_session(cwd_path, &text) {
+                        Ok(_session) => {
+                            view.autoresearch_active = true;
+                            view.transcript.blocks.push(crate::renderer::Block::Note(
+                                "autoresearch active".to_string(),
+                            ));
+                        }
+                        Err(e) => {
+                            view.transcript.blocks.push(crate::renderer::Block::Error(
+                                format!("autoresearch: {e}"),
+                            ));
+                        }
+                    }
+                }
+                AutoresearchAction::Off => {
+                    view.autoresearch_active = false;
+                    view.transcript.blocks.push(crate::renderer::Block::Note(
+                        "[autoresearch: off]".to_string(),
+                    ));
+                }
+                AutoresearchAction::Clear => {
+                    let cwd_path = &startup.runtime_config.cwd;
+                    let removed = clear_artefacts(cwd_path);
+                    view.autoresearch_active = false;
+                    let msg = if removed.is_empty() {
+                        "[autoresearch clear: nothing to remove]".to_string()
+                    } else {
+                        format!(
+                            "[autoresearch clear: removed {}]",
+                            removed
+                                .iter()
+                                .map(|p| p.file_name().unwrap_or_default().to_string_lossy())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
+                    view.transcript.blocks.push(crate::renderer::Block::Note(msg));
+                }
+                AutoresearchAction::Export => {
+                    let cwd_path = &startup.runtime_config.cwd;
+                    match export_dashboard(cwd_path) {
+                        Ok(path) => {
+                            view.transcript.blocks.push(crate::renderer::Block::Note(
+                                format!("[autoresearch export: {}]", path.display()),
+                            ));
+                        }
+                        Err(e) => {
+                            view.transcript.blocks.push(crate::renderer::Block::Error(
+                                format!("autoresearch export: {e}"),
+                            ));
+                        }
+                    }
+                }
             }
             SlashOutcome::Continue
         }

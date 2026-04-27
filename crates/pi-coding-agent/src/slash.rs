@@ -56,6 +56,10 @@ impl SlashRegistry {
             ("hotkeys", "Show all keyboard shortcuts"),
             ("help", "Show help"),
             ("quit", "Exit pi"),
+            (
+                "autoresearch",
+                "Autonomous experiment loop (off | clear | export | <text>)",
+            ),
         ] {
             self.inner.insert(
                 name.into(),
