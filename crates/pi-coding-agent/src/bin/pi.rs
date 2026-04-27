@@ -38,6 +38,12 @@ fn main() -> anyhow::Result<()> {
             .build()?;
         return rt.block_on(cmd::run_refresh_models());
     }
+    if let Some(verb) = &cli.evolve {
+        return cmd::run_evolve(verb);
+    }
+    if let Some(target) = &cli.flamegraph {
+        return cmd::run_flamegraph(target);
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(

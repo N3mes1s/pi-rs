@@ -52,6 +52,83 @@ pub fn run_update() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `pi --evolve {status,off,on}` — control the autonomous AGENTS.md
+/// evolution daemon for the current cwd.
+pub fn run_evolve(verb: &str) -> anyhow::Result<()> {
+    use crate::evolve::{
+        evolve_dir, is_disabled, read_generations, CostLedger, PendingApply, State,
+    };
+
+    let cwd = std::env::current_dir()?;
+    match verb {
+        "off" => {
+            let dir = evolve_dir(&cwd)?;
+            let flag = dir.join("disabled");
+            std::fs::write(&flag, "")?;
+            println!("evolve: disabled for {}", cwd.display());
+            Ok(())
+        }
+        "on" => {
+            let dir = evolve_dir(&cwd)?;
+            let flag = dir.join("disabled");
+            if flag.exists() {
+                std::fs::remove_file(&flag)?;
+            }
+            println!("evolve: enabled for {}", cwd.display());
+            Ok(())
+        }
+        "status" => {
+            let mut ledger = CostLedger::load(&cwd);
+            let state = State::load(&cwd);
+            let pending = PendingApply::load(&cwd);
+            let gens = read_generations(&cwd);
+            let disabled = is_disabled(&cwd);
+
+            println!("evolve status for {}", cwd.display());
+            println!(
+                "  enabled-here:   {}",
+                if disabled {
+                    "no (.pi/evolve/disabled)"
+                } else {
+                    "yes"
+                }
+            );
+            println!("  ticks_run:      {}", state.ticks_run);
+            println!(
+                "  outcomes_seen:  {} lifetime, {} at last tick",
+                state.outcomes_seen_lifetime, state.outcomes_at_last_tick
+            );
+            println!("  spent_today:    ${:.4}", ledger.today_spend());
+            println!("  spent_lifetime: ${:.4}", ledger.spent_lifetime_usd);
+            println!("  generations:    {} logged", gens.len());
+            if let Some(applied) = gens.iter().rev().find(|g| g.applied) {
+                let n = applied.hash.len().min(12);
+                println!(
+                    "  last_applied:   hash={} note=\"{}\"",
+                    &applied.hash[..n],
+                    applied.note
+                );
+            }
+            if let Some(p) = pending {
+                let n = p.applied_hash.len().min(12);
+                println!(
+                    "  pending_apply:  hash={} (rollback monitor watching)",
+                    &p.applied_hash[..n]
+                );
+            }
+            Ok(())
+        }
+        other => anyhow::bail!("unknown --evolve verb: {other} (expected: status, off, on)"),
+    }
+}
+
+/// `pi --flamegraph <session-id-or-path>` — render trajectory flamegraph
+/// to HTML. Stub for G11.
+pub fn run_flamegraph(target: &str) -> anyhow::Result<()> {
+    let _ = target;
+    anyhow::bail!("--flamegraph not yet implemented (pending G11)")
+}
+
 /// `pi --refresh-models` — query every provider with credentials for its
 /// live model catalogue, merge into `<agent_dir>/discovered-models.json`,
 /// and report per-provider success/failure.

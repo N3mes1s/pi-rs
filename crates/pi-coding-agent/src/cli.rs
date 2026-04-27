@@ -111,6 +111,16 @@ pub struct Cli {
     #[arg(long = "refresh-models", action = ArgAction::SetTrue)]
     pub refresh_models: bool,
 
+    /// AGENTS.md auto-evolution control: `status` (print state),
+    /// `off` (disable for cwd), `on` (re-enable for cwd).
+    #[arg(long = "evolve", value_parser = clap::builder::PossibleValuesParser::new(["status", "off", "on"]))]
+    pub evolve: Option<String>,
+
+    /// Render a trajectory flamegraph for a session id (or path) to
+    /// HTML and exit.
+    #[arg(long = "flamegraph", value_name = "SESSION_OR_PATH")]
+    pub flamegraph: Option<String>,
+
     /// Auto-approval mode: `ask` (default), `auto-policy`, `auto-judge`,
     /// or `yolo`. Policy file at `~/.pi/agent/auto-approve.json` is
     /// always consulted first.
