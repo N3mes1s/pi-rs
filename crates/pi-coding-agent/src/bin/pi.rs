@@ -2,17 +2,10 @@ use clap::Parser;
 use pi_coding_agent::{cli::Cli, cmd, modes, startup};
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     let cli = Cli::parse();
 
-    // Fast paths: synchronous subcommands don't need a tokio runtime.
+    // Fast paths: synchronous subcommands don't need a tokio runtime
+    // and don't emit tracing events, so we skip subscriber init too.
     if let Some(spec) = &cli.install {
         return cmd::run_install(spec);
     }
@@ -25,6 +18,14 @@ fn main() -> anyhow::Result<()> {
     if cli.update {
         return cmd::run_update();
     }
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
 
     // Async path: spin up tokio only when we actually need it.
     let rt = tokio::runtime::Builder::new_multi_thread()
