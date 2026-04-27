@@ -21,6 +21,7 @@
 //! # });
 //! ```
 
+pub mod autoresearch;
 pub mod cli;
 pub mod cmd;
 pub mod context;
