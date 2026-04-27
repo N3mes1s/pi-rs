@@ -29,7 +29,7 @@
 //! [`LspClient::send_request`], and returns the raw `serde_json::Value`
 //! so the tool can hand it back as structured JSON.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -59,9 +59,14 @@ pub enum EngineError {
     RelativePath(PathBuf),
 }
 
-/// One running server entry.
+/// One running server entry. The `opened` set tracks which files we
+/// have notified the server about with `textDocument/didOpen`; rust-
+/// analyzer (and most servers) refuse to answer per-document requests
+/// for files they have not been told about, so the engine sends an
+/// idempotent didOpen on first contact with each path.
 struct ServerEntry {
     client: Arc<LspClient>,
+    opened: Mutex<HashSet<PathBuf>>,
 }
 
 /// Lazy registry of LspClient connections, keyed by language id.
@@ -106,7 +111,7 @@ impl LspEngine {
     /// returns `Disabled` if the master switch is off and the language
     /// has no per-language opt-in; respects per-language `command`
     /// overrides too.
-    async fn ensure(&self, language: &str) -> Result<Arc<LspClient>, EngineError> {
+    async fn ensure(&self, language: &str) -> Result<Arc<ServerEntry>, EngineError> {
         if !self.config.is_language_enabled(language) {
             return Err(EngineError::Disabled(language.into()));
         }
@@ -114,13 +119,13 @@ impl LspEngine {
         {
             let map = self.servers.lock().await;
             if let Some(entry) = map.get(language) {
-                return Ok(entry.client.clone());
+                return Ok(entry.clone());
             }
         }
         // Spawn under the lock to avoid double-launch.
         let mut map = self.servers.lock().await;
         if let Some(entry) = map.get(language) {
-            return Ok(entry.client.clone());
+            return Ok(entry.clone());
         }
         // Determine argv: per-language override wins, else catalogue.
         let owned: Vec<String>;
@@ -146,16 +151,17 @@ impl LspEngine {
             language: language.into(),
             source,
         })?;
-        let arc = Arc::new(client);
-        map.insert(
-            language.into(),
-            Arc::new(ServerEntry { client: arc.clone() }),
-        );
-        Ok(arc)
+        let entry = Arc::new(ServerEntry {
+            client: Arc::new(client),
+            opened: Mutex::new(HashSet::new()),
+        });
+        map.insert(language.into(), entry.clone());
+        Ok(entry)
     }
 
-    /// Pick the language for `file` and ensure that server is up.
-    async fn client_for(&self, file: &Path) -> Result<Arc<LspClient>, EngineError> {
+    /// Resolve the server entry for `file`. Used by request methods
+    /// that also need to consult / update the entry's `opened` set.
+    async fn entry_for(&self, file: &Path) -> Result<Arc<ServerEntry>, EngineError> {
         if !file.is_absolute() {
             return Err(EngineError::RelativePath(file.to_path_buf()));
         }
@@ -169,12 +175,61 @@ impl LspEngine {
         self.ensure(language).await
     }
 
+    /// Idempotently send `textDocument/didOpen` for `file`. Reads the
+    /// file's contents on first contact, then never re-reads (server
+    /// keeps tracking the document for the life of the process). Files
+    /// that fail to read are silently skipped — the request will fail
+    /// downstream with a clearer message from the server.
+    async fn ensure_opened(
+        &self,
+        entry: &ServerEntry,
+        file: &Path,
+    ) -> Result<(), EngineError> {
+        {
+            let opened = entry.opened.lock().await;
+            if opened.contains(file) {
+                return Ok(());
+            }
+        }
+        let Ok(text) = std::fs::read_to_string(file) else {
+            return Ok(());
+        };
+        let language = language_for_extension(
+            file.extension().and_then(|e| e.to_str()).unwrap_or_default(),
+        )
+        .map(|e| e.language)
+        .unwrap_or("plaintext");
+        let params = json!({
+            "textDocument": {
+                "uri": Self::file_uri(file),
+                "languageId": language,
+                "version": 1,
+                "text": text,
+            }
+        });
+        entry
+            .client
+            .send_notification("textDocument/didOpen", params)
+            .await?;
+        entry.opened.lock().await.insert(file.to_path_buf());
+        Ok(())
+    }
+
+    /// Resolve the entry, ensure didOpen, then return the bare client
+    /// for the request. This is the standard prelude for any
+    /// `textDocument/*` request below.
+    async fn prepare(&self, file: &Path) -> Result<Arc<LspClient>, EngineError> {
+        let entry = self.entry_for(file).await?;
+        self.ensure_opened(&entry, file).await?;
+        Ok(entry.client.clone())
+    }
+
     fn file_uri(file: &Path) -> String {
         format!("file://{}", file.display())
     }
 
     pub async fn diagnostics(&self, file: &Path) -> Result<Value, EngineError> {
-        let client = self.client_for(file).await?;
+        let client = self.prepare(file).await?;
         // textDocument/diagnostic (LSP 3.17 pull diagnostics). Servers
         // that only support push-mode will reject; the tool layer can
         // map that to an empty array.
@@ -190,7 +245,7 @@ impl LspEngine {
         line: u32,
         col: u32,
     ) -> Result<Value, EngineError> {
-        let client = self.client_for(file).await?;
+        let client = self.prepare(file).await?;
         let params = json!({
             "textDocument": { "uri": Self::file_uri(file) },
             "position": { "line": line, "character": col },
@@ -199,7 +254,7 @@ impl LspEngine {
     }
 
     pub async fn hover(&self, file: &Path, line: u32, col: u32) -> Result<Value, EngineError> {
-        let client = self.client_for(file).await?;
+        let client = self.prepare(file).await?;
         let params = json!({
             "textDocument": { "uri": Self::file_uri(file) },
             "position": { "line": line, "character": col },
@@ -213,7 +268,7 @@ impl LspEngine {
         line: u32,
         col: u32,
     ) -> Result<Value, EngineError> {
-        let client = self.client_for(file).await?;
+        let client = self.prepare(file).await?;
         let params = json!({
             "textDocument": { "uri": Self::file_uri(file) },
             "position": { "line": line, "character": col },
@@ -223,7 +278,7 @@ impl LspEngine {
     }
 
     pub async fn symbols(&self, file: &Path) -> Result<Value, EngineError> {
-        let client = self.client_for(file).await?;
+        let client = self.prepare(file).await?;
         let params = json!({ "textDocument": { "uri": Self::file_uri(file) }});
         Ok(client.send_request("textDocument/documentSymbol", params).await?)
     }
@@ -237,7 +292,7 @@ impl LspEngine {
         line: u32,
         col: u32,
     ) -> Result<Value, EngineError> {
-        let client = self.client_for(file).await?;
+        let client = self.prepare(file).await?;
         let params = json!({
             "textDocument": { "uri": Self::file_uri(file) },
             "position": { "line": line, "character": col },
@@ -255,7 +310,7 @@ impl LspEngine {
         line: u32,
         col: u32,
     ) -> Result<Value, EngineError> {
-        let client = self.client_for(file).await?;
+        let client = self.prepare(file).await?;
         let params = json!({
             "textDocument": { "uri": Self::file_uri(file) },
             "position": { "line": line, "character": col },
@@ -275,7 +330,7 @@ impl LspEngine {
         col: u32,
         new_name: &str,
     ) -> Result<Value, EngineError> {
-        let client = self.client_for(file).await?;
+        let client = self.prepare(file).await?;
         let params = json!({
             "textDocument": { "uri": Self::file_uri(file) },
             "position": { "line": line, "character": col },
@@ -298,7 +353,7 @@ impl LspEngine {
         end_line: u32,
         end_col: u32,
     ) -> Result<Value, EngineError> {
-        let client = self.client_for(file).await?;
+        let client = self.prepare(file).await?;
         let params = json!({
             "textDocument": { "uri": Self::file_uri(file) },
             "range": {
