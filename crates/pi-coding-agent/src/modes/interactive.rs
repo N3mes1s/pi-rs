@@ -1471,7 +1471,7 @@ async fn handle_slash(
         }
         "autoresearch" => {
             use crate::autoresearch::slash_helpers::{
-                parse_action, AutoresearchAction, clear_artefacts, ensure_session, export_dashboard,
+                parse_action, AutoresearchAction, clear_artefacts, export_dashboard,
             };
             let action = parse_action(args);
             match action {
