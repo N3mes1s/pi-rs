@@ -1069,6 +1069,16 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
     // Print resume hint AFTER the RawGuard drops (terminal restored).
     let session_id = session.id().to_string();
     drop(_guard);
+
+    // Trajectory finalize before the resume hint so the user sees the
+    // hint last (most useful when they're scrolling back).
+    let _ = crate::native::trajectory::finalize_for_runtime(
+        &startup.runtime_config,
+        &startup.settings,
+        &session_id,
+    )
+    .await;
+
     eprintln!();
     eprintln!("To resume this session, run:");
     eprintln!("  pi -c   # continue most recent");

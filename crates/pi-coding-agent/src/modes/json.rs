@@ -49,5 +49,13 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
     let prompt = crate::modes::expand_slash(&prompt, &startup);
     let _ = session.prompt(prompt).await;
     printer.await.ok();
+
+    let _ = crate::native::trajectory::finalize_for_runtime(
+        &startup.runtime_config,
+        &startup.settings,
+        session.id(),
+    )
+    .await;
+
     Ok(())
 }

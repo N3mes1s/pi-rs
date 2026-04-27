@@ -268,11 +268,21 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         crate::auto_approve::Policy::default_safe()
     };
     auto_policy.resolve_inheritance();
+    // Default mode per surface:
+    // - interactive  → Ask (every call confirmed in UI)
+    // - print/json/rpc → AutoPolicy (no UI to ask in, so default to
+    //   policy-only — denies dangerous calls but doesn't block on
+    //   benign ones the policy allows). Previously defaulted to Ask
+    //   here too which made non-interactive bash unusable without
+    //   `--auto-approve yolo`.
     let auto_mode = cli
         .auto_approve
         .as_deref()
         .and_then(crate::auto_approve::Mode::parse)
-        .unwrap_or_default();
+        .unwrap_or_else(|| match cli.effective_mode() {
+            crate::cli::Mode::Interactive => crate::auto_approve::Mode::Ask,
+            _ => crate::auto_approve::Mode::AutoPolicy,
+        });
     let judge = if matches!(auto_mode, crate::auto_approve::Mode::AutoJudge) {
         let mut jc = crate::auto_approve::JudgeConfig::default();
         // Default the judge to settings.roles.smol when present (B1):

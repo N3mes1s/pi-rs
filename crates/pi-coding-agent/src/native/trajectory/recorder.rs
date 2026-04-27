@@ -22,7 +22,7 @@
 //! later commit because the modes/ files are being actively edited by
 //! the parallel dogfood worktree (C2 powerline footer).
 
-use pi_agent_core::{SessionEntryKind, SessionManager, Settings};
+use pi_agent_core::{RuntimeConfig, SessionEntryKind, SessionManager, Settings};
 use pi_ai::{AuthStorage, ModelRegistry};
 
 use super::judge::{features_only_outcome, Judge, JudgeConfig};
@@ -103,4 +103,18 @@ pub async fn finalize_session(
     }
 
     None
+}
+
+/// Convenience wrapper for the modes/ entry points: builds a judge
+/// from the runtime config + settings, then runs the full finalize.
+/// Never returns Err — failures are silently absorbed because
+/// trajectory recording is observational, not on the critical path.
+pub async fn finalize_for_runtime(
+    cfg: &RuntimeConfig,
+    settings: &Settings,
+    session_id: &str,
+) -> Option<SessionEntryKind> {
+    let judge =
+        build_judge_from_settings(settings, &cfg.model_registry, &cfg.auth_storage);
+    finalize_session(&cfg.session_manager, session_id, judge.as_ref()).await
 }
