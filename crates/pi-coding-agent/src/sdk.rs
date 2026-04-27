@@ -55,5 +55,7 @@ pub fn build_runtime_config(b: BuildConfig) -> RuntimeConfig {
         context_files: b.context_files,
         cwd: b.cwd,
         provider_factory: None,
+        tool_gate: None,
+        gate_ask_is_approve: false,
     }
 }

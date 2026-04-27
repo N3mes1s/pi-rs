@@ -24,6 +24,30 @@ pub trait ProviderFactory: Send + Sync {
     fn build(&self, cfg: ProviderConfig, auth: AuthMethod) -> Result<Box<dyn Provider>, RuntimeError>;
 }
 
+/// Approval gate consulted before each tool invocation. The runtime
+/// calls [`ToolGate::approve`] with the tool name + JSON-serialised
+/// input; the gate may approve, reject (with a reason fed back to the
+/// model), or signal that the host UI should prompt the user. The
+/// runtime treats `AskUser` as `Reject` in headless modes.
+///
+/// Default: no gate (every call runs). pi-coding-agent's
+/// `auto_approve::AutoApproveGate` plugs in here.
+#[async_trait::async_trait]
+pub trait ToolGate: Send + Sync {
+    async fn approve(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> ToolGateOutcome;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolGateOutcome {
+    Approve,
+    Reject(String),
+    AskUser(String),
+}
+
 /// Default factory: dispatch on `ProviderKind`.
 pub struct DefaultProviderFactory;
 
@@ -53,6 +77,13 @@ pub struct RuntimeConfig {
     /// Optional override for provider construction. When `None`, the runtime
     /// uses [`DefaultProviderFactory`].
     pub provider_factory: Option<Arc<dyn ProviderFactory>>,
+    /// Optional tool gate. When present, the runtime asks it whether each
+    /// tool call may proceed. `None` ⇒ no gating (legacy behaviour).
+    pub tool_gate: Option<Arc<dyn ToolGate>>,
+    /// Whether `AskUser` outcomes from the gate should resolve to "approve"
+    /// or be treated as "reject". TUI mode flips this on (and prompts the
+    /// user); headless modes leave it false (fail-closed).
+    pub gate_ask_is_approve: bool,
 }
 
 impl RuntimeConfig {
@@ -60,6 +91,19 @@ impl RuntimeConfig {
     /// for chaining.
     pub fn with_provider_factory(mut self, factory: Arc<dyn ProviderFactory>) -> Self {
         self.provider_factory = Some(factory);
+        self
+    }
+
+    /// Install a tool gate. `ask_is_approve = true` is appropriate when
+    /// the host has interactive UI and will prompt the user; `false`
+    /// (fail-closed) is the safe default for print/json/rpc modes.
+    pub fn with_tool_gate(
+        mut self,
+        gate: Arc<dyn ToolGate>,
+        ask_is_approve: bool,
+    ) -> Self {
+        self.tool_gate = Some(gate);
+        self.gate_ask_is_approve = ask_is_approve;
         self
     }
 }
@@ -467,6 +511,43 @@ impl AgentSession {
                         continue;
                     }
                 };
+                // Gate check: ask the configured ToolGate (if any) whether
+                // this call may proceed. Reject → synthesise an error
+                // ToolResult and skip the actual invoke; AskUser → fail
+                // closed unless gate_ask_is_approve is set.
+                if let Some(gate) = &self.cfg.tool_gate {
+                    let outcome = gate.approve(&call.name, &call.input).await;
+                    let blocked = match outcome {
+                        ToolGateOutcome::Approve => None,
+                        ToolGateOutcome::Reject(reason) => Some(reason),
+                        ToolGateOutcome::AskUser(reason) => {
+                            if self.cfg.gate_ask_is_approve {
+                                None
+                            } else {
+                                Some(format!("user-confirmation required (headless): {reason}"))
+                            }
+                        }
+                    };
+                    if let Some(reason) = blocked {
+                        let result = ToolResult {
+                            tool_use_id: call.id.clone(),
+                            model_output: format!("AUTO-APPROVE BLOCKED: {reason}"),
+                            display: None,
+                            is_error: true,
+                        };
+                        let _ = self.cfg.session_manager.append(
+                            &self.id,
+                            SessionEntryKind::ToolResult { result: result.clone() },
+                        );
+                        self.emit(AgentEventKind::ToolResult { result: result.clone() }).await;
+                        results_block.push(ContentBlock::ToolResult {
+                            tool_use_id: call.id,
+                            content: result.model_output,
+                            is_error: true,
+                        });
+                        continue;
+                    }
+                }
                 match tool.invoke(&tool_ctx, &call.id, call.input.clone()).await {
                     Ok(result) => {
                         let _ = self.cfg.session_manager.append(

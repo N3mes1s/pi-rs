@@ -241,6 +241,38 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         slash_registry.register_extension_commands(&ext_cmds);
     }
 
+    // Auto-approval: load policy from disk (or fall back to safe defaults)
+    // and decide whether to instantiate a judge. The mode comes from
+    // settings; CLI override comes through later.
+    let auto_policy_path = agent_dir().join("auto-approve.json");
+    let mut auto_policy = if auto_policy_path.exists() {
+        crate::auto_approve::Policy::load(&auto_policy_path)
+            .unwrap_or_else(|_| crate::auto_approve::Policy::default_safe())
+    } else {
+        crate::auto_approve::Policy::default_safe()
+    };
+    auto_policy.resolve_inheritance();
+    let auto_mode = cli
+        .auto_approve
+        .as_deref()
+        .and_then(crate::auto_approve::Mode::parse)
+        .unwrap_or_default();
+    let judge = if matches!(auto_mode, crate::auto_approve::Mode::AutoJudge) {
+        let mut jc = crate::auto_approve::JudgeConfig::default();
+        if let Some(m) = &cli.auto_approve_model {
+            jc.model = m.clone();
+        }
+        crate::auto_approve::Judge::build(&registry, &auth, jc).ok()
+    } else {
+        None
+    };
+    let auto_gate = std::sync::Arc::new(crate::auto_approve::AutoApproveGate::new(
+        auto_mode,
+        auto_policy,
+        judge,
+    ));
+    let gate_ask_is_approve = matches!(cli.effective_mode(), crate::cli::Mode::Interactive);
+
     let runtime_config = RuntimeConfig {
         session_manager,
         auth_storage: auth,
@@ -251,6 +283,8 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         context_files,
         cwd,
         provider_factory: None,
+        tool_gate: Some(auto_gate as std::sync::Arc<dyn pi_agent_core::ToolGate>),
+        gate_ask_is_approve,
     };
 
     Ok(Startup {

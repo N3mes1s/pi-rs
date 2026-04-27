@@ -111,6 +111,16 @@ pub struct Cli {
     #[arg(long = "refresh-models", action = ArgAction::SetTrue)]
     pub refresh_models: bool,
 
+    /// Auto-approval mode: `ask` (default), `auto-policy`, `auto-judge`,
+    /// or `yolo`. Policy file at `~/.pi/agent/auto-approve.json` is
+    /// always consulted first.
+    #[arg(long = "auto-approve")]
+    pub auto_approve: Option<String>,
+
+    /// Override the judge model (only effective with `auto-judge`).
+    #[arg(long = "auto-approve-model")]
+    pub auto_approve_model: Option<String>,
+
     /// Free-form positional args. `@file` references add attachments.
     #[arg(value_name = "MESSAGE_OR_AT_FILES")]
     pub positionals: Vec<String>,

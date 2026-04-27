@@ -104,6 +104,8 @@ fn build_config(provider: MockProvider, tools: ToolRegistry) -> RuntimeConfig {
         context_files: Vec::new(),
         cwd: std::env::current_dir().unwrap(),
         provider_factory: Some(Arc::new(MockFactory { inner: provider })),
+        tool_gate: None,
+        gate_ask_is_approve: false,
     }
 }
 
@@ -424,6 +426,8 @@ async fn runtime_abort_emits_aborted_event() {
             started: started.clone(),
             proceed: proceed.clone(),
         })),
+        tool_gate: None,
+        gate_ask_is_approve: false,
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

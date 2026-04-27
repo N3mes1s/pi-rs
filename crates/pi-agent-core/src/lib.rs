@@ -13,7 +13,7 @@ pub use context::{discover_context_files, ContextFile};
 pub use event::{AgentEvent, AgentEventKind, EventSender};
 pub use runtime::{
     create_agent_session, AgentSession, AgentSessionRuntime, DefaultProviderFactory,
-    ProviderFactory, RuntimeConfig,
+    ProviderFactory, RuntimeConfig, ToolGate, ToolGateOutcome,
 };
 pub use session::{
     SessionEntry, SessionEntryKind, SessionManager, SessionMeta, SessionTree,
