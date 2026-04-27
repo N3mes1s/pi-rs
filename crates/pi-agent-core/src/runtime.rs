@@ -227,6 +227,29 @@ impl AgentSession {
         g.model = model;
     }
 
+    /// Resolve a [`Role`] (e.g. `Role::Smol`) against the configured
+    /// [`crate::settings::ModelRoles`] and switch the active model to
+    /// match. The provider stays the same; only the model id changes.
+    /// When the role has no override the session keeps its current
+    /// model. Returns the model id we ended up on.
+    pub async fn set_role(
+        &self,
+        role: crate::settings::Role,
+        roles: &crate::settings::ModelRoles,
+    ) -> String {
+        let mut g = self.inner.lock().await;
+        let current = g.model.clone();
+        let chosen = roles.resolve(role, &current).to_string();
+        // If chosen is "provider/model", split.
+        if let Some((p, m)) = chosen.split_once('/') {
+            g.provider = p.to_string();
+            g.model = m.to_string();
+        } else {
+            g.model = chosen.clone();
+        }
+        chosen
+    }
+
     pub async fn set_thinking(&self, t: ThinkingLevel) {
         self.inner.lock().await.thinking = t;
     }

@@ -68,6 +68,16 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     if let Some(t) = &cli.tools {
         settings.tools = t.split(',').map(|s| s.trim().to_string()).collect();
     }
+    // CLI / env overrides for model role routing (B1).
+    if let Some(s) = &cli.smol {
+        settings.roles.smol = Some(s.clone());
+    }
+    if let Some(s) = &cli.slow {
+        settings.roles.slow = Some(s.clone());
+    }
+    if let Some(s) = &cli.plan {
+        settings.roles.plan = Some(s.clone());
+    }
 
     // (autoresearch tools are registered after the base ToolRegistry is built; see below)
 
@@ -259,6 +269,18 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         .unwrap_or_default();
     let judge = if matches!(auto_mode, crate::auto_approve::Mode::AutoJudge) {
         let mut jc = crate::auto_approve::JudgeConfig::default();
+        // Default the judge to settings.roles.smol when present (B1):
+        // the smol role is *the* place to put a cheap structured-output
+        // model, so the judge picks it up automatically.
+        if let Some(smol) = &settings.roles.smol {
+            if let Some((p, m)) = smol.split_once('/') {
+                jc.provider = p.to_string();
+                jc.model = m.to_string();
+            } else {
+                jc.model = smol.clone();
+            }
+        }
+        // CLI flag still wins if explicitly given.
         if let Some(m) = &cli.auto_approve_model {
             jc.model = m.clone();
         }

@@ -38,6 +38,74 @@ pub struct Settings {
     /// for the rest of the session.
     #[serde(default)]
     pub scoped_models: bool,
+    /// Cheap-model routing. Each role is a model id (a plain `"haiku"`
+    /// alias or a fully-qualified `"provider/model"`). When unset, the
+    /// caller falls back to [`Settings::model`].
+    #[serde(default)]
+    pub roles: ModelRoles,
+}
+
+/// Role-based model routing. Lets the user pick a different cheap model
+/// for short / structured / planning tasks without changing the default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelRoles {
+    /// Optional override of `Settings::model`. Most callers ignore this
+    /// field — `Settings::model` is the canonical default — but we keep
+    /// it so a `roles` block can be self-contained in JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// Tiny model for cheap structured calls (auto-approve judge,
+    /// summary generation, classification).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smol: Option<String>,
+    /// Slow / large-context model used when reasoning depth matters more
+    /// than latency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow: Option<String>,
+    /// Planning model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Commit-message model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+}
+
+/// Named cheap-model role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Default,
+    Smol,
+    Slow,
+    Plan,
+    Commit,
+}
+
+impl Role {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "default" | "" => Some(Role::Default),
+            "smol" => Some(Role::Smol),
+            "slow" => Some(Role::Slow),
+            "plan" => Some(Role::Plan),
+            "commit" => Some(Role::Commit),
+            _ => None,
+        }
+    }
+}
+
+impl ModelRoles {
+    /// Resolve `role` to a model id, falling back to `default_model` when
+    /// the role-specific override is not set.
+    pub fn resolve<'a>(&'a self, role: Role, default_model: &'a str) -> &'a str {
+        let opt = match role {
+            Role::Default => self.default.as_deref(),
+            Role::Smol => self.smol.as_deref(),
+            Role::Slow => self.slow.as_deref(),
+            Role::Plan => self.plan.as_deref(),
+            Role::Commit => self.commit.as_deref(),
+        };
+        opt.unwrap_or(default_model)
+    }
 }
 
 impl Default for Settings {
@@ -56,6 +124,7 @@ impl Default for Settings {
             no_tools: false,
             session_dir: None,
             scoped_models: false,
+            roles: ModelRoles::default(),
         }
     }
 }

@@ -1224,6 +1224,32 @@ async fn handle_slash(
                 });
                 SlashOutcome::Continue
             } else {
+                // `/model role:<name>` (e.g. `/model role:smol`) routes via
+                // settings.roles instead of treating the arg as a model id.
+                if let Some(role_str) = target.strip_prefix("role:") {
+                    if let Some(role) = pi_agent_core::settings::Role::parse(role_str) {
+                        let chosen = session.set_role(role, &startup.settings.roles).await;
+                        *current_model = if chosen.contains('/') {
+                            chosen.clone()
+                        } else {
+                            format!("{}/{}", startup.settings.provider, chosen)
+                        };
+                        view.transcript
+                            .blocks
+                            .push(crate::renderer::Block::Note(format!(
+                                "[model set to {} via role {}]",
+                                current_model, role_str
+                            )));
+                        return SlashOutcome::Continue;
+                    } else {
+                        view.transcript
+                            .blocks
+                            .push(crate::renderer::Block::Error(format!(
+                                "unknown role: {role_str} (expected default|smol|slow|plan|commit)"
+                            )));
+                        return SlashOutcome::Continue;
+                    }
+                }
                 let (p, m) = split_model(target);
                 // If scoped-models is enabled, remember the model we are
                 // about to replace so the TUI can revert after the next

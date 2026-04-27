@@ -121,6 +121,20 @@ pub struct Cli {
     #[arg(long = "auto-approve-model")]
     pub auto_approve_model: Option<String>,
 
+    /// Cheap "smol" role model id (e.g. `haiku`, `gpt-4o-mini`,
+    /// `provider/model`). Overrides `settings.roles.smol`.
+    #[arg(long, env = "PI_SMOL_MODEL")]
+    pub smol: Option<String>,
+
+    /// Slow / heavyweight reasoning role model id.
+    /// Overrides `settings.roles.slow`.
+    #[arg(long, env = "PI_SLOW_MODEL")]
+    pub slow: Option<String>,
+
+    /// Planning role model id. Overrides `settings.roles.plan`.
+    #[arg(long, env = "PI_PLAN_MODEL")]
+    pub plan: Option<String>,
+
     /// Free-form positional args. `@file` references add attachments.
     #[arg(value_name = "MESSAGE_OR_AT_FILES")]
     pub positionals: Vec<String>,
