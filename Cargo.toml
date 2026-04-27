@@ -66,3 +66,4 @@ pi-tui = { path = "crates/pi-tui" }
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+panic = "abort"
