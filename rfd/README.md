@@ -38,3 +38,4 @@ crosses crate boundaries.
 | 0004 | `pi-stats` crate                                 | Discussion |
 | 0005 | Subagents and the `task` tool                    | Discussion |
 | 0006 | Worktree-isolated tasks                          | Discussion |
+| 0007 | Per-language LSP formatting options              | Discussion |
