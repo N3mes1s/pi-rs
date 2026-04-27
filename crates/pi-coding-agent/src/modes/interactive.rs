@@ -749,7 +749,7 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
     let (session, mut rx) = build_session(&startup)?;
 
     // Pick theme.
-    let theme = startup
+    let mut theme = startup
         .themes
         .get(&startup.settings.theme)
         .cloned()
@@ -916,6 +916,22 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                 view.dirty = true;
             }
             _ = tick.tick() => {
+                // Poll for hot-reloaded theme on every tick.
+                if let Some(new_theme) = startup
+                    .themes_handle
+                    .as_ref()
+                    .and_then(|h| {
+                        let snap = h.snapshot();
+                        snap.get(&startup.settings.theme)
+                            .cloned()
+                            .or_else(|| snap.get("dark").cloned())
+                    })
+                {
+                    if new_theme != theme {
+                        theme = new_theme;
+                        view.dirty = true;
+                    }
+                }
                 if view.dirty {
                     let frame = build_frame(&view, &theme, cols, rows, &current_model, &cwd);
                     let _ = renderer.render(&frame);

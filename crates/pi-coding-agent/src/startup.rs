@@ -26,6 +26,8 @@ pub struct Startup {
     pub prompts: PromptRegistry,
     pub skills: SkillRegistry,
     pub themes: pi_tui::ThemeRegistry,
+    /// Hot-reload handle for themes — kept alive so the watcher fires.
+    pub themes_handle: Option<crate::themes::HotThemes>,
     pub keymap: Keymap,
     pub extensions: Vec<LoadedExtension>,
     pub slash_registry: SlashRegistry,
@@ -142,7 +144,9 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     }
 
     // 13. themes.
-    let themes = crate::themes::load_themes(&themes_dirs());
+    let theme_dirs = themes_dirs();
+    let themes = crate::themes::load_themes(&theme_dirs);
+    let themes_handle = Some(crate::themes::HotThemes::new(theme_dirs));
 
     // 14. keybindings (defaults + JSON overrides).
     let mut keymap = Keymap::defaults();
@@ -220,6 +224,7 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         prompts,
         skills,
         themes,
+        themes_handle,
         keymap,
         extensions: loaded_exts,
         slash_registry,

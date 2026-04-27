@@ -2,7 +2,7 @@ use crossterm::style::Color;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Theme {
     pub name: String,
     pub fg: ColorSpec,
@@ -16,7 +16,7 @@ pub struct Theme {
     pub error: ColorSpec,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ColorSpec {
     Named(NamedColor),
@@ -41,7 +41,7 @@ impl ColorSpec {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NamedColor {
     Reset,

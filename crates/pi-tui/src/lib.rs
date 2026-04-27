@@ -10,4 +10,4 @@ pub mod theme;
 
 pub use editor::{Editor, EditorEvent};
 pub use renderer::{DiffRenderer, Frame, Line, Span};
-pub use theme::{Theme, ThemeRegistry};
+pub use theme::{ColorSpec, NamedColor, Theme, ThemeRegistry};
