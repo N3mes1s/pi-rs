@@ -97,13 +97,15 @@ fn work_dir(root: &std::path::Path, config: &SessionConfig) -> PathBuf {
 ///
 /// | Field | Type | Required | Description |
 /// |-------|------|----------|-------------|
-/// | `root` | string | yes | Directory where artefact files will be written |
+/// | `session_dir` | string | yes | Directory where `autoresearch.{config.json,jsonl,md}` live |
 /// | `name` | string | yes | Human-readable experiment name |
 /// | `metric` | string | yes | Name of the metric (matches `METRIC <name>=…` lines) |
 /// | `unit` | string | yes | Display unit (e.g. `"ms"`) |
 /// | `direction` | `"lower"` \| `"higher"` | yes | Whether lower or higher values are improvements |
 /// | `max_iterations` | integer | no | Hard iteration cap (`null` = unlimited) |
-/// | `working_dir` | string | no | Git working directory (defaults to `root`) |
+/// | `working_dir` | string | no | Git working directory for benchmarks/commits (defaults to `session_dir`) |
+///
+/// `root` is accepted as a deprecated alias for `session_dir`.
 pub struct InitExperimentTool;
 
 #[async_trait]
@@ -118,15 +120,16 @@ impl Tool for InitExperimentTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "root":           { "type": "string" },
+                    "session_dir":    { "type": "string", "description": "Directory where autoresearch.{config.json,jsonl,md} live" },
+                    "root":           { "type": "string", "description": "Deprecated alias for session_dir" },
                     "name":           { "type": "string" },
                     "metric":         { "type": "string" },
                     "unit":           { "type": "string" },
                     "direction":      { "type": "string", "enum": ["lower", "higher"] },
                     "max_iterations": { "type": "integer" },
-                    "working_dir":    { "type": "string" }
+                    "working_dir":    { "type": "string", "description": "Git working directory for benchmarks/commits (defaults to session_dir)" }
                 },
-                "required": ["root", "name", "metric", "unit", "direction"]
+                "required": ["name", "metric", "unit", "direction"]
             }),
         }
     }
@@ -271,11 +274,12 @@ impl Tool for RunExperimentTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "root":    { "type": "string" },
-                    "command": { "type": "string" },
-                    "idea":    { "type": "string" }
+                    "session_dir": { "type": "string", "description": "Directory where the autoresearch session lives" },
+                    "root":        { "type": "string", "description": "Deprecated alias for session_dir" },
+                    "command":     { "type": "string" },
+                    "idea":        { "type": "string" }
                 },
-                "required": ["root", "command", "idea"]
+                "required": ["command", "idea"]
             }),
         }
     }
@@ -398,7 +402,8 @@ impl Tool for LogExperimentTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "root":          { "type": "string" },
+                    "session_dir":   { "type": "string", "description": "Directory where the autoresearch session lives" },
+                    "root":          { "type": "string", "description": "Deprecated alias for session_dir" },
                     "run_id":        { "type": "string" },
                     "metric_value":  { "type": "number" },
                     "kept":          { "type": "boolean" },
@@ -406,7 +411,7 @@ impl Tool for LogExperimentTool {
                     "idea":          { "type": "string" },
                     "duration_ms":   { "type": "integer" }
                 },
-                "required": ["root", "run_id", "metric_value", "kept", "commit_before", "idea"]
+                "required": ["run_id", "metric_value", "kept", "commit_before", "idea"]
             }),
         }
     }
@@ -528,12 +533,20 @@ impl Tool for LogExperimentTool {
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
+/// Resolve the **session directory** — where autoresearch.{config.json,jsonl,md}
+/// live. Accepts `session_dir` (preferred) or `root` (legacy alias). Relative
+/// paths resolve against the current `ToolContext::cwd`.
 fn resolve_root(ctx: &ToolContext, input: &Value) -> Result<PathBuf, ToolError> {
-    let root_str = input
-        .get("root")
+    let s = input
+        .get("session_dir")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| ToolError::InvalidInput("missing `root`".into()))?;
-    let p = std::path::Path::new(root_str);
+        .or_else(|| input.get("root").and_then(|v| v.as_str()))
+        .ok_or_else(|| {
+            ToolError::InvalidInput(
+                "missing `session_dir` (where autoresearch.{config.json,jsonl,md} live)".into(),
+            )
+        })?;
+    let p = std::path::Path::new(s);
     Ok(if p.is_absolute() {
         p.to_path_buf()
     } else {
