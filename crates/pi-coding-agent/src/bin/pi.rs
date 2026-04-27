@@ -2,6 +2,19 @@ use clap::Parser;
 use pi_coding_agent::{cli::Cli, cmd, modes, startup};
 
 fn main() -> anyhow::Result<()> {
+    // Argv pre-sniff for fast-path subcommands. Building clap's command tree
+    // for our 30+ flags is non-trivial; for these flags we don't need any
+    // values or interactions, so a manual match shaves the parse cost.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.len() == 1 {
+        match args[0].as_str() {
+            "--list" => return cmd::run_list(),
+            "--config" => return cmd::run_config(),
+            "--update" => return cmd::run_update(),
+            _ => {}
+        }
+    }
+
     let cli = Cli::parse();
 
     // Fast paths: synchronous subcommands don't need a tokio runtime
