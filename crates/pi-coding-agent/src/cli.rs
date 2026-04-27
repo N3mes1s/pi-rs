@@ -128,6 +128,11 @@ pub struct Cli {
     #[arg(long = "flamegraph", value_name = "SESSION_OR_PATH")]
     pub flamegraph: Option<String>,
 
+    /// Render a session as a self-contained HTML transcript and write
+    /// it to `~/.pi/agent/shares/<id>.html` (path printed on stdout).
+    #[arg(long = "share", value_name = "SESSION_OR_PATH")]
+    pub share: Option<String>,
+
     /// Manage the auto-approve policy file at
     /// `~/.pi/agent/auto-approve.json`. Verbs:
     ///

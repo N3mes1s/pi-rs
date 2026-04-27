@@ -397,6 +397,73 @@ pub fn run_flamegraph(target: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `pi --share <session-id-or-path>` — render a session as a self-
+/// contained HTML transcript via [`crate::share::render_session_html`]
+/// and write it to `<agent_dir>/shares/<id>.html`. Prints the file
+/// path on stdout. We don't upload anywhere (pi.dev is not part of
+/// this codebase); the artefact is the file you can mail or attach.
+pub fn run_share(target: &str) -> anyhow::Result<()> {
+    use crate::context::{agent_dir, sessions_dir};
+    use crate::share::render_session_html;
+    use pi_agent_core::{SessionEntry, SessionEntryKind};
+
+    // Resolve target → a .jsonl path. Either an absolute path that
+    // already exists, or a session id we look up under the per-cwd
+    // sessions root (same convention as --flamegraph).
+    let path = if std::path::Path::new(target).is_file() {
+        std::path::PathBuf::from(target)
+    } else {
+        let cwd = std::env::current_dir()?;
+        let slug = cwd.display().to_string().replace(['/', '\\', ':'], "_");
+        let dir = sessions_dir().join(slug);
+        let candidate = dir.join(format!("{target}.jsonl"));
+        if !candidate.exists() {
+            anyhow::bail!(
+                "no session jsonl at {} (looked up id={} for cwd={})",
+                candidate.display(),
+                target,
+                cwd.display()
+            );
+        }
+        candidate
+    };
+
+    let txt = std::fs::read_to_string(&path)?;
+    let entries: Vec<SessionEntry> = txt
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+
+    // Provider/model live on the first Meta entry; fall back to
+    // "unknown" if absent so we still produce a useful artefact.
+    let (provider, model) = entries
+        .iter()
+        .find_map(|e| match &e.kind {
+            SessionEntryKind::Meta { provider, model, .. } => {
+                Some((provider.clone(), model.clone()))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| ("unknown".into(), "unknown".into()));
+
+    let session_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("session")
+        .to_string();
+
+    let html = render_session_html(&entries, &session_id, &provider, &model);
+
+    let shares_dir = agent_dir().join("shares");
+    std::fs::create_dir_all(&shares_dir)?;
+    let out_path = shares_dir.join(format!("{session_id}.html"));
+    std::fs::write(&out_path, &html)?;
+    println!("{}", out_path.display());
+    Ok(())
+}
+
+
 /// `pi --refresh-models` — query every provider with credentials for its
 /// live model catalogue, merge into `<agent_dir>/discovered-models.json`,
 /// and report per-provider success/failure.

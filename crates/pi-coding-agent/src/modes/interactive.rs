@@ -1450,22 +1450,33 @@ async fn handle_slash(
             SlashOutcome::Continue
         }
         "share" => {
+            // Per upstream pi-on-pi.dev, `/share` was originally a gist
+            // upload helper; in this fork pi.dev infrastructure is not
+            // available, so we mirror `pi --share <id>`: render the
+            // session as self-contained HTML and write it into the
+            // agent's shares dir. The file path is reported inline so
+            // the user can attach / mail it.
             let mgr = startup.runtime_config.session_manager.clone();
             let branch = mgr.current_branch(session.id());
             let meta = mgr.meta(session.id());
             let (provider, model) = meta
                 .map(|m| (m.provider, m.model))
                 .unwrap_or_else(|| (startup.settings.provider.clone(), startup.settings.model.clone()));
-            let body = crate::share::render_markdown(session.id(), &provider, &model, &branch);
-            match crate::share::run_gh_gist(&body) {
-                Ok(url) => view
-                    .transcript
-                    .blocks
-                    .push(crate::renderer::Block::Note(format!("[shared: {url}]"))),
+            let html =
+                crate::share::render_session_html(&branch, session.id(), &provider, &model);
+            let shares_dir = crate::context::agent_dir().join("shares");
+            let res = std::fs::create_dir_all(&shares_dir).and_then(|_| {
+                let p = shares_dir.join(format!("{}.html", session.id()));
+                std::fs::write(&p, &html).map(|_| p)
+            });
+            match res {
+                Ok(path) => view.transcript.blocks.push(crate::renderer::Block::Note(
+                    format!("[shared: {}]", path.display()),
+                )),
                 Err(e) => view
                     .transcript
                     .blocks
-                    .push(crate::renderer::Block::Error(e)),
+                    .push(crate::renderer::Block::Error(format!("share: {e}"))),
             }
             SlashOutcome::Continue
         }
