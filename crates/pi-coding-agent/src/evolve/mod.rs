@@ -19,6 +19,7 @@
 //! candidate that regresses on previously-winning prompts.
 
 pub mod agents_md;
+pub mod apply;
 pub mod benchmark;
 pub mod mutate;
 pub mod tick;
@@ -31,6 +32,11 @@ pub use benchmark::{
 pub use mutate::{
     build_prompt, post_process, EvidenceItem, MutateError, Mutator, MutatorConfig,
     MutationEvidence,
+};
+pub use apply::{
+    add_poison, append_generation, backup_and_apply, best_strict_improvement,
+    is_poisoned, pareto_frontier, poisoned_hashes, read_generations, rollback,
+    should_rollback, Candidate, GenerationLogEntry, PendingApply,
 };
 pub use tick::{
     evolve_dir, is_disabled, should_run, CostLedger, Lock, SkipReason, State, TickDecision,
