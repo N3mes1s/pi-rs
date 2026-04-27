@@ -17,6 +17,8 @@ pub enum ProviderKind {
     OpenAi,
     OpenAiCompat,
     Google,
+    Bedrock,
+    Azure,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,9 +107,13 @@ pub trait Provider: Send + Sync {
 }
 
 pub mod anthropic;
+pub mod azure;
+pub mod bedrock;
 pub mod google;
 pub mod openai;
 
 pub use anthropic::AnthropicProvider;
+pub use azure::AzureOpenAiProvider;
+pub use bedrock::BedrockAnthropicProvider;
 pub use google::GoogleProvider;
 pub use openai::{OpenAiCompatProvider, OpenAiProvider};

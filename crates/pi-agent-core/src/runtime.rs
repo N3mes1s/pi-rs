@@ -1,9 +1,10 @@
 use chrono::Utc;
 use futures::StreamExt;
 use pi_ai::{
-    AnthropicProvider, AuthMethod, AuthStorage, ContentBlock, FinishReason, GenerateRequest,
-    GoogleProvider, Message, ModelInfo, ModelRegistry, OpenAiCompatProvider, OpenAiProvider,
-    Provider, ProviderConfig, ProviderKind, Role, ThinkingLevel, ToolCall, ToolResult, Usage,
+    AnthropicProvider, AuthMethod, AuthStorage, AzureOpenAiProvider, BedrockAnthropicProvider,
+    ContentBlock, FinishReason, GenerateRequest, GoogleProvider, Message, ModelInfo, ModelRegistry,
+    OpenAiCompatProvider, OpenAiProvider, Provider, ProviderConfig, ProviderKind, Role,
+    ThinkingLevel, ToolCall, ToolResult, Usage,
 };
 use pi_tools::{ToolContext, ToolRegistry};
 use std::path::PathBuf;
@@ -33,6 +34,8 @@ impl ProviderFactory for DefaultProviderFactory {
             ProviderKind::OpenAi => Box::new(OpenAiProvider::new(cfg, auth)),
             ProviderKind::OpenAiCompat => Box::new(OpenAiCompatProvider::new(cfg, auth)),
             ProviderKind::Google => Box::new(GoogleProvider::new(cfg, auth)),
+            ProviderKind::Bedrock => Box::new(BedrockAnthropicProvider::new(cfg, auth)),
+            ProviderKind::Azure => Box::new(AzureOpenAiProvider::new(cfg, auth)),
         })
     }
 }

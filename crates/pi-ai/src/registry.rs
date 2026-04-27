@@ -200,5 +200,57 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
                 ),
             ],
         },
+        ProviderConfig {
+            name: "bedrock".into(),
+            kind: ProviderKind::Bedrock,
+            base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".into(),
+            auth_header: "Authorization".into(),
+            auth_format: "Bearer {token}".into(),
+            models: vec![
+                m(
+                    "bedrock",
+                    "anthropic.claude-opus-4-7",
+                    Some("bedrock-opus"),
+                    200_000,
+                    32_000,
+                    true,
+                    true,
+                    15.0,
+                    75.0,
+                ),
+                m(
+                    "bedrock",
+                    "anthropic.claude-sonnet-4-6",
+                    Some("bedrock-sonnet"),
+                    1_000_000,
+                    64_000,
+                    true,
+                    true,
+                    3.0,
+                    15.0,
+                ),
+                m(
+                    "bedrock",
+                    "anthropic.claude-haiku-4-5",
+                    Some("bedrock-haiku"),
+                    200_000,
+                    16_000,
+                    true,
+                    true,
+                    0.8,
+                    4.0,
+                ),
+            ],
+        },
+        ProviderConfig {
+            name: "azure-openai".into(),
+            kind: ProviderKind::Azure,
+            base_url: "https://YOUR_RESOURCE.openai.azure.com".into(),
+            auth_header: "api-key".into(),
+            auth_format: "{token}".into(),
+            // Users configure their own deployment names; no models are
+            // pre-registered here.
+            models: vec![],
+        },
     ]
 }

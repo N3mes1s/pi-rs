@@ -55,6 +55,8 @@ impl AuthStorage {
         ("openai", "OPENAI_API_KEY"),
         ("fireworks", "FIREWORKS_API_KEY"),
         ("google", "GOOGLE_API_KEY"),
+        ("bedrock", "AWS_BEDROCK_TOKEN"),
+        ("azure-openai", "AZURE_OPENAI_API_KEY"),
     ];
 
     pub fn from_env() -> Self {

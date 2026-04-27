@@ -19,8 +19,8 @@ pub use message::{
 };
 pub use oauth::{build_authorize_url, exchange_code, is_expired, OAuthEndpoints, Pkce, TokenResponse};
 pub use provider::{
-    AnthropicProvider, GenerateRequest, GenerateResponse, GoogleProvider, OpenAiCompatProvider,
-    OpenAiProvider, Provider, ProviderKind,
+    AnthropicProvider, AzureOpenAiProvider, BedrockAnthropicProvider, GenerateRequest,
+    GenerateResponse, GoogleProvider, OpenAiCompatProvider, OpenAiProvider, Provider, ProviderKind,
 };
 pub use registry::{ModelInfo, ModelRegistry, ProviderConfig};
 pub use stream::{StreamEvent, StreamEventKind};
