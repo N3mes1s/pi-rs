@@ -32,6 +32,7 @@ pub mod keymap;
 pub mod modes;
 pub mod native;
 pub mod picker;
+pub mod picker_model;
 pub mod renderer;
 pub mod packages;
 pub mod prompts;

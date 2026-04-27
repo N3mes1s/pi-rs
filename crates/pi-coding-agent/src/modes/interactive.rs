@@ -1236,20 +1236,17 @@ async fn handle_slash(
         "model" => {
             let target = args.trim();
             if target.is_empty() {
-                let items: Vec<PickItem<String>> = startup
-                    .runtime_config
-                    .model_registry
-                    .providers()
-                    .flat_map(|p| {
-                        p.models.iter().map(move |m| PickItem {
-                            label: format!("{}/{}", p.name, m.id),
-                            value: format!("{}/{}", p.name, m.id),
-                        })
-                    })
-                    .collect();
+                // Use the picker_model helper so labels carry the alias
+                // and role badges. We default to the All tab; future
+                // wiring will let the user toggle to Canonical.
+                let picker = crate::picker_model::picker_for(
+                    &startup.runtime_config.model_registry,
+                    &startup.settings.roles,
+                    crate::picker_model::ModelTab::All,
+                );
                 view.picker = Some(PickerOverlay {
                     kind: PickerKind::Model,
-                    picker: Picker::new(items),
+                    picker,
                     title: "model".into(),
                 });
                 SlashOutcome::Continue
