@@ -51,3 +51,41 @@ pub fn run_update() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// `pi --refresh-models` — query every provider with credentials for its
+/// live model catalogue, merge into `<agent_dir>/discovered-models.json`,
+/// and report per-provider success/failure.
+///
+/// This needs an async runtime, so it can't sit in the synchronous fast-path
+/// in `bin/pi.rs`; the binary spins one up on demand.
+pub async fn run_refresh_models() -> anyhow::Result<()> {
+    use crate::context::{agent_dir, auth_path};
+    use pi_ai::{discovered_cache_path, refresh_and_save, AuthStorage, ModelRegistry};
+
+    // Load creds: file first, env second (env wins).
+    let auth = AuthStorage::open(auth_path()).unwrap_or_else(|_| AuthStorage::in_memory());
+    let env = AuthStorage::from_env();
+    for (p, _) in AuthStorage::ENV_KEYS {
+        if let Some(m) = env.get(p) {
+            auth.set(p, m);
+        }
+    }
+    let registry = ModelRegistry::new(auth.clone());
+
+    let cache_path = discovered_cache_path(&agent_dir());
+    let (cache, results) = refresh_and_save(&registry, &auth, &cache_path).await?;
+
+    println!("discovered-models cache: {}", cache_path.display());
+    let mut total = 0usize;
+    for r in &results {
+        match &r.result {
+            Ok(models) => {
+                total += models.len();
+                println!("  ✓ {} → {} models", r.provider, models.len());
+            }
+            Err(e) => println!("  ✗ {} → {}", r.provider, e),
+        }
+    }
+    println!("total: {} models across {} providers", total, cache.providers.len());
+    Ok(())
+}

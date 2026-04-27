@@ -99,6 +99,10 @@ impl Provider for AnthropicProvider {
         &self.auth
     }
 
+    async fn discover_models(&self) -> Result<Vec<crate::registry::ModelInfo>> {
+        super::discover::anthropic(&self.client, &self.config, &self.auth).await
+    }
+
     async fn stream(&self, req: GenerateRequest, model: &ModelInfo) -> Result<EventStream> {
         let token = self.auth_token()?.to_string();
         let url = format!("{}/v1/messages", self.config.base_url);

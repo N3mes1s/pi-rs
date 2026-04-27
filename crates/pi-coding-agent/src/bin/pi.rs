@@ -31,6 +31,13 @@ fn main() -> anyhow::Result<()> {
     if cli.update {
         return cmd::run_update();
     }
+    if cli.refresh_models {
+        // Needs an async runtime — spin one up just for this.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        return rt.block_on(cmd::run_refresh_models());
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(

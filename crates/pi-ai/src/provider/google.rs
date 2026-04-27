@@ -92,6 +92,10 @@ impl Provider for GoogleProvider {
         &self.auth
     }
 
+    async fn discover_models(&self) -> Result<Vec<ModelInfo>> {
+        super::discover::google(&self.client, &self.config, &self.auth).await
+    }
+
     async fn stream(&self, req: GenerateRequest, model: &ModelInfo) -> Result<EventStream> {
         let token = self.token()?;
         let url = format!(

@@ -81,8 +81,13 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         }
     }
 
-    // 4. model registry.
-    let registry = ModelRegistry::new(auth.clone());
+    // 4. model registry — start with the static catalogue, then merge
+    // anything cached by a previous `pi --refresh-models` run.
+    let mut registry = ModelRegistry::new(auth.clone());
+    let cache = pi_ai::DiscoveredCache::load(&pi_ai::discovered_cache_path(&agent_dir()));
+    if !cache.providers.is_empty() {
+        registry.merge_discovered(cache.flatten());
+    }
 
     // 5. tools.
     let mut tools = if settings.no_tools {

@@ -6,6 +6,7 @@
 //! quirks.
 
 pub mod auth;
+pub mod discover;
 pub mod message;
 pub mod oauth;
 pub mod provider;
@@ -14,6 +15,10 @@ pub mod stream;
 pub mod tool;
 
 pub use auth::{AuthMethod, AuthStorage};
+pub use discover::{
+    cache_path as discovered_cache_path, refresh_all, refresh_and_save, DiscoveredCache,
+    ProviderDiscovery,
+};
 pub use message::{
     Attachment, AttachmentKind, ContentBlock, FinishReason, Message, Role, ThinkingLevel, Usage,
 };
@@ -45,6 +50,8 @@ pub enum AiError {
     Decode(#[from] serde_json::Error),
     #[error("{0}")]
     Other(String),
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }
 
 pub type Result<T> = std::result::Result<T, AiError>;

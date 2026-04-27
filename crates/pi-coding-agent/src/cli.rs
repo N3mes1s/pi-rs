@@ -106,6 +106,11 @@ pub struct Cli {
     #[arg(long, action = ArgAction::SetTrue)]
     pub update: bool,
 
+    /// Run live model discovery against every provider with credentials,
+    /// merge results into `~/.pi/agent/discovered-models.json`, and exit.
+    #[arg(long = "refresh-models", action = ArgAction::SetTrue)]
+    pub refresh_models: bool,
+
     /// Free-form positional args. `@file` references add attachments.
     #[arg(value_name = "MESSAGE_OR_AT_FILES")]
     pub positionals: Vec<String>,

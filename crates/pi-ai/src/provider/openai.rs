@@ -126,6 +126,10 @@ impl Provider for OpenAiProvider {
         &self.auth
     }
 
+    async fn discover_models(&self) -> Result<Vec<crate::registry::ModelInfo>> {
+        super::discover::openai_compatible(&self.client, &self.config, &self.auth).await
+    }
+
     async fn stream(&self, req: GenerateRequest, model: &ModelInfo) -> Result<EventStream> {
         let url = format!("{}/chat/completions", self.config.base_url);
         let auth_value = self.auth_header()?;
@@ -357,5 +361,8 @@ impl Provider for OpenAiCompatProvider {
     }
     async fn stream(&self, req: GenerateRequest, model: &ModelInfo) -> Result<EventStream> {
         self.0.stream(req, model).await
+    }
+    async fn discover_models(&self) -> Result<Vec<ModelInfo>> {
+        self.0.discover_models().await
     }
 }

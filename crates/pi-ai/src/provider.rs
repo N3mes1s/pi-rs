@@ -104,11 +104,30 @@ pub trait Provider: Send + Sync {
     }
 
     async fn stream(&self, req: GenerateRequest, model: &ModelInfo) -> Result<EventStream>;
+
+    /// Live model discovery against the provider's `/v1/models` (or
+    /// equivalent) endpoint. Default returns `AiError::Unsupported` for
+    /// providers without a standard listing endpoint (Bedrock needs
+    /// SigV4-signed `bedrock:ListFoundationModels`; Azure deployments are
+    /// user-defined names rather than discoverable models).
+    ///
+    /// Returns `ModelInfo` entries with conservative defaults for
+    /// `context_window` / `max_output_tokens` / cost (the bare list
+    /// endpoints don't return those). Callers should merge live results
+    /// on top of the static catalog so curated entries keep their cost
+    /// data.
+    async fn discover_models(&self) -> Result<Vec<ModelInfo>> {
+        Err(AiError::Unsupported(format!(
+            "{} doesn't support live model discovery",
+            self.config().name
+        )))
+    }
 }
 
 pub mod anthropic;
 pub mod azure;
 pub mod bedrock;
+pub mod discover;
 pub mod google;
 pub mod openai;
 

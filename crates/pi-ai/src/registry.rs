@@ -92,6 +92,26 @@ impl ModelRegistry {
     pub fn install(&mut self, config: ProviderConfig) {
         self.providers.insert(config.name.clone(), config);
     }
+
+    /// Merge live-discovered models into the registry. Existing static
+    /// entries (curated cost / context_window / alias data) WIN over
+    /// discovered ones with the same id; new ids are appended.
+    pub fn merge_discovered(&mut self, discovered: Vec<ModelInfo>) {
+        for m in discovered {
+            let Some(provider) = self.providers.get_mut(&m.provider) else {
+                continue;
+            };
+            if provider.models.iter().any(|existing| existing.id == m.id) {
+                continue;
+            }
+            provider.models.push(m);
+        }
+    }
+
+    /// Number of models registered across all providers.
+    pub fn total_models(&self) -> usize {
+        self.providers.values().map(|p| p.models.len()).sum()
+    }
 }
 
 fn m(
