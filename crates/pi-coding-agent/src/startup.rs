@@ -234,14 +234,13 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         // and a structured `display.ask` payload otherwise (the TUI picker
         // wiring is still pending).
         tools.register(Arc::new(crate::native::ask::AskTool));
-        // Native lsp tool (D1). Inert by default — the master switch in
-        // `LspConfig::default()` is off, so the engine won't spawn any
-        // language servers until a user opts in (currently via
-        // per-process config; settings.toml wiring is a follow-up). The
-        // tool itself is always registered so the agent can at least
-        // call the `status` op and see "no servers running".
+        // Native lsp tool (D1 + H5). Wired through `Settings::lsp` so
+        // users opt in via the `lsp` block in settings.json. Defaults
+        // keep the master switch off; the tool stays registered so the
+        // agent can call the `status` op and see "no servers running"
+        // when LSP is disabled.
         tools.register(Arc::new(crate::native::lsp::LspTool::new(
-            crate::native::lsp::LspConfig::default(),
+            crate::native::lsp::LspConfig::from(&settings.lsp),
         )));
     }
 

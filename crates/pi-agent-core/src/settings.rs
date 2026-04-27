@@ -46,6 +46,12 @@ pub struct Settings {
     /// Autonomous AGENTS.md evolution daemon settings.
     #[serde(default)]
     pub evolve: EvolveSettings,
+    /// Native LSP integration settings (D1 / H5). Mirror of
+    /// `pi_coding_agent::native::lsp::LspConfig` — kept in this crate to
+    /// avoid a dependency cycle. The coding-agent crate converts via
+    /// `From<&LspSettings>` at startup.
+    #[serde(default)]
+    pub lsp: LspSettings,
 }
 
 /// Configuration for the autonomous evolution loop (G8).
@@ -201,12 +207,54 @@ impl Default for Settings {
             scoped_models: false,
             roles: ModelRoles::default(),
             evolve: EvolveSettings::default(),
+            lsp: LspSettings::default(),
         }
     }
 }
 
 fn default_provider() -> String {
     "anthropic".into()
+}
+
+/// Mirror of `pi_coding_agent::native::lsp::LspConfig`. Lives in
+/// pi-agent-core so `Settings` can hold it without taking a dependency
+/// on the coding-agent crate. The defaults here must stay in sync with
+/// `LspConfig::default()` (master switch off, format-on-write off,
+/// diagnostics-on-write on).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LspSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub format_on_write: bool,
+    #[serde(default = "default_lsp_diagnostics_on_write")]
+    pub diagnostics_on_write: bool,
+    #[serde(default)]
+    pub languages: std::collections::BTreeMap<String, LspLanguageSettings>,
+}
+
+impl Default for LspSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            format_on_write: false,
+            diagnostics_on_write: default_lsp_diagnostics_on_write(),
+            languages: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+fn default_lsp_diagnostics_on_write() -> bool {
+    true
+}
+
+/// Per-language override block for `LspSettings`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct LspLanguageSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
 }
 
 fn default_model() -> String {

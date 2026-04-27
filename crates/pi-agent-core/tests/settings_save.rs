@@ -46,6 +46,60 @@ fn save_then_load_round_trips_all_fields() {
 }
 
 #[test]
+fn save_then_load_round_trips_lsp_section() {
+    use pi_agent_core::settings::{LspLanguageSettings, LspSettings};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+
+    let mut s = Settings::default();
+    s.lsp = LspSettings {
+        enabled: true,
+        format_on_write: true,
+        diagnostics_on_write: false,
+        languages: [
+            (
+                "rust".into(),
+                LspLanguageSettings {
+                    enabled: Some(true),
+                    command: Some(vec!["rust-analyzer".into()]),
+                },
+            ),
+            (
+                "python".into(),
+                LspLanguageSettings {
+                    enabled: Some(false),
+                    command: None,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    s.save(&path).expect("save ok");
+    let loaded = Settings::load(&path);
+    assert_eq!(loaded.lsp, s.lsp);
+}
+
+#[test]
+fn lsp_section_uses_correct_defaults_when_absent() {
+    // settings.json with only the `provider` field set must leave
+    // `lsp` at its (off, off, on, empty) defaults — proves the
+    // upstream-matching defaults survive across deserialisation.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, r#"{"provider":"openai"}"#).unwrap();
+
+    let s = Settings::load(&path);
+    assert_eq!(s.provider, "openai");
+    assert!(!s.lsp.enabled);
+    assert!(!s.lsp.format_on_write);
+    assert!(s.lsp.diagnostics_on_write);
+    assert!(s.lsp.languages.is_empty());
+}
+
+#[test]
 fn save_creates_missing_parent_directories() {
     let dir = tempfile::tempdir().unwrap();
     let nested = dir.path().join("a").join("b").join("c").join("settings.json");

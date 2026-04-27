@@ -58,6 +58,31 @@ pub struct LanguageConfig {
     pub command: Option<Vec<String>>,
 }
 
+impl From<&pi_agent_core::settings::LspSettings> for LspConfig {
+    /// Lift the serde-only mirror in pi-agent-core into the runtime
+    /// type used by the engine + tool.
+    fn from(s: &pi_agent_core::settings::LspSettings) -> Self {
+        Self {
+            enabled: s.enabled,
+            format_on_write: s.format_on_write,
+            diagnostics_on_write: s.diagnostics_on_write,
+            languages: s
+                .languages
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        LanguageConfig {
+                            enabled: v.enabled,
+                            command: v.command.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 impl LspConfig {
     /// Is `language` enabled? Per-language override wins; otherwise
     /// fall back to `self.enabled`.
@@ -165,5 +190,36 @@ mod tests {
         assert!(c.enabled);
         assert!(!c.format_on_write);
         assert!(c.diagnostics_on_write);
+    }
+
+    #[test]
+    fn from_lsp_settings_preserves_every_field() {
+        let s = pi_agent_core::settings::LspSettings {
+            enabled: true,
+            format_on_write: true,
+            diagnostics_on_write: false,
+            languages: [(
+                "rust".into(),
+                pi_agent_core::settings::LspLanguageSettings {
+                    enabled: Some(true),
+                    command: Some(vec!["ra-multiplex".into()]),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let c = LspConfig::from(&s);
+        assert!(c.enabled);
+        assert!(c.format_on_write);
+        assert!(!c.diagnostics_on_write);
+        let rust = c.languages.get("rust").expect("rust override survives");
+        assert_eq!(rust.enabled, Some(true));
+        assert_eq!(rust.command.as_deref(), Some(&["ra-multiplex".to_string()][..]));
+    }
+
+    #[test]
+    fn from_default_lsp_settings_matches_lspconfig_default() {
+        let c = LspConfig::from(&pi_agent_core::settings::LspSettings::default());
+        assert_eq!(c, LspConfig::default());
     }
 }
