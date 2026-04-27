@@ -37,6 +37,11 @@ impl<T: Clone> Picker<T> {
         self
     }
 
+    /// Returns the total number of candidate items (unfiltered).
+    pub fn items_len(&self) -> usize {
+        self.items.len()
+    }
+
     pub fn ranked(&self) -> Vec<(i64, &PickItem<T>)> {
         if self.query.is_empty() {
             return self

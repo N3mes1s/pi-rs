@@ -17,6 +17,7 @@ use futures::StreamExt;
 use pi_agent_core::{settings::ThinkingSetting, AgentEvent, AgentEventKind};
 use pi_tui::{DiffRenderer, Editor, Frame, Line, Span, Theme};
 use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::keymap::{chord_from_event, Action, Chord, ChordCode, Keymap};
@@ -71,19 +72,20 @@ enum InputMode {
 /// What happens after a picker resolves.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
-enum PickerKind {
+pub(crate) enum PickerKind {
     Resume,
     Model,
     Tree,
     Fork,
     Clone,
+    AtCompletion,
 }
 
 #[derive(Debug)]
 pub struct PickerOverlay {
-    kind: PickerKind,
-    picker: Picker<String>,
-    title: String,
+    pub(crate) kind: PickerKind,
+    pub picker: Picker<String>,
+    pub title: String,
 }
 
 /// Pure view-state container — no I/O, no terminal — so it can be unit-tested
@@ -110,6 +112,11 @@ pub struct View {
     pub last_quit: Option<Instant>,
     pub turn_in_progress: bool,
     pub dirty: bool,
+    /// True while the `@`-filename completion picker is active.
+    pub at_active: bool,
+    /// Byte index in `editor.text` where the `@` character was inserted.
+    /// Everything from this index onwards (inclusive) is the `@<query>` token.
+    pub at_query_start: Option<usize>,
 }
 
 impl View {
@@ -128,6 +135,8 @@ impl View {
             last_quit: None,
             turn_in_progress: false,
             dirty: true,
+            at_active: false,
+            at_query_start: None,
         }
     }
 }
@@ -156,6 +165,9 @@ pub enum KeyOutcome {
         command_name: String,
         args: String,
     },
+    /// The `@`-filename completion picker resolved: replace the `@<query>`
+    /// token with the chosen path.
+    AtComplete { picked: String },
 }
 
 /// Pure key handler — no I/O. Returns what the outer loop must drive.
@@ -168,6 +180,10 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
     if let Some(overlay) = view.picker.as_mut() {
         match ev.code {
             KeyCode::Esc => {
+                // If this is an @-completion picker, keep the literal @<query>
+                // text but clear the picker state.
+                view.at_active = false;
+                view.at_query_start = None;
                 view.picker = None;
                 return KeyOutcome::None;
             }
@@ -176,8 +192,22 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
                 let kind = overlay.kind;
                 view.picker = None;
                 if let Some(value) = chosen {
+                    if matches!(kind, PickerKind::AtCompletion) {
+                        // Replace the @<query> token in the editor with the
+                        // picked path.
+                        if let Some(start) = view.at_query_start {
+                            let replacement = value.clone();
+                            view.editor.text.replace_range(start.., &replacement);
+                            view.editor.cursor = start + replacement.len();
+                        }
+                        view.at_active = false;
+                        view.at_query_start = None;
+                        return KeyOutcome::AtComplete { picked: value };
+                    }
                     return picker_outcome(kind, value);
                 }
+                view.at_active = false;
+                view.at_query_start = None;
                 return KeyOutcome::None;
             }
             KeyCode::Up => {
@@ -189,11 +219,27 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
                 return KeyOutcome::None;
             }
             KeyCode::Backspace => {
+                let is_at = matches!(overlay.kind, PickerKind::AtCompletion);
                 overlay.picker.pop_query();
+                if is_at {
+                    // Also remove the character from the editor buffer.
+                    // But don't go past the '@' itself.
+                    if let Some(start) = view.at_query_start {
+                        // editor text from start is "@<query>"; cursor is at end
+                        if view.editor.cursor > start + 1 {
+                            view.editor.backspace();
+                        }
+                    }
+                }
                 return KeyOutcome::None;
             }
             KeyCode::Char(c) if !ev.modifiers.contains(KeyModifiers::CONTROL) => {
+                let is_at = matches!(overlay.kind, PickerKind::AtCompletion);
                 overlay.picker.push_query(c);
+                if is_at {
+                    // Also append to editor so user sees @<query> in place.
+                    view.editor.insert(c);
+                }
                 return KeyOutcome::None;
             }
             _ => return KeyOutcome::None,
@@ -367,6 +413,28 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
 
     // No mapping — fall back to raw editing.
     match (ev.code, ev.modifiers) {
+        (KeyCode::Char('@'), m) if !m.contains(KeyModifiers::CONTROL) => {
+            // Insert '@' into the editor first, then open the @-completion picker.
+            let cursor_before = view.editor.cursor;
+            view.editor.insert('@');
+            // at_query_start points at the '@' byte.
+            view.at_active = true;
+            view.at_query_start = Some(cursor_before);
+            // Open picker — caller must have populated candidates already;
+            // here we open an empty picker. The TUI loop (or tests) supplies
+            // the candidate list via open_at_picker() before or after.
+            // We open it with an empty items list; the outer loop or
+            // build_at_candidates() can repopulate if needed. For simplicity
+            // we open it here with no candidates; tests supply candidates via
+            // the public API.
+            let items: Vec<crate::picker::PickItem<String>> = Vec::new();
+            view.picker = Some(PickerOverlay {
+                kind: PickerKind::AtCompletion,
+                picker: crate::picker::Picker::new(items),
+                title: "@file".into(),
+            });
+            view.last_quit = None;
+        }
         (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
             view.editor.insert(c);
             view.last_quit = None;
@@ -458,7 +526,66 @@ fn picker_outcome(kind: PickerKind, value: String) -> KeyOutcome {
         PickerKind::Tree => KeyOutcome::SlashCommand("__tree_pick".into(), value),
         PickerKind::Fork => KeyOutcome::SlashCommand("fork".into(), value),
         PickerKind::Clone => KeyOutcome::SlashCommand("__clone_pick".into(), value),
+        PickerKind::AtCompletion => KeyOutcome::AtComplete { picked: value },
     }
+}
+
+/// Walk `cwd` with `ignore::WalkBuilder` (honours `.gitignore`), collect up
+/// to 5 000 paths relative to `cwd`, and return them sorted.
+///
+/// This is the source of candidates for the `@`-filename completion picker.
+pub fn build_at_candidates(cwd: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::with_capacity(256);
+    for result in ignore::WalkBuilder::new(cwd)
+        .hidden(false)
+        .git_ignore(true)
+        // Honour .gitignore files even when there is no .git directory
+        // (important for tempdir-based tests and bare workspaces).
+        .require_git(false)
+        .build()
+    {
+        let entry = match result {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        // Skip the root itself.
+        if entry.path() == cwd {
+            continue;
+        }
+        // Only files (not directories) are useful as `@filename` completions.
+        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        if let Ok(rel) = entry.path().strip_prefix(cwd) {
+            out.push(rel.to_path_buf());
+        }
+        if out.len() >= 5_000 {
+            break;
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Open (or replace) the `@`-completion picker on `view` with the given
+/// candidate paths. Call this after `handle_key` returns to populate the
+/// picker when `@` is first typed.
+pub fn open_at_picker(view: &mut View, candidates: Vec<PathBuf>) {
+    let items: Vec<crate::picker::PickItem<String>> = candidates
+        .into_iter()
+        .map(|p| {
+            let label = p.display().to_string();
+            crate::picker::PickItem {
+                value: label.clone(),
+                label,
+            }
+        })
+        .collect();
+    view.picker = Some(PickerOverlay {
+        kind: PickerKind::AtCompletion,
+        picker: crate::picker::Picker::new(items),
+        title: "@file".into(),
+    });
 }
 
 /// Prevents unused warning when no Chord match arms remain.
@@ -639,7 +766,20 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                 };
                 match ct_ev {
                     CtEvent::Key(ke) => {
-                        match handle_key(&mut view, &ke) {
+                        let outcome = handle_key(&mut view, &ke);
+                        // If @-completion was just activated, populate the
+                        // picker with real filesystem candidates.
+                        if view.at_active {
+                            if let Some(overlay) = view.picker.as_ref() {
+                                if matches!(overlay.kind, PickerKind::AtCompletion)
+                                    && overlay.picker.items_len() == 0
+                                {
+                                    let candidates = build_at_candidates(&cwd);
+                                    open_at_picker(&mut view, candidates);
+                                }
+                            }
+                        }
+                        match outcome {
                             KeyOutcome::None => {}
                             KeyOutcome::Quit => break 'outer,
                             KeyOutcome::Submit(text) => {
@@ -724,6 +864,11 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                                         }
                                     }
                                 }
+                            }
+                            KeyOutcome::AtComplete { .. } => {
+                                // The editor buffer has already been updated
+                                // by handle_key. Nothing more to do in the
+                                // TUI loop.
                             }
                         }
                     }
