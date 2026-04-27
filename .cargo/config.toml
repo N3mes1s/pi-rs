@@ -1,0 +1,12 @@
+# pi-rs default build target.
+#
+# Linking against musl statically (instead of glibc) saves ~1.1 ms of
+# cold-start time on `pi --list` (the dynamic loader / glibc relocation
+# step is just gone) and removes the runtime dependency on the host's
+# glibc version, for ~130 KiB extra binary size.
+#
+# Override with `cargo build --target x86_64-unknown-linux-gnu` if you
+# need glibc for some reason (e.g. profiler tooling that doesn't grok
+# static binaries).
+[build]
+target = "x86_64-unknown-linux-musl"

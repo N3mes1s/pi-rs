@@ -16,10 +16,18 @@ POSTBUILD="${PI_AR_POSTBUILD:-}"
 if [[ -n "$TARGET" ]]; then
   cargo build --release --target "$TARGET" -p pi-coding-agent 2>/dev/null
   BIN="./target/${TARGET}/release/pi"
-  # Mirror to ./target/release/pi so existing tooling keeps working.
   install -m 755 "$BIN" ./target/release/pi
 else
   cargo build --release -p pi-coding-agent 2>/dev/null
+  # When .cargo/config.toml pins a default target, cargo emits the
+  # binary under target/<triple>/release rather than target/release.
+  if [[ ! -f ./target/release/pi ]]; then
+    for t in target/*/release/pi; do
+      [[ -f "$t" ]] || continue
+      install -m 755 "$t" ./target/release/pi
+      break
+    done
+  fi
 fi
 
 if [[ -n "$POSTBUILD" ]]; then
