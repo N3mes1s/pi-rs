@@ -111,13 +111,10 @@ where
     None
 }
 
-// Ignored by default: the test boots rust-analyzer against a fresh
-// tempdir crate, which forces RA to run `cargo metadata` + `cargo
-// check`. On a sandbox without crates.io reachability this stalls
-// indefinitely. Run locally on a dev machine with a warm registry:
-//   `cargo test -p pi-coding-agent --test lsp_real_rust_analyzer -- --ignored`
+// Self-skipping when `rust-analyzer` isn't on PATH (CI without the
+// component). Otherwise spawns a real RA instance against a tempdir
+// crate and exercises every op end-to-end.
 #[tokio::test]
-#[ignore = "requires rust-analyzer + reachable crates.io for cargo metadata"]
 async fn real_rust_analyzer_round_trip() {
     let Some(ra) = require_rust_analyzer() else {
         return;
@@ -169,6 +166,8 @@ async fn real_rust_analyzer_round_trip() {
     );
 
     // ── 2. definition: cursor on `add(1, 2)` → points at fn def.
+    // RA may return `[]` while semantic analysis is still warming up;
+    // require a non-empty payload before we believe the result.
     let definition = invoke_until(
         &tool,
         dir.path(),
@@ -178,8 +177,12 @@ async fn real_rust_analyzer_round_trip() {
             "line": 6,
             "col": 12,
         }),
-        20,
-        |result| !result.is_null() && (result.is_array() || result.is_object()),
+        90,
+        |result| match result {
+            Value::Array(xs) => !xs.is_empty(),
+            Value::Object(_) => true,
+            _ => false,
+        },
     )
     .await
     .expect("rust-analyzer should return a definition for `add(1,2)` call");
@@ -187,7 +190,7 @@ async fn real_rust_analyzer_round_trip() {
     let target_uri = first_uri(&definition).unwrap_or_default();
     assert!(
         target_uri.ends_with("main.rs"),
-        "definition should point inside main.rs; got {target_uri}"
+        "definition should point inside main.rs; got '{target_uri}' raw={definition}"
     );
 
     // ── 3. hover: cursor on `add` definition.
