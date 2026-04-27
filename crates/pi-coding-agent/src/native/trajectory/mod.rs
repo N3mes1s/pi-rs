@@ -23,9 +23,11 @@
 
 pub mod features;
 pub mod judge;
+pub mod recorder;
 
 pub use features::{extract, TrajectoryFeatures};
 pub use judge::{
     features_only_outcome, judge_session, parse_verdict, Judge, JudgeConfig, JudgeError,
     JudgeVerdict,
 };
+pub use recorder::{build_judge_from_settings, finalize_session};
