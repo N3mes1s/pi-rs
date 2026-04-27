@@ -470,11 +470,15 @@ mod tests {
             },
         );
         let engine = LspEngine::new(cfg, PathBuf::from("/tmp"));
-        // diagnostics/definition will get a `Method not found` error
-        // from the fake server, surfaced as TransportError::Rpc — that's
-        // fine, what we're proving is the spawn + handshake landed.
+        // `hover` is intentionally NOT implemented in the fake server,
+        // so the request hits its `else` branch and bounces back as
+        // `-32601 Method not found`. That's what proves the spawn +
+        // handshake + request/response round-trip all landed; we don't
+        // actually care about hover semantics here. (Earlier this test
+        // used `diagnostics`, but RFD-0001 added a fake-server handler
+        // for `textDocument/diagnostic` so that op now succeeds.)
         let err = engine
-            .diagnostics(Path::new("/tmp/x.rs"))
+            .hover(Path::new("/tmp/x.rs"), 1, 1)
             .await
             .unwrap_err();
         match err {

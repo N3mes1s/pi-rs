@@ -239,9 +239,20 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         // keep the master switch off; the tool stays registered so the
         // agent can call the `status` op and see "no servers running"
         // when LSP is disabled.
+        let lsp_cfg = crate::native::lsp::LspConfig::from(&settings.lsp);
         tools.register(Arc::new(crate::native::lsp::LspTool::new(
-            crate::native::lsp::LspConfig::from(&settings.lsp),
+            lsp_cfg.clone(),
         )));
+        // RFD 0001: when LSP is enabled, swap the bare `write` tool
+        // for the wrapper that fires `format_on_write` and
+        // `diagnostics_on_write` after every successful write. The
+        // wrapper registers under the same name so the registry's
+        // BTreeMap insert overrides the entry left by `with_extras()`.
+        if lsp_cfg.enabled {
+            tools.register(Arc::new(crate::native::lsp::LspWriteTool::new(
+                lsp_cfg,
+            )));
+        }
     }
 
     let loaded_exts = extensions::discover(&ext_roots);
