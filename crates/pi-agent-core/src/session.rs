@@ -70,6 +70,19 @@ pub enum SessionEntryKind {
         generation: u32,
         lineage: Vec<String>,
     },
+    /// Records the outcome of an RFD 0020 routing decision for a single
+    /// assistant turn. Emitted by the runtime in `apply_routing` whenever
+    /// the active `RouteMode` is non-Off. `budget_tokens` carries an
+    /// optional TALE-EP `<budget>N</budget>` parsed from the prompt —
+    /// telemetry-only on the `hard` route, never enforced.
+    RoutingDecision {
+        route_id: String,
+        provider: String,
+        model: String,
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget_tokens: Option<u64>,
+    },
 }
 
 /// How an [`SessionEntryKind::Outcome`] was derived. Replay-sourced

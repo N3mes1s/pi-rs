@@ -61,6 +61,22 @@ pub fn ensure(conn: &Connection) -> rusqlite::Result<()> {
             byte_offset        INTEGER NOT NULL,
             last_modified_ms   INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS routing_decisions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_file    TEXT    NOT NULL,
+            entry_id        TEXT    NOT NULL,
+            folder          TEXT    NOT NULL,
+            timestamp_ms    INTEGER NOT NULL,
+            route_id        TEXT    NOT NULL,
+            provider        TEXT    NOT NULL,
+            model           TEXT    NOT NULL,
+            thinking        TEXT    NOT NULL,
+            budget_tokens   INTEGER,
+            UNIQUE (session_file, entry_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_routing_route_id ON routing_decisions(route_id);
+        CREATE INDEX IF NOT EXISTS idx_routing_ts       ON routing_decisions(timestamp_ms);
         "#,
     )?;
     Ok(())
