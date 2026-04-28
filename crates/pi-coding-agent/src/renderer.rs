@@ -178,9 +178,21 @@ impl Transcript {
                         theme.muted.to_crossterm(),
                     )],
                 }),
-                Block::Note(m) => lines.push(Line {
-                    spans: vec![Span::coloured(m.clone(), theme.muted.to_crossterm())],
-                }),
+                Block::Note(m) => {
+                    // Note bodies are multi-line strings (e.g. /help output).
+                    // The differential renderer expects one logical line per
+                    // `Line`; embedding `\n` inside a single Line cascades
+                    // diagonally because raw-mode output doesn't reset the
+                    // cursor column on bare LF.
+                    for piece in m.split('\n') {
+                        lines.push(Line {
+                            spans: vec![Span::coloured(
+                                piece.to_string(),
+                                theme.muted.to_crossterm(),
+                            )],
+                        });
+                    }
+                }
             }
         }
         // Separator before the input area.
