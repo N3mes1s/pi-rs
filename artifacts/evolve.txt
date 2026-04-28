@@ -1,0 +1,77 @@
+evolve --dry-run for /home/user/quartet/validate
+  agents_md:        /home/user/quartet/validate/AGENTS.md
+  has_agents_md:    true
+  cases_loaded:     4
+  ticks_run:        0
+  spent_today:      $0.0000
+  daily_cost_cap:   $0.5000
+  generations/tick: 3
+  min_samples:      30
+  disabled_locally: no
+  gate:             would SKIP — InsufficientSamples { have: 4, need: 30 }
+
+Mutable sections (4):
+  [1] ## Where things live
+  [2] ## Conventions
+  [3] ## Current open RFDs
+  [4] ## Optimisation lessons
+
+Next mutation target (gen 0): section [1] ## Where things live
+  evidence:         3 win(s), 1 loss(es)
+
+──── sample mutator prompt ────────────────────────────────
+<heading>
+## Where things live
+</heading>
+
+<current_body>
+- **RFDs** in `rfd/`, indexed in `rfd/README.md`. New RFDs use
+  `0000-template.md` and start at `Status: Discussion`. Status
+  bumps to `Implemented` with the commit hash once shipped.
+- **Pricing data** in `crates/pi-ai/data/pricing.json` (provenance
+  + cache rates). `default_providers()` reads it via
+  `include_str!`. Schema-version `2` includes
+  `cache_read_cost_per_mtok` / `cache_write_cost_per_mtok`. RFDs
+  0009 + 0010.
+- **Token + cost roll-up** flows: provider `Usage` event →
+  `SessionEntryKind::Usage` (in JSONL) → `pi-stats` ingest →
+  `pi --stats json`. RFD 0008 + the runtime persistence follow-up.
+  `pi-rs/crates/pi-ai/src/cost.rs::compute_cost` is the canonical
+  cost helper (RFD 0010).
+- **`task` tool subagents** (RFD 0005) need a `ParentHandle`
+  registered around `session.prompt(...)` via
+  `task::tool::with_runtime(...)`. Wired in `modes/print.rs` +
+  `modes/json.rs`. Adding a third mode? Wire it.
+- **Worktree isolation** (RFD 0006) lives at
+  `~/.pi/wt/data/<encoded-repo>/<task-id>/`. `pi --worktree`
+  honours `PI_WORKTREE_ROOT` for tests.
+
+
+</current_body>
+
+<other_sections>
+## House rules
+## Conventions
+## Current open RFDs
+## Optimisation lessons
+</other_sections>
+
+<wins>
+- Task: Summarize what RFD 0008 ships, in one sentence.
+  Verdict: score=0.95
+- Task: What's the canonical Rust pattern for re-exporting a struct from a sub-module? Two lines.
+  Verdict: score=0.95
+- Task: What does AGENTS.md say about the (0.5,1.5) placeholder? One sentence.
+  Verdict: score=0.95
+</wins>
+
+<losses>
+- Task: What's the cost-per-MTok for claude-opus-4-7 on main today? Two numbers.
+  Failure: score=0.15
+</losses>
+
+Rewrite ONLY <current_body>. Output the new body text and nothing else.
+──── end prompt ───────────────────────────────────────────
+
+  budget remaining today: $0.5000
+(no model call made; AGENTS.md untouched)
