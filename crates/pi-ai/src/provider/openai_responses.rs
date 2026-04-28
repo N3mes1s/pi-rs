@@ -220,6 +220,7 @@ pub fn effort_block(t: ThinkingLevel) -> Option<Value> {
         ThinkingLevel::Low => Some(json!({"effort": "low"})),
         ThinkingLevel::Medium => Some(json!({"effort": "medium"})),
         ThinkingLevel::High => Some(json!({"effort": "high", "summary": "auto"})),
+        ThinkingLevel::XHigh => Some(json!({"effort": "xhigh", "summary": "auto"})),
     }
 }
 

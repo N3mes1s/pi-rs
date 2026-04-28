@@ -247,6 +247,8 @@ fn body_thinking_fields(level: ThinkingLevel, model_id: &str) -> Value {
             ThinkingLevel::Low => "low",
             ThinkingLevel::Medium => "medium",
             ThinkingLevel::High => "high",
+            // Anthropic has no xhigh tier; clamp to "high" effort.
+            ThinkingLevel::XHigh => "high",
             ThinkingLevel::Off => unreachable!(),
         };
         json!({
@@ -257,7 +259,8 @@ fn body_thinking_fields(level: ThinkingLevel, model_id: &str) -> Value {
         let budget = match level {
             ThinkingLevel::Low => 4_000,
             ThinkingLevel::Medium => 16_000,
-            ThinkingLevel::High => 32_000,
+            // Anthropic budget caps at 32_000; XHigh shares the High budget.
+            ThinkingLevel::High | ThinkingLevel::XHigh => 32_000,
             ThinkingLevel::Off => unreachable!(),
         };
         json!({
