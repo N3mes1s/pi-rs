@@ -52,6 +52,10 @@ Rules:
   Tool calls are evidence of work, not a prerequisite for success. If the agent's reply is \
   grounded in a context file, score it on whether it answered the user's question — not on \
   whether it re-fetched the file.
+- If the agent's `<system_prompt_size>` is more than 5000 bytes, the agent had non-trivial \
+  baked-in context (AGENTS.md, skills, pricing tables, etc.) at turn start. A grounded answer \
+  that doesn't exactly match a `<context_loaded>` file is NOT a fabrication — score it on \
+  whether the answer is correct.
 
 Reply with a SINGLE JSON object on one line and nothing else:
 {\"success\": true|false, \"score\": 0.0-1.0, \"reason\": \"...\", \"salient_wins\": [\"...\"], \"salient_failures\": [\"...\"]}";
@@ -115,6 +119,7 @@ pub struct Judge {
     config: JudgeConfig,
     provider: std::sync::Arc<dyn Provider>,
     model_info: ModelInfo,
+    system_prompt_bytes: usize,
 }
 
 impl Judge {
@@ -136,14 +141,25 @@ impl Judge {
             config,
             provider: provider.into(),
             model_info: model_info.clone(),
+            system_prompt_bytes: 0,
         })
+    }
+
+    /// Tell the judge how large the *agent's* (judged) system prompt was.
+    /// This becomes the `<system_prompt_size>` block in the judge prompt
+    /// so the smol model can tell when an answer is plausibly grounded in
+    /// baked-in context (AGENTS.md, skills, pricing tables, …) even if no
+    /// specific `<context_loaded>` file matches. See validate bug #2.
+    pub fn with_system_prompt_bytes(mut self, bytes: usize) -> Self {
+        self.system_prompt_bytes = bytes;
+        self
     }
 
     /// Score a session branch. Returns the verdict on success; on any
     /// error returns it so the caller can fall back to features-only.
     pub async fn judge(&self, branch: &[SessionEntry]) -> Result<JudgeVerdict, JudgeError> {
         let features = extract(branch);
-        let user_text = build_user_message(branch, &features);
+        let user_text = build_user_message(branch, &features, self.system_prompt_bytes);
 
         let req = GenerateRequest {
             model: self.model_info.id.clone(),
@@ -250,7 +266,11 @@ pub fn features_only_outcome(features: &TrajectoryFeatures) -> Option<SessionEnt
 
 // ─── prompt assembly ────────────────────────────────────────────────────
 
-pub fn build_user_message(branch: &[SessionEntry], features: &TrajectoryFeatures) -> String {
+pub fn build_user_message(
+    branch: &[SessionEntry],
+    features: &TrajectoryFeatures,
+    system_prompt_bytes: usize,
+) -> String {
     let user_request = first_user_text(branch).unwrap_or_else(|| "(no user message)".into());
     let final_reply = last_assistant_text(branch).unwrap_or_else(|| "(no assistant reply)".into());
     let context_loaded = collect_context_loads(branch);
@@ -260,11 +280,13 @@ pub fn build_user_message(branch: &[SessionEntry], features: &TrajectoryFeatures
 
     format!(
         "<user_request>\n{}\n</user_request>\n\n\
+         <system_prompt_size>{} bytes</system_prompt_size>\n\n\
          <context_loaded>\n{}\n</context_loaded>\n\n\
          <assistant_final_reply>\n{}\n</assistant_final_reply>\n\n\
          <features>\n{}\n</features>\n\n\
          <action_digest>\n{}\n</action_digest>",
         truncate(&user_request, 4000),
+        system_prompt_bytes,
         context_loaded,
         truncate(&final_reply, 4000),
         features_json,

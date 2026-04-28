@@ -332,7 +332,7 @@ fn build_user_message_includes_context_loaded_block_with_source_path() {
         ),
     ];
     let features = extract(&branch);
-    let msg = build_user_message(&branch, &features);
+    let msg = build_user_message(&branch, &features, 0);
     assert!(msg.contains("<context_loaded>"), "missing block tag: {msg}");
     assert!(msg.contains("</context_loaded>"));
     assert!(msg.contains("/repo/AGENTS.md"), "missing source path: {msg}");
@@ -353,7 +353,27 @@ fn build_user_message_signals_no_context_when_branch_empty_of_loads() {
         ),
     ];
     let features = extract(&branch);
-    let msg = build_user_message(&branch, &features);
+    let msg = build_user_message(&branch, &features, 0);
     assert!(msg.contains("<context_loaded>"));
     assert!(msg.contains("(no context files were loaded into the system prompt)"));
+}
+
+#[test]
+fn build_user_message_emits_system_prompt_size_block() {
+    use pi_coding_agent::native::trajectory::{build_user_message, extract};
+    let branch = vec![
+        user("u1", "what's the price?"),
+        entry(
+            "a1",
+            SessionEntryKind::Assistant {
+                message: Message::assistant_text("$3 / $15 per MTok."),
+            },
+        ),
+    ];
+    let features = extract(&branch);
+    let msg = build_user_message(&branch, &features, 8421);
+    assert!(
+        msg.contains("<system_prompt_size>8421 bytes</system_prompt_size>"),
+        "missing size block: {msg}"
+    );
 }
