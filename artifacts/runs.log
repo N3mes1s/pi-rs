@@ -1,0 +1,36 @@
+=== RUN 1: say exactly: ping ===
+ping
+
+=== RUN 2: What does AGENTS.md say about the (0.5,1.5) placeholder? One sentence. ===
+The `(0.5, 1.5)` placeholder pricing pair in `crates/pi-ai/data/pricing.json` is a forgotten audit and must never be used — pick real prices from the provider's public list page instead.
+
+=== RUN 3: What's the canonical Rust pattern for re-exporting a struct from a sub-module? Two lines. ===
+```rust
+mod inner { pub struct Foo; }
+pub use inner::Foo;
+```
+
+=== RUN 4: Summarize what RFD 0008 ships, in one sentence. ===
+
+[tool bash] {"command":"ls rfd/ | grep 0008"}
+
+[tool error] AUTO-APPROVE BLOCKED: user-confirmation required (headless): policy says ASK for tool `bash`
+
+[tool find] {"glob":"rfd/0008*"}
+
+[tool find] {"glob":"**/0008*"}
+
+[tool read] {"path":"/home/user/quartet/validate/rfd/0008-populate-usage-fields.md"}
+RFD 0008 wires every streaming provider (Anthropic, OpenAI, Google, Bedrock) to capture all `Usage` fields — `input_tokens`, `output_tokens`, cache read/write, reasoning tokens — and compute `cost_usd` from `ModelInfo` rates, so `SessionEntry::Usage` and `pi --stats json` finally show real token counts and costs instead of zeros.
+
+=== RUN 5: What's the cost-per-MTok for claude-opus-4-7 on main today? Two numbers. ===
+I'll check the pricing data.
+[tool bash] {"command":"grep -A 10 -i \"opus.*4.7\\|opus-4-7\\|opus_4_7\" crates/pi-ai/data/pricing.json | head -60"}
+
+[tool error] AUTO-APPROVE BLOCKED: user-confirmation required (headless): policy says ASK for tool `bash`
+
+[tool grep] {"path":"crates/pi-ai/data/pricing.json","pattern":"opus-4-7|opus_4_7|opus 4.7|opus-4.7"}
+
+[tool read] {"limit":30,"offset":1,"path":"crates/pi-ai/data/pricing.json"}
+**$5.00 input / $25.00 output** per MTok (Anthropic, claude-opus-4-7).
+
