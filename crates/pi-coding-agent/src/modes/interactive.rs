@@ -2450,12 +2450,14 @@ mod tests {
             cycle_thinking(ThinkingSetting::Medium),
             ThinkingSetting::High
         );
-        assert_eq!(cycle_thinking(ThinkingSetting::High), ThinkingSetting::Off);
+        assert_eq!(cycle_thinking(ThinkingSetting::High), ThinkingSetting::XHigh);
+        assert_eq!(cycle_thinking(ThinkingSetting::XHigh), ThinkingSetting::Off);
         // Label helper covers the same arms.
         assert_eq!(thinking_label(ThinkingSetting::Off), "off");
         assert_eq!(thinking_label(ThinkingSetting::Low), "low");
         assert_eq!(thinking_label(ThinkingSetting::Medium), "medium");
         assert_eq!(thinking_label(ThinkingSetting::High), "high");
+        assert_eq!(thinking_label(ThinkingSetting::XHigh), "xhigh");
     }
 
     #[test]
