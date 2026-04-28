@@ -120,7 +120,7 @@ pub struct Cli {
 
     /// AGENTS.md auto-evolution control: `status` (print state),
     /// `off` (disable for cwd), `on` (re-enable for cwd).
-    #[arg(long = "evolve", value_parser = clap::builder::PossibleValuesParser::new(["status", "off", "on", "dry-run"]))]
+    #[arg(long = "evolve", value_parser = clap::builder::PossibleValuesParser::new(["status", "off", "on", "dry-run", "apply"]))]
     pub evolve: Option<String>,
 
     /// Render a trajectory flamegraph for a session id (or path) to

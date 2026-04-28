@@ -36,13 +36,17 @@ use pi_ai::{AuthStorage, ModelRegistry};
 use super::agents_md::AgentsMd;
 use super::apply::{
     add_poison, append_generation, backup_and_apply, best_strict_improvement,
-    pareto_frontier, Candidate, GenerationLogEntry, PendingApply,
+    decide, default_history_path, pareto_frontier, Candidate, GenerationLogEntry,
+    PendingApply,
 };
 use super::benchmark::{
-    load_cases, run_all, summarize, BenchmarkCase, BenchmarkSummary, Replay,
+    load_cases, run_all, summarize, BenchmarkCase, BenchmarkSummary, Replay, RolloutResult,
 };
 use super::mutate::{EvidenceItem, MutationEvidence, Mutator, MutatorConfig};
 use super::tick::{should_run, CostLedger, Lock, SkipReason, State, TickDecision};
+
+/// Default margin gate (RFD 0013, open question: lean 0.10).
+const DEFAULT_MIN_MARGIN: f32 = 0.10;
 
 /// What a tick actually did. Returned to the daemon caller for logging.
 #[derive(Debug)]
@@ -149,6 +153,7 @@ pub async fn run_tick<R: Replay>(
         mutated_section: None,
         note: "baseline".into(),
     }];
+    let mut candidate_scores: Vec<Vec<f32>> = vec![rollout_scores(&baseline_results)];
 
     // 9. Generations.
     let mutable_indices: Vec<usize> = baseline_doc
@@ -200,6 +205,7 @@ pub async fn run_tick<R: Replay>(
         let cand_summary = summarize(&cand_results);
         cost.add(cand_summary.total_cost_usd);
 
+        candidate_scores.push(rollout_scores(&cand_results));
         candidates.push(Candidate {
             hash: cand_hash,
             summary: cand_summary,
@@ -213,26 +219,57 @@ pub async fn run_tick<R: Replay>(
     let _frontier = pareto_frontier(&candidates);
     let winner_idx = best_strict_improvement(&candidates, 0);
 
-    // 11. Apply winner if any.
+    // 11. Apply winner if any. RFD 0013 gate: candidate's mean rollout
+    // score must beat the baseline's by at least DEFAULT_MIN_MARGIN.
     let mut applied_hash: Option<String> = None;
     if let Some(idx) = winner_idx {
-        let winner = &candidates[idx];
-        let backup = backup_and_apply(
-            inputs.cwd,
-            &inputs.agents_md_path,
-            &winner.body,
-            &candidates[0].hash,
-        )?;
-        let pending = PendingApply {
-            applied_hash: winner.hash.clone(),
-            previous_hash: candidates[0].hash.clone(),
-            backup_path: backup,
-            baseline_pass_rate: candidates[0].summary.pass_rate,
-            applied_at_ms: Utc::now().timestamp_millis(),
-            outcomes_seen_at_apply: state.outcomes_seen_lifetime,
-        };
-        pending.save(inputs.cwd)?;
-        applied_hash = Some(winner.hash.clone());
+        let decision = decide(
+            &candidate_scores[0],
+            &candidate_scores[idx],
+            DEFAULT_MIN_MARGIN,
+        );
+        if decision.apply {
+            let winner = &candidates[idx];
+            let backup = backup_and_apply(
+                inputs.cwd,
+                &inputs.agents_md_path,
+                &winner.body,
+                &candidates[0].hash,
+            )?;
+            // Append a structured row to the cross-cwd history.jsonl
+            // (RFD 0013) so rollback::tick can find the prior body.
+            let history_path = default_history_path();
+            if let Some(parent) = history_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = super::apply::append_history(
+                &history_path,
+                &super::apply::HistoryEntry {
+                    ts: Utc::now().to_rfc3339(),
+                    action: "apply".to_string(),
+                    from_hash: candidates[0].hash.clone(),
+                    to_hash: winner.hash.clone(),
+                    pre_mean: Some(decision.current_mean),
+                    post_mean_estimate: Some(decision.candidate_mean),
+                    margin: Some(decision.margin),
+                    observed_mean: None,
+                    trigger: None,
+                    prev_body: Some(candidates[0].body.clone()),
+                },
+            );
+            let pending = PendingApply {
+                applied_hash: winner.hash.clone(),
+                previous_hash: candidates[0].hash.clone(),
+                backup_path: backup,
+                baseline_pass_rate: candidates[0].summary.pass_rate,
+                applied_at_ms: Utc::now().timestamp_millis(),
+                outcomes_seen_at_apply: state.outcomes_seen_lifetime,
+            };
+            pending.save(inputs.cwd)?;
+            applied_hash = Some(winner.hash.clone());
+        } else {
+            tracing::info!(reason = %decision.reason, "evolve: candidate failed margin gate");
+        }
     }
 
     // 12. Persist state + log.
@@ -294,6 +331,10 @@ pub fn check_rollback(
 
 fn slug(p: &Path) -> String {
     p.display().to_string().replace(['/', '\\', ':'], "_")
+}
+
+fn rollout_scores(results: &[RolloutResult]) -> Vec<f32> {
+    results.iter().map(|r| r.score).collect()
 }
 
 fn build_evidence(cases: &[BenchmarkCase]) -> MutationEvidence {

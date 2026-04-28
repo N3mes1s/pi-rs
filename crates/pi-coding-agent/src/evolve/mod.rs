@@ -23,6 +23,7 @@ pub mod apply;
 pub mod benchmark;
 pub mod mutate;
 pub mod orchestrator;
+pub mod rollback;
 pub mod tick;
 
 pub use agents_md::{AgentsMd, Section};
@@ -36,10 +37,12 @@ pub use mutate::{
 };
 pub use orchestrator::{check_rollback, run_tick, TickError, TickInputs, TickReport};
 pub use apply::{
-    add_poison, append_generation, backup_and_apply, best_strict_improvement,
-    is_poisoned, pareto_frontier, poisoned_hashes, read_generations, rollback,
-    should_rollback, Candidate, GenerationLogEntry, PendingApply,
+    add_poison, append_generation, append_history, backup_and_apply, best_strict_improvement,
+    commit, decide, default_history_path, is_poisoned, pareto_frontier, poisoned_hashes,
+    read_generations, read_history, rollback as restore_from_backup, should_rollback,
+    ApplyDecision, Candidate, GenerationLogEntry, HistoryEntry, PendingApply,
 };
+pub use rollback::{tick as rollback_tick, RollbackOutcome};
 pub use tick::{
     evolve_dir, is_disabled, should_run, CostLedger, Lock, SkipReason, State, TickDecision,
 };
