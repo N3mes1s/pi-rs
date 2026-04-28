@@ -7,7 +7,10 @@
 //! [`run_line_based`].
 
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event as CtEvent, EventStream, KeyCode, KeyEvent,
+    KeyModifiers,
+};
 use crossterm::style::{Color, ResetColor, SetForegroundColor};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -20,13 +23,13 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::extensions;
 use crate::keymap::{chord_from_event, Action, Chord, ChordCode, Keymap};
 use crate::modes::build_session;
 use crate::picker::{PickItem, Picker};
 use crate::renderer::Transcript;
 use crate::slash::{self, SlashKind, SlashRegistry};
 use crate::startup::Startup;
-use crate::extensions;
 
 /// Entry point. Picks raw-TUI or line-based depending on TTY state.
 pub async fn run(startup: Startup) -> anyhow::Result<()> {
@@ -48,7 +51,11 @@ impl RawGuard {
     fn enter() -> std::io::Result<Self> {
         enable_raw_mode()?;
         let mut out = std::io::stdout();
-        execute!(out, EnterAlternateScreen, Hide)?;
+        // EnableBracketedPaste makes the terminal wrap pasted text in
+        // CSI 200~ ... CSI 201~ so multi-line paste arrives as a single
+        // CtEvent::Paste(String) rather than a sequence of Enter keys
+        // that would submit early on the first newline.
+        execute!(out, EnterAlternateScreen, Hide, EnableBracketedPaste)?;
         Ok(RawGuard)
     }
 }
@@ -56,7 +63,13 @@ impl RawGuard {
 impl Drop for RawGuard {
     fn drop(&mut self) {
         let mut out = std::io::stdout();
-        let _ = execute!(out, Show, LeaveAlternateScreen, ResetColor);
+        let _ = execute!(
+            out,
+            DisableBracketedPaste,
+            Show,
+            LeaveAlternateScreen,
+            ResetColor
+        );
         let _ = disable_raw_mode();
     }
 }
@@ -208,10 +221,15 @@ pub enum KeyOutcome {
     },
     /// The `@`-filename completion picker resolved: replace the `@<query>`
     /// token with the chosen path.
-    AtComplete { picked: String },
+    AtComplete {
+        picked: String,
+    },
     /// User typed `!command` (silent=false) or `!!command` (silent=true) and
     /// pressed Enter. The outer loop should run `command` via a shell.
-    Bang { command: String, silent: bool },
+    Bang {
+        command: String,
+        silent: bool,
+    },
 }
 
 /// Pure key handler — no I/O. Returns what the outer loop must drive.
@@ -550,7 +568,10 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
         (KeyCode::Home, _) => {
             // Go to start of current visual line.
             let cur = view.editor.cursor;
-            let line_start = view.editor.text[..cur].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let line_start = view.editor.text[..cur]
+                .rfind('\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
             view.editor.cursor = line_start;
         }
         (KeyCode::End, _) => {
@@ -739,7 +760,11 @@ fn build_frame(
             )],
         });
         for (i, (_score, item)) in overlay.picker.ranked().iter().enumerate() {
-            let prefix = if i == overlay.picker.selected { "▸ " } else { "  " };
+            let prefix = if i == overlay.picker.selected {
+                "▸ "
+            } else {
+                "  "
+            };
             frame.lines.push(Line {
                 spans: vec![Span::coloured(
                     format!("{}{}", prefix, item.label),
@@ -752,14 +777,25 @@ fn build_frame(
             });
         }
     } else {
-        let text_for_display = if view.editor.text.is_empty() {
+        let editor_start_line = frame.lines.len();
+        let is_empty = view.editor.text.is_empty();
+        let text_for_display = if is_empty {
             "type a message  (/help, /quit)".to_string()
         } else {
             view.editor.text.clone()
         };
+        // Translate the byte-offset cursor into (visual_line, visual_col)
+        // *before* we tokenize for rendering, so the renderer can park the
+        // hardware cursor on the user's caret. `›` and `  ` prefixes are
+        // each 2 cols wide.
+        let (cursor_line_offset, cursor_col_offset) = if is_empty {
+            (0, 0)
+        } else {
+            byte_cursor_to_visual(&view.editor.text, view.editor.cursor)
+        };
         for (i, line) in text_for_display.lines().enumerate() {
             let prefix = if i == 0 { "› " } else { "  " };
-            let color = if view.editor.text.is_empty() {
+            let color = if is_empty {
                 theme.muted.to_crossterm()
             } else {
                 theme.fg.to_crossterm()
@@ -770,6 +806,11 @@ fn build_frame(
                     Span::coloured(line.to_string(), color),
                 ],
             });
+        }
+        if !is_empty {
+            let target_line = editor_start_line + cursor_line_offset;
+            // 2-column prefix (`› ` or `  `) before each editor line.
+            frame.cursor_at = Some((target_line as u16, (2 + cursor_col_offset) as u16));
         }
         if text_for_display.is_empty() {
             frame.lines.push(Line {
@@ -783,13 +824,9 @@ fn build_frame(
 
     // Footer (powerline-style: model ▶ cwd ▶ git ▶ usage ▶ ctx).
     let git = view.git_status_cache.get(cwd);
-    let mut footer = view.transcript.footer_powerline(
-        theme,
-        model,
-        cwd,
-        git.as_ref(),
-        view.context_window,
-    );
+    let mut footer =
+        view.transcript
+            .footer_powerline(theme, model, cwd, git.as_ref(), view.context_window);
     if view.scoped_models {
         // Highlight that model changes will only apply to the next message.
         footer.spans.push(Span::coloured(
@@ -837,6 +874,105 @@ fn cycle_thinking(t: ThinkingSetting) -> ThinkingSetting {
 
 fn thinking_to_runtime(t: ThinkingSetting) -> pi_ai::ThinkingLevel {
     t.into()
+}
+
+/// Translate an editor byte-offset cursor into `(line_index_in_text,
+/// col_in_line)` for hardware-cursor placement. `col` is in display
+/// columns (assumes ASCII / 1-col-per-char for now; extend to
+/// `unicode-width` once we hit a CJK regression).
+fn byte_cursor_to_visual(text: &str, cursor: usize) -> (usize, usize) {
+    let cursor = cursor.min(text.len());
+    let prefix = &text[..cursor];
+    let line = prefix.matches('\n').count();
+    let col = prefix.rfind('\n').map(|p| cursor - p - 1).unwrap_or(cursor);
+    (line, col)
+}
+
+/// Human-readable label for an `Action` — used by `/hotkeys` rendering so
+/// users can see what each chord does.
+fn action_label(a: crate::keymap::Action) -> &'static str {
+    use crate::keymap::Action::*;
+    match a {
+        Submit => "submit message",
+        QueueFollowup => "queue follow-up message",
+        Cancel => "cancel / close picker",
+        Quit => "quit pi",
+        NewLine => "insert newline (multi-line input)",
+        DeletePrev => "delete previous char",
+        DeleteWordPrev => "delete previous word",
+        KillLine => "kill to end-of-line",
+        OpenModel => "open model picker",
+        OpenSettings => "open settings picker",
+        OpenTree => "open transcript tree",
+        OpenResume => "open resume-session picker",
+        CycleModel => "cycle to next model",
+        CycleModelBack => "cycle to previous model",
+        ToggleThinking => "cycle thinking level (off/low/medium/high/xhigh)",
+        ToggleToolOutput => "collapse/expand tool output",
+        ToggleThinkingOutput => "collapse/expand thinking output",
+        PrevHistory => "previous prompt from history",
+        NextHistory => "next prompt from history",
+        EditExternal => "open input in $EDITOR",
+    }
+}
+
+/// Format a `Chord` back as a string close to its keymap.toml form
+/// (e.g. `Ctrl+L`, `Shift+Tab`).
+fn chord_label(c: &crate::keymap::Chord) -> String {
+    use crate::keymap::ChordCode;
+    let mut out = String::new();
+    // Bit layout per crates/pi-coding-agent/src/keymap.rs: shift=1, ctrl=2, alt=4.
+    let m = c.modifiers;
+    if m & 0b010 != 0 {
+        out.push_str("Ctrl+");
+    }
+    if m & 0b100 != 0 {
+        out.push_str("Alt+");
+    }
+    if m & 0b001 != 0 {
+        out.push_str("Shift+");
+    }
+    match c.code {
+        ChordCode::Char(ch) => out.push(ch),
+        ChordCode::Enter => out.push_str("Enter"),
+        ChordCode::Escape => out.push_str("Escape"),
+        ChordCode::Backspace => out.push_str("Backspace"),
+        ChordCode::Tab => out.push_str("Tab"),
+        ChordCode::BackTab => out.push_str("Shift+Tab"),
+        ChordCode::Up => out.push_str("Up"),
+        ChordCode::Down => out.push_str("Down"),
+        ChordCode::Left => out.push_str("Left"),
+        ChordCode::Right => out.push_str("Right"),
+        ChordCode::Home => out.push_str("Home"),
+        ChordCode::End => out.push_str("End"),
+        ChordCode::PageUp => out.push_str("PageUp"),
+        ChordCode::PageDown => out.push_str("PageDown"),
+        ChordCode::Delete => out.push_str("Delete"),
+        ChordCode::Insert => out.push_str("Insert"),
+        ChordCode::F(n) => out.push_str(&format!("F{n}")),
+    }
+    out
+}
+
+/// Render the `/hotkeys` body: a real keyboard reference (sourced from the
+/// active keymap) plus the implicit input-mode triggers (`@`, `!`, `/`).
+fn render_hotkeys_body(km: &crate::keymap::Keymap) -> String {
+    let mut entries: Vec<(String, &'static str)> = km
+        .bindings
+        .iter()
+        .map(|(c, a)| (chord_label(c), action_label(*a)))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let chord_w = entries.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
+    let mut body = String::from("hotkeys (active keymap):\n");
+    for (chord, label) in entries {
+        body.push_str(&format!("  {:width$}  {}\n", chord, label, width = chord_w));
+    }
+    body.push_str("\ninput-mode triggers:\n");
+    body.push_str("  /<cmd> [args]      run a slash command (e.g. /help, /model)\n");
+    body.push_str("  @<query>           open file-completion picker\n");
+    body.push_str("  ! <shell command>  run a shell command and stay in pi\n");
+    body
 }
 
 // ─── main TUI loop ─────────────────────────────────────────────────────────
@@ -1034,6 +1170,36 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                         renderer.resize(cols);
                         view.dirty = true;
                     }
+                    CtEvent::Paste(text) => {
+                        // Bracketed-paste payload — insert verbatim into the
+                        // editor instead of letting each char/newline turn
+                        // into a separate KeyEvent (which would submit early
+                        // on the first '\n'). Newlines stay in the buffer
+                        // so the user can review + edit before sending.
+                        if view.picker.is_none() {
+                            // Many terminals (and tmux's `paste-buffer -p`)
+                            // send '\r' as the line separator inside the
+                            // bracketed-paste payload — translate to '\n' so
+                            // the editor's line-based renderer + slash
+                            // parser see real newlines. Strip any leftover
+                            // CRs to avoid duplicate breaks on `\r\n`.
+                            let mut cleaned = String::with_capacity(text.len());
+                            let mut iter = text.chars().peekable();
+                            while let Some(ch) = iter.next() {
+                                match ch {
+                                    '\r' => {
+                                        cleaned.push('\n');
+                                        if iter.peek() == Some(&'\n') {
+                                            iter.next();
+                                        }
+                                    }
+                                    _ => cleaned.push(ch),
+                                }
+                            }
+                            view.editor.insert_str(&cleaned);
+                            view.dirty = true;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1172,7 +1338,10 @@ fn run_external_editor(initial: &str) -> Option<String> {
     let mut path = std::env::temp_dir();
     path.push(format!("pi-edit-{}.txt", std::process::id()));
     std::fs::write(&path, initial).ok()?;
-    let status = std::process::Command::new(&editor).arg(&path).status().ok()?;
+    let status = std::process::Command::new(&editor)
+        .arg(&path)
+        .status()
+        .ok()?;
     if !status.success() {
         let _ = std::fs::remove_file(&path);
         return None;
@@ -1189,10 +1358,7 @@ async fn run_bang_command(command: &str) -> String {
     use tokio::process::Command;
     let result = tokio::time::timeout(
         Duration::from_secs(30),
-        Command::new("bash")
-            .arg("-lc")
-            .arg(command)
-            .output(),
+        Command::new("bash").arg("-lc").arg(command).output(),
     )
     .await;
     match result {
@@ -1226,11 +1392,18 @@ async fn handle_slash(
 ) -> SlashOutcome {
     match name {
         "quit" | "exit" => SlashOutcome::Quit,
-        "help" | "hotkeys" => {
+        "help" => {
             let mut body = String::from("commands:\n");
             for n in slash.names() {
                 body.push_str(&format!("  /{n}\n"));
             }
+            view.transcript
+                .blocks
+                .push(crate::renderer::Block::Note(body));
+            SlashOutcome::Continue
+        }
+        "hotkeys" => {
+            let body = render_hotkeys_body(&startup.keymap);
             view.transcript
                 .blocks
                 .push(crate::renderer::Block::Note(body));
@@ -1437,13 +1610,19 @@ async fn handle_slash(
             let mgr = startup.runtime_config.session_manager.clone();
             let branch = mgr.current_branch(session.id());
             let meta = mgr.meta(session.id());
-            let (provider, model) = meta
-                .map(|m| (m.provider, m.model))
-                .unwrap_or_else(|| (startup.settings.provider.clone(), startup.settings.model.clone()));
+            let (provider, model) = meta.map(|m| (m.provider, m.model)).unwrap_or_else(|| {
+                (
+                    startup.settings.provider.clone(),
+                    startup.settings.model.clone(),
+                )
+            });
             let html = crate::share::render_session_html(&branch, session.id(), &provider, &model);
             // Write to a temp file and report the path.
             let mut path = std::env::temp_dir();
-            path.push(format!("pi-export-{}.html", session.id().chars().take(8).collect::<String>()));
+            path.push(format!(
+                "pi-export-{}.html",
+                session.id().chars().take(8).collect::<String>()
+            ));
             match std::fs::write(&path, html) {
                 Ok(()) => view
                     .transcript
@@ -1469,20 +1648,26 @@ async fn handle_slash(
             let mgr = startup.runtime_config.session_manager.clone();
             let branch = mgr.current_branch(session.id());
             let meta = mgr.meta(session.id());
-            let (provider, model) = meta
-                .map(|m| (m.provider, m.model))
-                .unwrap_or_else(|| (startup.settings.provider.clone(), startup.settings.model.clone()));
-            let html =
-                crate::share::render_session_html(&branch, session.id(), &provider, &model);
+            let (provider, model) = meta.map(|m| (m.provider, m.model)).unwrap_or_else(|| {
+                (
+                    startup.settings.provider.clone(),
+                    startup.settings.model.clone(),
+                )
+            });
+            let html = crate::share::render_session_html(&branch, session.id(), &provider, &model);
             let shares_dir = crate::context::agent_dir().join("shares");
             let res = std::fs::create_dir_all(&shares_dir).and_then(|_| {
                 let p = shares_dir.join(format!("{}.html", session.id()));
                 std::fs::write(&p, &html).map(|_| p)
             });
             match res {
-                Ok(path) => view.transcript.blocks.push(crate::renderer::Block::Note(
-                    format!("[shared: {}]", path.display()),
-                )),
+                Ok(path) => view
+                    .transcript
+                    .blocks
+                    .push(crate::renderer::Block::Note(format!(
+                        "[shared: {}]",
+                        path.display()
+                    ))),
                 Err(e) => view
                     .transcript
                     .blocks
@@ -1492,7 +1677,7 @@ async fn handle_slash(
         }
         "autoresearch" => {
             use crate::autoresearch::slash_helpers::{
-                parse_action, AutoresearchAction, clear_artefacts, export_dashboard,
+                clear_artefacts, export_dashboard, parse_action, AutoresearchAction,
             };
             let action = parse_action(args);
             match action {
@@ -1505,9 +1690,9 @@ async fn handle_slash(
                     // the protocol on its own. No hand-written prompt
                     // scaffolding here.
                     view.autoresearch_active = true;
-                    view.transcript
-                        .blocks
-                        .push(crate::renderer::Block::Note("autoresearch active".to_string()));
+                    view.transcript.blocks.push(crate::renderer::Block::Note(
+                        "autoresearch active".to_string(),
+                    ));
                     return SlashOutcome::Submit(format!("autoresearch: {text}"));
                 }
                 AutoresearchAction::Off => {
@@ -1532,20 +1717,27 @@ async fn handle_slash(
                                 .join(", ")
                         )
                     };
-                    view.transcript.blocks.push(crate::renderer::Block::Note(msg));
+                    view.transcript
+                        .blocks
+                        .push(crate::renderer::Block::Note(msg));
                 }
                 AutoresearchAction::Export => {
                     let cwd_path = &startup.runtime_config.cwd;
                     match export_dashboard(cwd_path) {
                         Ok(path) => {
-                            view.transcript.blocks.push(crate::renderer::Block::Note(
-                                format!("[autoresearch export: {}]", path.display()),
-                            ));
+                            view.transcript
+                                .blocks
+                                .push(crate::renderer::Block::Note(format!(
+                                    "[autoresearch export: {}]",
+                                    path.display()
+                                )));
                         }
                         Err(e) => {
-                            view.transcript.blocks.push(crate::renderer::Block::Error(
-                                format!("autoresearch export: {e}"),
-                            ));
+                            view.transcript
+                                .blocks
+                                .push(crate::renderer::Block::Error(format!(
+                                    "autoresearch export: {e}"
+                                )));
                         }
                     }
                 }
@@ -1667,11 +1859,9 @@ async fn handle_slash(
             let (field_name, field_value) = if let Some(idx) = encoded.find('\x00') {
                 (&encoded[..idx], &encoded[idx + 1..])
             } else {
-                view.transcript
-                    .blocks
-                    .push(crate::renderer::Block::Error(
-                        "settings: internal error (no field encoding)".into(),
-                    ));
+                view.transcript.blocks.push(crate::renderer::Block::Error(
+                    "settings: internal error (no field encoding)".into(),
+                ));
                 return SlashOutcome::Continue;
             };
             match crate::settings_ui::apply(&mut startup.settings, field_name, field_value) {
@@ -1704,7 +1894,9 @@ async fn handle_slash(
                         view.thinking = startup.settings.thinking;
                         let level: pi_ai::ThinkingLevel = startup.settings.thinking.into();
                         let s = session.clone();
-                        tokio::spawn(async move { s.set_thinking(level).await; });
+                        tokio::spawn(async move {
+                            s.set_thinking(level).await;
+                        });
                     }
                 }
                 Err(e) => {
@@ -1761,6 +1953,25 @@ async fn handle_slash(
                     return SlashOutcome::Continue;
                 }
             }
+            // Bare `/skill` lists registered skills + usage hint, so users who
+            // arrive here from `/help` get something useful instead of a
+            // misleading "unknown command" error.
+            if other == "skill" {
+                let names = startup.skills.names();
+                let mut body = String::from("usage: /skill:<name> [args]\n");
+                if names.is_empty() {
+                    body.push_str("(no skills registered — drop one in ~/.pi/agent/skills/<name>/SKILL.md)");
+                } else {
+                    body.push_str("registered skills:\n");
+                    for n in names {
+                        body.push_str(&format!("  /skill:{n}\n"));
+                    }
+                }
+                view.transcript
+                    .blocks
+                    .push(crate::renderer::Block::Note(body));
+                return SlashOutcome::Continue;
+            }
             if let Some(cmd) = slash.get(other) {
                 match &cmd.kind {
                     SlashKind::Template { body } => {
@@ -1781,11 +1992,9 @@ async fn handle_slash(
                                         .push(crate::renderer::Block::Note(stdout));
                                 }
                                 Err(e) => {
-                                    view.transcript
-                                        .blocks
-                                        .push(crate::renderer::Block::Error(format!(
-                                            "extension command /{cname}: {e}"
-                                        )));
+                                    view.transcript.blocks.push(crate::renderer::Block::Error(
+                                        format!("extension command /{cname}: {e}"),
+                                    ));
                                 }
                             }
                         } else {
@@ -1880,7 +2089,11 @@ async fn run_line_based(mut startup: Startup) -> anyhow::Result<()> {
                 }
                 AgentEventKind::ToolResult { result } => {
                     let mut out = std::io::stdout();
-                    let color = if result.is_error { Color::Red } else { Color::DarkGrey };
+                    let color = if result.is_error {
+                        Color::Red
+                    } else {
+                        Color::DarkGrey
+                    };
                     let _ = execute!(out, SetForegroundColor(color));
                     for line in result.model_output.lines().take(20) {
                         let _ = writeln!(out, "  {line}");
@@ -1949,7 +2162,10 @@ async fn run_line_based(mut startup: Startup) -> anyhow::Result<()> {
         }
         // Bang command detection: `!cmd` or `!!cmd`.
         if let Some(EditorEvent::BangCommand { command, silent }) = {
-            let tmp_editor = Editor { text: trimmed.to_string(), cursor: trimmed.len() };
+            let tmp_editor = Editor {
+                text: trimmed.to_string(),
+                cursor: trimmed.len(),
+            };
             tmp_editor.special_command()
         } {
             let output = run_bang_command(&command).await;
@@ -2450,7 +2666,10 @@ mod tests {
             cycle_thinking(ThinkingSetting::Medium),
             ThinkingSetting::High
         );
-        assert_eq!(cycle_thinking(ThinkingSetting::High), ThinkingSetting::XHigh);
+        assert_eq!(
+            cycle_thinking(ThinkingSetting::High),
+            ThinkingSetting::XHigh
+        );
         assert_eq!(cycle_thinking(ThinkingSetting::XHigh), ThinkingSetting::Off);
         // Label helper covers the same arms.
         assert_eq!(thinking_label(ThinkingSetting::Off), "off");
@@ -2730,7 +2949,11 @@ mod tests {
         let mut v = fresh_view();
         v.turn_in_progress = true;
         let mut current = "anthropic/sonnet".to_string();
-        ingest_event(&mut v, &agent_event(AgentEventKind::TurnComplete), &mut current);
+        ingest_event(
+            &mut v,
+            &agent_event(AgentEventKind::TurnComplete),
+            &mut current,
+        );
         assert!(!v.turn_in_progress);
     }
 
@@ -2750,7 +2973,11 @@ mod tests {
         v.scoped_previous_model = Some("openai/gpt-4o".into());
         v.turn_in_progress = true;
         let mut current = "anthropic/haiku".to_string();
-        ingest_event(&mut v, &agent_event(AgentEventKind::TurnComplete), &mut current);
+        ingest_event(
+            &mut v,
+            &agent_event(AgentEventKind::TurnComplete),
+            &mut current,
+        );
         assert_eq!(current, "openai/gpt-4o");
         assert_eq!(v.transcript.model_label, "openai/gpt-4o");
         assert!(v.scoped_previous_model.is_none());
@@ -2953,7 +3180,10 @@ mod tests {
     fn ctrl_shift_t_cycles_dashboard_mode_inline_to_expanded_to_hidden() {
         let mut v = fresh_view();
         // lowercase 't' with CONTROL+SHIFT — common terminal mapping.
-        let chord = ke(KeyCode::Char('t'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        let chord = ke(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
         let _ = handle_key(&mut v, &chord);
         assert_eq!(v.dashboard_mode, DashboardMode::Expanded);
         let _ = handle_key(&mut v, &chord);
@@ -2966,7 +3196,10 @@ mod tests {
     fn ctrl_shift_t_uppercase_variant_also_cycles() {
         let mut v = fresh_view();
         // Some terminals deliver Ctrl+Shift+T as KeyCode::Char('T') instead.
-        let chord = ke(KeyCode::Char('T'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        let chord = ke(
+            KeyCode::Char('T'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
         let _ = handle_key(&mut v, &chord);
         assert_eq!(v.dashboard_mode, DashboardMode::Expanded);
     }
@@ -2982,8 +3215,8 @@ mod tests {
 
     #[test]
     fn build_frame_includes_inline_dashboard_when_snapshot_present() {
-        use crate::autoresearch::dashboard::DashboardState;
         use crate::autoresearch::confidence::{ConfidenceBand, ConfidenceScore};
+        use crate::autoresearch::dashboard::DashboardState;
         use crate::autoresearch::session::MetricDirection;
         let mut v = fresh_view();
         v.dashboard_snapshot = Some(DashboardSnapshot {
@@ -3000,24 +3233,37 @@ mod tests {
                     band: ConfidenceBand::Green,
                 },
             },
-            runs: vec![("baseline".into(), 100.0, true), ("delta".into(), 80.0, true)],
+            runs: vec![
+                ("baseline".into(), 100.0, true),
+                ("delta".into(), 80.0, true),
+            ],
         });
         let theme = pi_tui::ThemeRegistry::new().get("dark").cloned().unwrap();
-        let frame = build_frame(&v, &theme, 80, 24, "openai/gpt-4o", std::path::Path::new("/tmp"));
+        let frame = build_frame(
+            &v,
+            &theme,
+            80,
+            24,
+            "openai/gpt-4o",
+            std::path::Path::new("/tmp"),
+        );
         let dump = frame
             .lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
             .collect::<Vec<_>>()
             .join("");
-        assert!(dump.contains("autoresearch"), "missing autoresearch line: {dump}");
+        assert!(
+            dump.contains("autoresearch"),
+            "missing autoresearch line: {dump}"
+        );
         assert!(dump.contains("3 runs"));
     }
 
     #[test]
     fn build_frame_omits_dashboard_when_hidden() {
-        use crate::autoresearch::dashboard::DashboardState;
         use crate::autoresearch::confidence::{ConfidenceBand, ConfidenceScore};
+        use crate::autoresearch::dashboard::DashboardState;
         use crate::autoresearch::session::MetricDirection;
         let mut v = fresh_view();
         v.dashboard_mode = DashboardMode::Hidden;
@@ -3107,8 +3353,8 @@ mod tests {
 
     #[test]
     fn refresh_dashboard_clears_snapshot_when_no_session() {
-        use crate::autoresearch::dashboard::DashboardState;
         use crate::autoresearch::confidence::{ConfidenceBand, ConfidenceScore};
+        use crate::autoresearch::dashboard::DashboardState;
         use crate::autoresearch::session::MetricDirection;
         let dir = tempfile::tempdir().expect("tempdir");
         let mut v = fresh_view();

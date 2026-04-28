@@ -7,7 +7,7 @@
 //! diff renderer in `pi-tui` actually useful.
 
 use crossterm::style::Color;
-use pi_agent_core::{AgentEventKind, AgentEvent};
+use pi_agent_core::{AgentEvent, AgentEventKind};
 use pi_ai::{ContentBlock, Role, Usage};
 use pi_tui::{Frame, Line, Span, Theme};
 use unicode_segmentation::UnicodeSegmentation;
@@ -18,10 +18,20 @@ pub enum Block {
     User(String),
     AssistantText(String),
     Thinking(String),
-    ToolCall { name: String, input_pretty: String },
-    ToolResult { ok: bool, body: String, lines: usize },
+    ToolCall {
+        name: String,
+        input_pretty: String,
+    },
+    ToolResult {
+        ok: bool,
+        body: String,
+        lines: usize,
+    },
     Error(String),
-    Compact { summary: String, freed_tokens: u64 },
+    Compact {
+        summary: String,
+        freed_tokens: u64,
+    },
     Note(String),
 }
 
@@ -93,7 +103,10 @@ impl Transcript {
             AgentEventKind::Error { message } => {
                 self.blocks.push(Block::Error(message.clone()));
             }
-            AgentEventKind::CompactionComplete { summary, freed_tokens } => {
+            AgentEventKind::CompactionComplete {
+                summary,
+                freed_tokens,
+            } => {
                 self.blocks.push(Block::Compact {
                     summary: summary.clone(),
                     freed_tokens: *freed_tokens,
@@ -104,10 +117,16 @@ impl Transcript {
                 // tool-use blocks here if we missed them.
                 for c in &message.content {
                     if let ContentBlock::ToolUse { name, input, .. } = c {
-                        if !self.blocks.iter().rev().any(|b| matches!(b, Block::ToolCall { name: n, .. } if n == name)) {
+                        if !self
+                            .blocks
+                            .iter()
+                            .rev()
+                            .any(|b| matches!(b, Block::ToolCall { name: n, .. } if n == name))
+                        {
                             self.blocks.push(Block::ToolCall {
                                 name: name.clone(),
-                                input_pretty: serde_json::to_string_pretty(input).unwrap_or_default(),
+                                input_pretty: serde_json::to_string_pretty(input)
+                                    .unwrap_or_default(),
                             });
                         }
                     }
@@ -123,11 +142,29 @@ impl Transcript {
         let mut lines: Vec<Line> = Vec::new();
         for b in &self.blocks {
             match b {
-                Block::User(t) => render_block(&mut lines, "you", theme.user.to_crossterm(), t, viewport_cols),
-                Block::AssistantText(t) => render_block(&mut lines, "pi", theme.assistant.to_crossterm(), t, viewport_cols),
+                Block::User(t) => render_block(
+                    &mut lines,
+                    "you",
+                    theme.user.to_crossterm(),
+                    t,
+                    viewport_cols,
+                ),
+                Block::AssistantText(t) => render_block(
+                    &mut lines,
+                    "pi",
+                    theme.assistant.to_crossterm(),
+                    t,
+                    viewport_cols,
+                ),
                 Block::Thinking(t) => {
                     if !self.thinking_collapsed {
-                        render_block(&mut lines, "thinking", theme.thinking.to_crossterm(), t, viewport_cols);
+                        render_block(
+                            &mut lines,
+                            "thinking",
+                            theme.thinking.to_crossterm(),
+                            t,
+                            viewport_cols,
+                        );
                     } else {
                         lines.push(Line {
                             spans: vec![Span::coloured(
@@ -140,13 +177,29 @@ impl Transcript {
                 Block::ToolCall { name, input_pretty } => {
                     lines.push(Line {
                         spans: vec![Span::coloured(
-                            format!("→ {} {}", name, input_pretty.replace('\n', " ").chars().take(viewport_cols.saturating_sub(8) as usize).collect::<String>()),
+                            format!(
+                                "→ {} {}",
+                                name,
+                                input_pretty
+                                    .replace('\n', " ")
+                                    .chars()
+                                    .take(viewport_cols.saturating_sub(8) as usize)
+                                    .collect::<String>()
+                            ),
                             theme.tool.to_crossterm(),
                         )],
                     });
                 }
-                Block::ToolResult { ok, body, lines: count } => {
-                    let color = if *ok { theme.muted.to_crossterm() } else { theme.error.to_crossterm() };
+                Block::ToolResult {
+                    ok,
+                    body,
+                    lines: count,
+                } => {
+                    let color = if *ok {
+                        theme.muted.to_crossterm()
+                    } else {
+                        theme.error.to_crossterm()
+                    };
                     if self.tool_collapsed {
                         lines.push(Line {
                             spans: vec![Span::coloured(
@@ -164,17 +217,34 @@ impl Transcript {
                         }
                         if *count > 20 {
                             lines.push(Line {
-                                spans: vec![Span::coloured(format!("  … (+{} lines)", *count - 20), color)],
+                                spans: vec![Span::coloured(
+                                    format!("  … (+{} lines)", *count - 20),
+                                    color,
+                                )],
                             });
                         }
                     }
                 }
                 Block::Error(m) => lines.push(Line {
-                    spans: vec![Span::coloured(format!("[error] {}", m), theme.error.to_crossterm())],
-                }),
-                Block::Compact { summary, freed_tokens } => lines.push(Line {
                     spans: vec![Span::coloured(
-                        format!("[compacted ~{} tokens] {}", freed_tokens, summary.replace('\n', " ").chars().take(120).collect::<String>()),
+                        format!("[error] {}", m),
+                        theme.error.to_crossterm(),
+                    )],
+                }),
+                Block::Compact {
+                    summary,
+                    freed_tokens,
+                } => lines.push(Line {
+                    spans: vec![Span::coloured(
+                        format!(
+                            "[compacted ~{} tokens] {}",
+                            freed_tokens,
+                            summary
+                                .replace('\n', " ")
+                                .chars()
+                                .take(120)
+                                .collect::<String>()
+                        ),
                         theme.muted.to_crossterm(),
                     )],
                 }),
@@ -197,7 +267,7 @@ impl Transcript {
         }
         // Separator before the input area.
         lines.push(Line::default());
-        Frame { lines }
+        Frame { lines, cursor_at: None }
     }
 
     pub fn footer(&self, theme: &Theme, model: &str, cwd: &std::path::Path) -> Line {
@@ -213,7 +283,10 @@ impl Transcript {
                     ),
                     theme.muted.to_crossterm(),
                 ),
-                Span::coloured(format!("  cwd:{}", cwd.display()), theme.muted.to_crossterm()),
+                Span::coloured(
+                    format!("  cwd:{}", cwd.display()),
+                    theme.muted.to_crossterm(),
+                ),
             ],
         }
     }

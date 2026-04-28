@@ -40,6 +40,11 @@ impl Line {
 #[derive(Debug, Clone, Default)]
 pub struct Frame {
     pub lines: Vec<Line>,
+    /// Optional hardware-cursor target: `(line_index_in_frame, col)`.
+    /// When `Some`, the renderer positions the OS cursor here after
+    /// painting and sets it visible. When `None`, the cursor stays
+    /// hidden (default for picker overlays etc.).
+    pub cursor_at: Option<(u16, u16)>,
 }
 
 /// Differential renderer — keeps the previous frame, only redraws lines that
@@ -63,6 +68,19 @@ impl<W: Write> DiffRenderer<W> {
     }
 
     pub fn resize(&mut self, cols: u16) {
+        if cols != self.width {
+            // Width change invalidates word-wrapping for every line; the
+            // diff renderer would otherwise compare new wrapped text against
+            // old differently-wrapped text and produce visible drift. Force
+            // a full repaint by dropping the previous-frame cache. The next
+            // `render()` call will redraw every line unconditionally.
+            self.last.clear();
+            // Best-effort screen scrub so we don't leave stale glyphs from
+            // the old layout. Failure here just means the next render still
+            // repaints from scratch; not fatal.
+            let _ = queue!(self.out, terminal::Clear(terminal::ClearType::FromCursorDown));
+            let _ = self.out.flush();
+        }
         self.width = cols;
     }
 
@@ -94,7 +112,11 @@ impl<W: Write> DiffRenderer<W> {
             let raw_line = raw.get(i).cloned().unwrap_or_default();
             let same = self.last.get(i).map(|s| s == &raw_line).unwrap_or(false);
             if !same {
-                queue!(self.out, terminal::Clear(terminal::ClearType::CurrentLine), cursor::MoveToColumn(0))?;
+                queue!(
+                    self.out,
+                    terminal::Clear(terminal::ClearType::CurrentLine),
+                    cursor::MoveToColumn(0)
+                )?;
                 for span in &line.spans {
                     if let Some(c) = span.color {
                         queue!(self.out, SetForegroundColor(c))?;
@@ -115,6 +137,31 @@ impl<W: Write> DiffRenderer<W> {
         for _ in 0..leftover {
             self.out.write_all(b"\n")?;
             queue!(self.out, terminal::Clear(terminal::ClearType::CurrentLine))?;
+        }
+        // Restore cursor invariant: at end of render, the cursor sits on the
+        // last line of the (new, shorter) frame. The leftover-clear loop
+        // moved it `leftover` rows further down; without this MoveUp, the
+        // next render's `cursor::MoveUp(self.last.len())` lands `leftover`
+        // rows too low, so the new frame paints over old picker rows that
+        // we just blanked. Visible symptom: rows from a tall picker linger
+        // when transitioning to a shorter overlay.
+        if leftover > 0 {
+            queue!(self.out, cursor::MoveUp(leftover as u16), cursor::MoveToColumn(0))?;
+        }
+
+        // Hardware cursor placement (RFD-style): if the frame named a
+        // target, hop to it from the post-render position (last line of
+        // the frame, end of its text) and reveal the cursor; otherwise
+        // keep it hidden so picker overlays don't blink in random spots.
+        if let Some((target_line, target_col)) = frame.cursor_at {
+            let cur_line = frame.lines.len().saturating_sub(1) as u16;
+            let target_line = target_line.min(cur_line);
+            if cur_line > target_line {
+                queue!(self.out, cursor::MoveUp(cur_line - target_line))?;
+            }
+            queue!(self.out, cursor::MoveToColumn(target_col), cursor::Show)?;
+        } else {
+            queue!(self.out, cursor::Hide)?;
         }
 
         if self.sync {
