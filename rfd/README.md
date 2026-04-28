@@ -40,3 +40,4 @@ crosses crate boundaries.
 | 0006 | Worktree-isolated tasks                          | Discussion |
 | 0007 | Per-language LSP formatting options              | Discussion |
 | 0008 | Populate every `Usage` field on stream finish    | Discussion |
+| 0009 | Audit + calibrate the model pricing table        | Discussion |
