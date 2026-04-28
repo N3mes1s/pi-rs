@@ -1,9 +1,9 @@
 # RFD 0019 — OpenAI Responses API support
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-28
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** 1b84c6f (responses-tests merge), f88bfa1 (responses-core), 22fa110 (responses-registry), 4651793 (test-fixture follow-up)
 
 ## Summary
 
