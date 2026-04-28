@@ -79,6 +79,16 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     if let Some(s) = &cli.plan {
         settings.roles.plan = Some(s.clone());
     }
+    settings.route = pi_agent_core::RouteMode::parse(&cli.route).unwrap_or(pi_agent_core::RouteMode::Static);
+    settings.route_provider_override = cli.provider.clone();
+    settings.route_model_override = cli.model.clone();
+    settings.route_thinking_override = cli.thinking.as_deref().map(|t| match t {
+        "low" => pi_agent_core::settings::ThinkingSetting::Low,
+        "medium" => pi_agent_core::settings::ThinkingSetting::Medium,
+        "high" => pi_agent_core::settings::ThinkingSetting::High,
+        "xhigh" => pi_agent_core::settings::ThinkingSetting::XHigh,
+        _ => pi_agent_core::settings::ThinkingSetting::Off,
+    });
 
     // (autoresearch tools are registered after the base ToolRegistry is built; see below)
 

@@ -216,6 +216,10 @@ pub struct Cli {
     #[arg(long, action = ArgAction::SetTrue)]
     pub worktree: bool,
 
+    /// Route mode: off, static, auto, learned.
+    #[arg(long = "route", value_parser = clap::builder::PossibleValuesParser::new(["off","static","auto","learned"]), default_value = "static")]
+    pub route: String,
+
     /// Reconciliation mode for `--worktree`: `branch` (default) or
     /// `patch`.
     #[arg(long = "worktree-mode", value_name = "MODE",

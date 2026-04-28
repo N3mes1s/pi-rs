@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::context::ContextFile;
 use crate::event::{AgentEvent, AgentEventKind, EventSender};
+use crate::router::{ForceOverride, RouteMode, Router as _, RoutingContext, StaticRouter, ToolSpec};
 use crate::session::{SessionEntryKind, SessionManager};
 use crate::settings::Settings;
 
@@ -172,9 +173,51 @@ impl AgentSessionRuntime {
 
     pub fn create_session(&self, sender: Option<EventSender>) -> std::io::Result<AgentSession> {
         let cfg = self.config.clone();
-        let meta = cfg
-            .session_manager
-            .create(&cfg.settings.provider, &cfg.settings.model)?;
+        let mut provider = cfg.settings.provider.clone();
+        let mut model = cfg.settings.model.clone();
+        let mut thinking: ThinkingLevel = cfg.settings.thinking.into();
+        if !matches!(cfg.settings.route, RouteMode::Off) {
+            let router_mode = cfg.settings.route;
+            let force = if matches!(router_mode, RouteMode::Static | RouteMode::Auto | RouteMode::Learned)
+                && (cfg.settings.route_model_override.is_some() || cfg.settings.route_thinking_override.is_some())
+            {
+                Some(ForceOverride::CliFlag {
+                    provider: cfg.settings.route_provider_override.clone(),
+                    model: cfg
+                        .settings
+                        .route_model_override
+                        .clone()
+                        .unwrap_or_else(|| cfg.settings.model.clone()),
+                    thinking: cfg.settings.route_thinking_override.map(Into::into),
+                })
+            } else {
+                None
+            };
+            let ctx = RoutingContext {
+                registry: &cfg.model_registry,
+                user_lambda: 1.0,
+                force,
+                session_id: "new-session",
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            };
+            let tools: Vec<ToolSpec> = cfg.tools.specs().into_iter().map(|s| ToolSpec { name: s.name }).collect();
+            let decision = match router_mode {
+                RouteMode::Auto => crate::router::EmbeddingRouter::bundled().route("", &[], &tools, &ctx),
+                _ => StaticRouter::new(crate::router::RoutingDecision {
+                    route_id: "static".into(),
+                    provider: cfg.settings.provider.clone(),
+                    model: cfg.settings.model.clone(),
+                    thinking,
+                }).route("", &[], &tools, &ctx),
+            };
+            if let Ok(decision) = decision {
+                provider = decision.provider;
+                model = decision.model;
+                thinking = decision.thinking;
+            }
+        }
+        let meta = cfg.session_manager.create(&provider, &model)?;
         Ok(AgentSession {
             id: meta.id,
             inner: Arc::new(Mutex::new(AgentSessionInner {
@@ -182,9 +225,9 @@ impl AgentSessionRuntime {
                 aborted: false,
                 queued_messages: Vec::new(),
                 messages: Vec::new(),
-                provider: cfg.settings.provider.clone(),
-                model: cfg.settings.model.clone(),
-                thinking: cfg.settings.thinking.into(),
+                provider,
+                model,
+                thinking,
                 tools: cfg.tools.clone(),
                 context_loads_emitted: false,
             })),

@@ -1,3 +1,4 @@
+use crate::router::RouteMode;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -60,6 +61,14 @@ pub struct Settings {
     /// `monitor` tool settings (RFD 0017).
     #[serde(default)]
     pub monitor: MonitorSettings,
+    #[serde(default)]
+    pub route: RouteMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_provider_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_model_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_thinking_override: Option<crate::settings::ThinkingSetting>,
 }
 
 /// `monitor` tool configuration (RFD 0017). Caps + batching window for
@@ -289,6 +298,10 @@ impl Default for Settings {
             lsp: LspSettings::default(),
             task: TaskSettings::default(),
             monitor: MonitorSettings::default(),
+            route: RouteMode::Static,
+            route_provider_override: None,
+            route_model_override: None,
+            route_thinking_override: None,
         }
     }
 }
