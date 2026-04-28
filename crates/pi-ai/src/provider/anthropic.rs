@@ -18,6 +18,22 @@ pub struct AnthropicProvider {
     pub client: Client,
 }
 
+#[derive(Default, Clone, Copy)]
+pub struct UsageAcc {
+    pub input_tokens: u64,
+    pub cache_read_tok: u64,
+    pub cache_write_tok: u64,
+    pub output_tokens: u64,
+    pub reasoning_tok: u64,
+}
+
+pub fn compute_cost(model: &ModelInfo, u: &UsageAcc) -> f64 {
+    let in_tok = u.input_tokens + u.cache_read_tok + u.cache_write_tok;
+    let out_tok = u.output_tokens + u.reasoning_tok;
+    (in_tok as f64 / 1_000_000.0) * model.input_cost_per_mtok
+        + (out_tok as f64 / 1_000_000.0) * model.output_cost_per_mtok
+}
+
 impl AnthropicProvider {
     pub fn new(config: ProviderConfig, auth: AuthMethod) -> Self {
         Self {
@@ -174,37 +190,56 @@ impl Provider for AnthropicProvider {
         let tool_inputs: std::collections::HashMap<u32, (String, String, String)> =
             std::collections::HashMap::new();
 
+        let model_owned = model.clone();
         let s = stream::unfold(
-            (event_stream, tool_inputs.clone(), false),
-            move |(mut es, mut acc, mut done)| async move {
-                let _ = &mut done;
-                if done {
-                    return None;
-                }
-                while let Some(item) = es.next().await {
-                    let ev = match item {
-                        Ok(ev) => ev,
-                        Err(e) => {
-                            return Some((
-                                Ok(StreamEvent::new(StreamEventKind::Error {
-                                    message: e.to_string(),
-                                })),
-                                (es, acc, true),
-                            ));
-                        }
-                    };
-                    let data: Value = match serde_json::from_str(&ev.data) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    let etype = data.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    match etype {
-                        "message_start" => {
-                            return Some((
-                                Ok(StreamEvent::new(StreamEventKind::MessageStart)),
-                                (es, acc, false),
-                            ));
-                        }
+            (event_stream, tool_inputs.clone(), false, UsageAcc::default()),
+            move |(mut es, mut acc, mut done, mut usage_running)| {
+                let model_owned = model_owned.clone();
+                async move {
+                    let _ = &mut done;
+                    if done {
+                        return None;
+                    }
+                    while let Some(item) = es.next().await {
+                        let ev = match item {
+                            Ok(ev) => ev,
+                            Err(e) => {
+                                return Some((
+                                    Ok(StreamEvent::new(StreamEventKind::Error {
+                                        message: e.to_string(),
+                                    })),
+                                    (es, acc, true, usage_running),
+                                ));
+                            }
+                        };
+                        let data: Value = match serde_json::from_str(&ev.data) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let etype = data.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        match etype {
+                            "message_start" => {
+                                if let Some(u) =
+                                    data.get("message").and_then(|m| m.get("usage"))
+                                {
+                                    usage_running.input_tokens = u
+                                        .get("input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    usage_running.cache_read_tok = u
+                                        .get("cache_read_input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    usage_running.cache_write_tok = u
+                                        .get("cache_creation_input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                }
+                                return Some((
+                                    Ok(StreamEvent::new(StreamEventKind::MessageStart)),
+                                    (es, acc, false, usage_running),
+                                ));
+                            }
                         "content_block_start" => {
                             let idx = data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                             let block = data.get("content_block").cloned().unwrap_or(Value::Null);
@@ -225,7 +260,7 @@ impl Provider for AnthropicProvider {
                                         id,
                                         name,
                                     })),
-                                    (es, acc, false),
+                                    (es, acc, false, usage_running),
                                 ));
                             }
                         }
@@ -241,7 +276,7 @@ impl Provider for AnthropicProvider {
                                         .to_string();
                                     return Some((
                                         Ok(StreamEvent::new(StreamEventKind::TextDelta { text: t })),
-                                        (es, acc, false),
+                                        (es, acc, false, usage_running),
                                     ));
                                 }
                                 Some("thinking_delta") => {
@@ -254,7 +289,7 @@ impl Provider for AnthropicProvider {
                                         Ok(StreamEvent::new(StreamEventKind::ThinkingDelta {
                                             text: t,
                                         })),
-                                        (es, acc, false),
+                                        (es, acc, false, usage_running),
                                     ));
                                 }
                                 Some("input_json_delta") => {
@@ -270,7 +305,7 @@ impl Provider for AnthropicProvider {
                                                 id: id.clone(),
                                                 partial_json: partial,
                                             })),
-                                            (es, acc, false),
+                                            (es, acc, false, usage_running),
                                         ));
                                     }
                                 }
@@ -291,22 +326,29 @@ impl Provider for AnthropicProvider {
                                         name,
                                         input,
                                     })),
-                                    (es, acc, false),
+                                    (es, acc, false, usage_running),
                                 ));
                             }
                         }
                         "message_delta" => {
                             if let Some(usage) = data.get("usage") {
-                                let u = Usage {
-                                    output_tokens: usage
-                                        .get("output_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0),
-                                    ..Default::default()
+                                usage_running.output_tokens = usage
+                                    .get("output_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(usage_running.output_tokens);
+                                let final_usage = Usage {
+                                    input_tokens: usage_running.input_tokens,
+                                    output_tokens: usage_running.output_tokens,
+                                    cache_read_tokens: usage_running.cache_read_tok,
+                                    cache_write_tokens: usage_running.cache_write_tok,
+                                    reasoning_tokens: usage_running.reasoning_tok,
+                                    cost_usd: compute_cost(&model_owned, &usage_running),
                                 };
                                 return Some((
-                                    Ok(StreamEvent::new(StreamEventKind::Usage { usage: u })),
-                                    (es, acc, false),
+                                    Ok(StreamEvent::new(StreamEventKind::Usage {
+                                        usage: final_usage,
+                                    })),
+                                    (es, acc, false, usage_running),
                                 ));
                             }
                             if let Some(reason) = data
@@ -323,7 +365,7 @@ impl Provider for AnthropicProvider {
                                 };
                                 return Some((
                                     Ok(StreamEvent::new(StreamEventKind::Finish { reason: r })),
-                                    (es, acc, false),
+                                    (es, acc, false, usage_running),
                                 ));
                             }
                         }
@@ -334,13 +376,14 @@ impl Provider for AnthropicProvider {
                                 Ok(StreamEvent::new(StreamEventKind::Finish {
                                     reason: FinishReason::Stop,
                                 })),
-                                (es, acc, true),
+                                (es, acc, true, usage_running),
                             ));
                         }
                         _ => {}
                     }
                 }
                 None
+                }
             },
         );
 
