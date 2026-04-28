@@ -72,7 +72,15 @@ fn ctx_for(cwd: &Path) -> ToolContext {
     }
 }
 
+// Ignored by default: the test spawns a real `rust-analyzer` process
+// to index pi-rs's full workspace, which deadlocks at setup on
+// resource-constrained boxes (e.g. CI runners, dev VMs). Run
+// explicitly with `cargo test --ignored -- --test-threads=1` from a
+// machine that has rust-analyzer installed and enough RAM/disk for
+// a full RA index. The `--skip <name>` flag does NOT help: libtest's
+// filter runs AFTER the binary's setup, which is where the hang is.
 #[tokio::test]
+#[ignore = "spawns real rust-analyzer; hangs at index setup on constrained machines (run with --ignored)"]
 async fn lsp_write_tool_real_rust_analyzer_format_on_write() {
     let Some(ra) = require_rust_analyzer() else {
         return;

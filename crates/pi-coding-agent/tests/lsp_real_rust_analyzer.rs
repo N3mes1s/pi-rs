@@ -106,10 +106,18 @@ where
     None
 }
 
-// Self-skipping when `rust-analyzer` isn't on PATH (CI without the
-// component). Otherwise spawns a real RA instance against a tempdir
-// crate and exercises every op end-to-end.
+// Ignored by default: spawns a real `rust-analyzer` process to index
+// a tempdir crate. While the indexed crate itself is small, the
+// rust-analyzer setup blocks on workspace discovery + cargo metadata
+// for any *enclosing* workspace it can reach via `--manifest-path`
+// inference, and that hangs on dev VMs with constrained RAM/disk or
+// when the surrounding pi-rs target dir is multi-GB. `--skip <name>`
+// from cargo test does NOT short-circuit this: the binary loads and
+// runs setup before libtest's filter applies. Run with `cargo test
+// --ignored -- --test-threads=1` from a machine that has
+// rust-analyzer installed and enough headroom.
 #[tokio::test]
+#[ignore = "spawns real rust-analyzer; hangs at index setup on constrained machines (run with --ignored)"]
 async fn real_rust_analyzer_round_trip() {
     let Some(ra) = require_rust_analyzer() else {
         return;
