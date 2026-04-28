@@ -120,8 +120,8 @@ pub async fn finalize_for_runtime(
     settings: &Settings,
     session_id: &str,
 ) -> Option<SessionEntryKind> {
-    let judge =
-        build_judge_from_settings(settings, &cfg.model_registry, &cfg.auth_storage);
+    let judge = build_judge_from_settings(settings, &cfg.model_registry, &cfg.auth_storage)
+        .map(|j| j.with_system_prompt_bytes(cfg.system_prompt.len()));
     let outcome = finalize_session(&cfg.session_manager, session_id, judge.as_ref()).await;
 
     if settings.evolve.enabled {
