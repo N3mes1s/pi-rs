@@ -6,6 +6,7 @@
 //! quirks.
 
 pub mod auth;
+pub mod cost;
 pub mod discover;
 pub mod message;
 pub mod oauth;

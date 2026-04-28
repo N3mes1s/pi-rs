@@ -15,6 +15,8 @@ fn opus_4_7() -> ModelInfo {
         supports_vision: true,
         input_cost_per_mtok: 15.0,
         output_cost_per_mtok: 75.0,
+        cache_read_cost_per_mtok: None,
+        cache_write_cost_per_mtok: None,
     }
 }
 
@@ -56,4 +58,63 @@ fn cache_write_and_reasoning_also_count() {
     let cost = compute_cost(&model, &u);
     // 1M cache_write @ input rate (15) + 1M reasoning @ output rate (75) = 90.
     assert!((cost - 90.0).abs() < 1e-9, "got {cost}");
+}
+
+// --- RFD 0010: differential cache pricing -----------------------------
+
+fn opus_4_7_with_cache(read: Option<f64>, write: Option<f64>) -> ModelInfo {
+    ModelInfo {
+        provider: "anthropic".into(),
+        id: "claude-opus-4-7".into(),
+        alias: Some("opus".into()),
+        context_window: 200_000,
+        max_output_tokens: 32_000,
+        supports_thinking: true,
+        supports_tools: true,
+        supports_vision: true,
+        input_cost_per_mtok: 5.0,
+        output_cost_per_mtok: 25.0,
+        cache_read_cost_per_mtok: read,
+        cache_write_cost_per_mtok: write,
+    }
+}
+
+#[test]
+fn cache_read_uses_dedicated_rate_when_set() {
+    let model = opus_4_7_with_cache(Some(0.50), Some(6.25));
+    let u = UsageAcc {
+        cache_read_tok: 1_000_000,
+        ..Default::default()
+    };
+    let cost = compute_cost(&model, &u);
+    // 1M cache_read @ 0.50 = $0.50
+    assert!((cost - 0.50).abs() < 1e-9, "got {cost}");
+}
+
+#[test]
+fn cache_write_uses_dedicated_rate_when_set() {
+    let model = opus_4_7_with_cache(Some(0.50), Some(6.25));
+    let u = UsageAcc {
+        cache_write_tok: 1_000_000,
+        ..Default::default()
+    };
+    let cost = compute_cost(&model, &u);
+    // 1M cache_write @ 6.25 = $6.25
+    assert!((cost - 6.25).abs() < 1e-9, "got {cost}");
+}
+
+#[test]
+fn cache_fields_none_falls_back_to_input_rate() {
+    // Regression guard for RFD-0008 fallback path: if a row doesn't
+    // declare cache rates, cache_read/cache_write tokens still bill at
+    // input rate (byte-identical to pre-RFD-0010 behaviour).
+    let model = opus_4_7_with_cache(None, None);
+    let u = UsageAcc {
+        cache_read_tok: 1_000_000,
+        cache_write_tok: 1_000_000,
+        ..Default::default()
+    };
+    let cost = compute_cost(&model, &u);
+    // 1M @ 5.0 + 1M @ 5.0 = 10.0
+    assert!((cost - 10.0).abs() < 1e-9, "got {cost}");
 }

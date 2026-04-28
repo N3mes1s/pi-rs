@@ -8,6 +8,9 @@ const PRICING_JSON: &str = include_str!("../data/pricing.json");
 
 #[derive(Debug, Deserialize)]
 struct PricingTable {
+    #[allow(dead_code)]
+    #[serde(default)]
+    schema_version: u32,
     rows: Vec<PricingRow>,
 }
 
@@ -19,6 +22,10 @@ struct PricingRow {
     input_cost_per_mtok: f64,
     #[allow(dead_code)]
     output_cost_per_mtok: f64,
+    #[serde(default)]
+    cache_read_cost_per_mtok: Option<f64>,
+    #[serde(default)]
+    cache_write_cost_per_mtok: Option<f64>,
     sources: Vec<String>,
 }
 
@@ -73,5 +80,35 @@ fn every_registry_model_has_a_pricing_row() {
                 provider.name, model.id
             );
         }
+    }
+}
+
+#[test]
+fn schema_version_is_two() {
+    #[derive(Debug, Deserialize)]
+    struct Hdr {
+        schema_version: u32,
+    }
+    let hdr: Hdr = serde_json::from_str(PRICING_JSON).unwrap();
+    assert_eq!(hdr.schema_version, 2, "RFD 0010 bumped schema to v2");
+}
+
+#[test]
+fn every_anthropic_row_declares_both_cache_rates() {
+    let table = load();
+    for row in &table.rows {
+        if row.provider != "anthropic" {
+            continue;
+        }
+        assert!(
+            row.cache_read_cost_per_mtok.is_some(),
+            "{}/{} missing cache_read_cost_per_mtok",
+            row.provider, row.model
+        );
+        assert!(
+            row.cache_write_cost_per_mtok.is_some(),
+            "{}/{} missing cache_write_cost_per_mtok",
+            row.provider, row.model
+        );
     }
 }

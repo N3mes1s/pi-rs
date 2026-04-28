@@ -178,6 +178,8 @@ fn registry_merge_discovered_appends_new_only_keeps_static_on_conflict() {
         supports_vision: false,
         input_cost_per_mtok: 999.0,
         output_cost_per_mtok: 999.0,
+        cache_read_cost_per_mtok: None,
+        cache_write_cost_per_mtok: None,
     };
     let novel = ModelInfo {
         provider: "anthropic".into(),
@@ -190,6 +192,8 @@ fn registry_merge_discovered_appends_new_only_keeps_static_on_conflict() {
         supports_vision: true,
         input_cost_per_mtok: 0.0,
         output_cost_per_mtok: 0.0,
+        cache_read_cost_per_mtok: None,
+        cache_write_cost_per_mtok: None,
     };
     let before_count = reg.total_models();
     reg.merge_discovered(vec![conflict, novel.clone()]);
@@ -222,6 +226,8 @@ fn discovered_cache_round_trip_to_disk() {
             supports_vision: false,
             input_cost_per_mtok: 0.0,
             output_cost_per_mtok: 0.0,
+        cache_read_cost_per_mtok: None,
+        cache_write_cost_per_mtok: None,
         }],
     );
     cache.save(&path).unwrap();
