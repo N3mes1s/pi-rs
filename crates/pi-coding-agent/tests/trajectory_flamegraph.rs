@@ -156,14 +156,17 @@ fn estimates_tokens_from_chars_when_no_usage() {
         entry(
             "u1",
             SessionEntryKind::User {
-                // 40 chars / 4 = 10 tokens estimate.
+                // 40 chars: bytes/4 estimated 10 tokens; RFD-0014's
+                // real BPE tokenizer returns somewhere in [3, 14].
                 message: Message::user_text("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             },
         ),
     ];
     let html = render("s1", &branch);
-    // Just sanity check it didn't panic and total is plausible.
-    assert!(html.contains("estimated tokens: 10"));
+    // Just sanity-check the render didn't panic and emitted a token
+    // estimate. Exact count varies with the tokenizer encoding
+    // (see RFD 0014).
+    assert!(html.contains("estimated tokens"), "html missing estimate: {html}");
 }
 
 #[test]
