@@ -42,3 +42,4 @@ crosses crate boundaries.
 | 0008 | Populate every `Usage` field on stream finish    | Discussion |
 | 0009 | Audit + calibrate the model pricing table        | Discussion |
 | 0010 | Differential cache pricing in `compute_cost`     | Discussion |
+| 0011 | Self-dogfood pi-rs (AGENTS.md + evolve + flamegraph) | Discussion |
