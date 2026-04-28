@@ -230,10 +230,14 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         tools.register(Arc::new(crate::autoresearch::tools::LogExperimentTool));
         // Native todo tool (B2). Persists to <cwd>/.pi/todo.json.
         tools.register(Arc::new(crate::native::todo::TodoTool));
-        // Native ask tool (B3). Returns is_error in non-interactive modes
-        // and a structured `display.ask` payload otherwise (the TUI picker
-        // wiring is still pending).
-        tools.register(Arc::new(crate::native::ask::AskTool));
+        // Native ask tool (B3). Only register in interactive mode — in
+        // print/json/rpc the tool can't pop a picker and would always
+        // return `is_error: true` ("ASK requires interactive mode"),
+        // wasting the agent's tokens on an unrecoverable call. Mirrors
+        // how `approve` / `judge` are wired by mode (validate bug #4).
+        if cli.effective_mode() == crate::cli::Mode::Interactive {
+            tools.register(Arc::new(crate::native::ask::AskTool));
+        }
         // RFD 0005: subagents + `task` tool. Always registered when
         // tools are enabled — discovery (project / user / bundled)
         // happens lazily on the first invocation. The host must wrap
