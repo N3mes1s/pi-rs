@@ -4,7 +4,7 @@
 
 use crate::context::{agent_dir, package_dir};
 use crate::packages;
-use pi_agent_core::fetch_default_embeddings;
+use pi_agent_core::{fetch_default_embeddings, validate_embedding_model};
 
 pub fn run_install(spec: &str) -> anyhow::Result<()> {
     let dest = package_dir();
@@ -55,6 +55,7 @@ pub fn run_update() -> anyhow::Result<()> {
 
 pub async fn run_router_fetch_embeddings() -> anyhow::Result<()> {
     let path = fetch_default_embeddings().await?;
+    validate_embedding_model(&path)?;
     println!("{}", path.display());
     Ok(())
 }

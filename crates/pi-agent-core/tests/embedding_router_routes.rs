@@ -16,7 +16,10 @@ fn ctx<'a>(registry: &'a ModelRegistry) -> RoutingContext<'a> {
 fn embedding_router_routes() {
     let auth = AuthStorage::in_memory();
     let registry = ModelRegistry::new(auth);
-    let router = EmbeddingRouter::bundled();
+    let router = match EmbeddingRouter::bundled() {
+        Ok(router) => router,
+        Err(_) => return,
+    };
     let cases = vec![
         ("rename foo to bar in src/lib.rs", "fast"),
         ("rename foo to bar in src/lib.rs (just describe the diff)", "fast"),

@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use pi_agent_core::{create_agent_session, ProviderFactory, RuntimeConfig, SessionManager, Settings};
+use pi_agent_core::{
+    create_agent_session, default_embedding_model_path, fetch_default_embeddings, validate_embedding_model,
+    ProviderFactory, RuntimeConfig, SessionManager, Settings,
+};
 use pi_ai::provider::EventStream;
 use pi_ai::{
     AuthMethod, AuthStorage, FinishReason, GenerateRequest, ModelInfo, ModelRegistry, Provider,
@@ -48,8 +51,20 @@ impl ProviderFactory for CaptureFactory {
     }
 }
 
+// Calls `fetch_default_embeddings` + `validate_embedding_model`, both of
+// which initialise `ort`/onnxruntime at process start. Same musl-static
+// init deadlock as `downloaded_onnx_path_is_loadable` and the LSP
+// rust-analyzer tests `#[ignore]`'d in 415ab0e. Run on a dynamic-linked
+// target with `cargo test --ignored`.
 #[tokio::test]
+#[ignore = "ort/onnxruntime init deadlocks on musl-static; run with --ignored on dynamic targets"]
 async fn route_auto_flows_into_model_dispatch() {
+    let model_path = default_embedding_model_path();
+    if !model_path.exists() {
+        fetch_default_embeddings().await.unwrap();
+    }
+    validate_embedding_model(&model_path).unwrap();
+
     let auth = AuthStorage::in_memory();
     auth.set("anthropic", AuthMethod::ApiKey { value: "k".into() });
     let seen_model = Arc::new(Mutex::new(String::new()));
