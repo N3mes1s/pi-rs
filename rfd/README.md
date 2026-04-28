@@ -49,3 +49,6 @@ crosses crate boundaries.
 | 0015 | Replicate Usage population to OpenAI / Google / Bedrock | Implemented |
 | 0016 | Usage population on `OpenAiCompatProvider`       | Implemented |
 | 0017 | Native `monitor` tool for streaming background events | Implemented |
+| 0018 | OpenAI device-flow login (and what it can / can't do) | Discussion  |
+| 0019 | OpenAI Responses API support                      | Implemented |
+| 0020 | Autonomous model router                           | Discussion  |
