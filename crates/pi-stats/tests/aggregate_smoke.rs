@@ -64,6 +64,12 @@ fn dashboard_aggregates_three_models_four_sessions() {
     let d = aggregate::dashboard(&conn).unwrap();
     assert_eq!(d.by_model.len(), 3);
     assert_eq!(d.overall.total_requests, 12);
+    // 4 distinct session_file values across 3 models = 4 sessions overall.
+    assert_eq!(d.overall.total_sessions, 4);
+    // Each model touched all 4 sessions.
+    for m in &d.by_model {
+        assert_eq!(m.sessions, 4, "{} sessions", m.model);
+    }
     assert!((d.overall.total_cost - total).abs() < 1e-9);
     // Folder breakdown: 4 distinct folders.
     assert_eq!(d.by_folder.len(), 4);
