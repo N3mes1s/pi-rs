@@ -140,6 +140,12 @@ impl Transcript {
 
     pub fn render(&self, theme: &Theme, viewport_cols: u16) -> Frame {
         let mut lines: Vec<Line> = Vec::new();
+        // Empty transcript → render the welcome banner instead. The
+        // banner is suppressed the moment any real block lands so it
+        // never overlaps streaming output.
+        if self.blocks.is_empty() {
+            push_welcome_banner(&mut lines, theme, viewport_cols, &self.model_label);
+        }
         for b in &self.blocks {
             match b {
                 Block::User(t) => render_block(
@@ -364,6 +370,105 @@ impl Transcript {
         let start = len.saturating_sub(n);
         &self.blocks[start..]
     }
+}
+
+/// Push a startup welcome banner: a five-row "Pi" block-glyph logo in
+/// rust-iron-oxide colours (gradient top→bottom from bright copper to
+/// dark patina) plus a brief tip line. Inspired by oh-my-pi's welcome
+/// component but recoloured for Rust and trimmed to a single column —
+/// pi-rs renders the model + cost in the powerline footer already.
+fn push_welcome_banner(lines: &mut Vec<Line>, theme: &Theme, cols: u16, model_label: &str) {
+    // Block-glyph "Pi" logo (port of oh-my-pi's piLogo).
+    let logo: [&str; 5] = [
+        "▀████████████▀",
+        " ╘███    ███  ",
+        "  ███    ███  ",
+        "  ███    ███  ",
+        " ▄███▄  ▄███▄ ",
+    ];
+    // Iron-oxide / rust-patina gradient. Top row is bright "fresh rust",
+    // bottom row is dark patina — like the colour shift on weathered
+    // steel.
+    let rust_palette: [Color; 5] = [
+        Color::Rgb { r: 0xe8, g: 0x88, b: 0x4d }, // bright copper
+        Color::Rgb { r: 0xd9, g: 0x6b, b: 0x3a }, // amber rust
+        Color::Rgb { r: 0xce, g: 0x42, b: 0x2b }, // Rust language brand
+        Color::Rgb { r: 0xa7, g: 0x36, b: 0x1d }, // oxidised iron
+        Color::Rgb { r: 0x7a, g: 0x28, b: 0x12 }, // dark patina
+    ];
+    let logo_width = 14u16; // visible width of each row above
+    let pad = ((cols.saturating_sub(logo_width)) / 2) as usize;
+    let pad_str = " ".repeat(pad);
+    lines.push(Line::default());
+    for (row, glyph) in logo.iter().enumerate() {
+        lines.push(Line {
+            spans: vec![
+                Span::plain(pad_str.clone()),
+                Span::coloured((*glyph).to_string(), rust_palette[row]),
+            ],
+        });
+    }
+    lines.push(Line::default());
+    let title = "pi-rs — agentic coding in Rust";
+    let title_pad = ((cols as usize).saturating_sub(title.len())) / 2;
+    lines.push(Line {
+        spans: vec![
+            Span::plain(" ".repeat(title_pad)),
+            Span::coloured(
+                title.to_string(),
+                Color::Rgb {
+                    r: 0xce,
+                    g: 0x42,
+                    b: 0x2b,
+                },
+            ),
+        ],
+    });
+    // Tip line: each trigger glyph gets its own colour so the eye
+    // can scan and the muted instruction text falls away. Layout:
+    //   /help  ·  @files  ·  !shell  ·  /quit
+    // Bright trigger ◆ then muted explanation, separator dots in
+    // the dimmest tone.
+    let muted = theme.muted.to_crossterm();
+    let dim_dot = Color::Rgb { r: 0x4a, g: 0x4a, b: 0x4a };
+    let slash_c = Color::Rgb { r: 0xce, g: 0x42, b: 0x2b }; // Rust orange
+    let at_c = Color::Rgb { r: 0x6c, g: 0xa0, b: 0xdc };    // user blue
+    let bang_c = Color::Rgb { r: 0xc4, g: 0xa6, b: 0x4d };  // tool yellow
+    let quit_c = Color::Rgb { r: 0x9a, g: 0x4a, b: 0x4a };  // dim red
+    let make_tip = |spans: &mut Vec<Span>| {
+        spans.push(Span::coloured("/help".to_string(), slash_c));
+        spans.push(Span::coloured(" commands  ".to_string(), muted));
+        spans.push(Span::coloured("·  ".to_string(), dim_dot));
+        spans.push(Span::coloured("@".to_string(), at_c));
+        spans.push(Span::coloured("files  ".to_string(), muted));
+        spans.push(Span::coloured("·  ".to_string(), dim_dot));
+        spans.push(Span::coloured("!".to_string(), bang_c));
+        spans.push(Span::coloured("shell  ".to_string(), muted));
+        spans.push(Span::coloured("·  ".to_string(), dim_dot));
+        spans.push(Span::coloured("/quit".to_string(), quit_c));
+        spans.push(Span::coloured(" to exit".to_string(), muted));
+    };
+    // Build to a temp Vec to compute the visible width for centering.
+    let tip_visible = "/help commands  ·  @files  ·  !shell  ·  /quit to exit";
+    let tip_pad = ((cols as usize).saturating_sub(tip_visible.len())) / 2;
+    let mut tip_spans = vec![Span::plain(" ".repeat(tip_pad))];
+    make_tip(&mut tip_spans);
+    lines.push(Line { spans: tip_spans });
+    if !model_label.is_empty() {
+        let model_line = format!("connected to {}", model_label);
+        let pad = ((cols as usize).saturating_sub(model_line.len())) / 2;
+        lines.push(Line {
+            spans: vec![
+                Span::plain(" ".repeat(pad)),
+                Span::coloured("connected to ".to_string(), muted),
+                Span::coloured(
+                    model_label.to_string(),
+                    Color::Rgb { r: 0xe8, g: 0x88, b: 0x4d },
+                ),
+            ],
+        });
+    }
+    lines.push(Line::default());
 }
 
 fn render_block(lines: &mut Vec<Line>, label: &str, color: Color, body: &str, cols: u16) {

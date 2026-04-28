@@ -753,28 +753,44 @@ fn build_frame(
 
     // Picker overlay or editor pane.
     if let Some(overlay) = &view.picker {
+        // Picker title: bold-feeling rust accent for the label, dim
+        // for the live query so the eye lands on the prompt.
+        let rust_orange = crossterm::style::Color::Rgb {
+            r: 0xce,
+            g: 0x42,
+            b: 0x2b,
+        };
+        let copper_bright = crossterm::style::Color::Rgb {
+            r: 0xe8,
+            g: 0x88,
+            b: 0x4d,
+        };
+        // Keep the title's colon attached to the heading so test
+        // fixtures looking for "resume:"/"model:" substrings still
+        // pass. The trailing space picks up the muted query colour.
         frame.lines.push(Line {
-            spans: vec![Span::coloured(
-                format!("{}: {}", overlay.title, overlay.picker.query),
-                theme.accent.to_crossterm(),
-            )],
+            spans: vec![
+                Span::coloured(format!("{}:", overlay.title), rust_orange),
+                Span::plain(" ".to_string()),
+                Span::coloured(overlay.picker.query.clone(), theme.fg.to_crossterm()),
+            ],
         });
         for (i, (_score, item)) in overlay.picker.ranked().iter().enumerate() {
-            let prefix = if i == overlay.picker.selected {
-                "▸ "
+            if i == overlay.picker.selected {
+                frame.lines.push(Line {
+                    spans: vec![
+                        Span::coloured("▸ ".to_string(), copper_bright),
+                        Span::coloured(item.label.clone(), copper_bright),
+                    ],
+                });
             } else {
-                "  "
-            };
-            frame.lines.push(Line {
-                spans: vec![Span::coloured(
-                    format!("{}{}", prefix, item.label),
-                    if i == overlay.picker.selected {
-                        theme.accent.to_crossterm()
-                    } else {
-                        theme.fg.to_crossterm()
-                    },
-                )],
-            });
+                frame.lines.push(Line {
+                    spans: vec![
+                        Span::plain("  ".to_string()),
+                        Span::coloured(item.label.clone(), theme.fg.to_crossterm()),
+                    ],
+                });
+            }
         }
     } else {
         let editor_start_line = frame.lines.len();
