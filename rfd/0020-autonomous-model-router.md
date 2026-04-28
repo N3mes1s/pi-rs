@@ -1,9 +1,46 @@
 # RFD 0020 — Autonomous model router for pi-rs
 
-- **Status:** Discussion
+- **Status:** Discussion (v1.1)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-28
 - **Implemented:** &lt;pending&gt;
+
+## Revision history
+
+- **v0.5 (44cd15c)** — initial draft. Three-stage pipeline
+  (classifier → cascade w/ always-on judge deferral → TALE-EP
+  budget). New `pi-router` crate. 8 milestones, 6 routes,
+  ~4000 LOC.
+- **v1.0 (6764130)** — applied first critique pass. Two-stage
+  pipeline (classifier → escalate-on-failure), router lives as
+  a module in `pi-agent-core`, TALE-EP demoted to opt-in,
+  3 routes, 4 milestones (~1700 LOC).
+- **v1.1 (this revision)** — applied second critique pass
+  (gpt-5.4 thinking=xhigh, see commit-message body). Findings
+  that mattered:
+  * Stage 2 (escalate-on-failure) is **dropped from v1**.
+    Detection is incomplete (silent semantic failures slip
+    past `FinishReason::Stop`), the stop-reason vocabulary
+    didn't match pi-rs's `FinishReason::*` enum, mid-stream
+    escalation isn't implementable inside the existing
+    `StreamInterceptor` shape, and the M3 LOC estimate was
+    not believable. v1 is now a **measurement-only** ship; v2
+    designs escalation against real failure-distribution data.
+  * `Outcome` and `RoutingContext` had crate-boundary leaks
+    (citing `pi_stats::Connection` / `JudgeVerdict` that
+    `pi-agent-core` cannot depend on). Both reshaped to carry
+    primitives only; adapters live in `pi-coding-agent`.
+  * `cache_hit: bool` replaced with `cache_read_tokens` /
+    `cache_write_tokens: u64` so the router can do real cost
+    math (RFD 0010 already exposes these on `Usage`).
+  * Acceptance criteria reworked: 100 sessions/arm at ±2 pp
+    is statistically impossible (real CI ±13.9 pp, power ~6%).
+    Either ≥1500 sessions/arm or a much wider guardrail.
+  * Test plan paths refreshed (`crates/pi-router/...` →
+    `crates/pi-agent-core/...`). Stale ETH-rule and TALE-hard-
+    cap tests removed.
+  * Citation softening on Anthropic 70-90% and aurelio "single-
+    digit ms" claims.
 
 ## Summary
 
@@ -27,28 +64,47 @@ Fireworks, plus the Ollama compat shim for local models). The
 expensive infrastructure exists; what's missing is the layer
 that decides **which one** to use per request.
 
-This RFD proposes **a three-stage autonomous routing pipeline**
-implemented inside pi-rs:
+This RFD proposes **a single-stage autonomous classifier**
+inside pi-rs, plus the telemetry needed to design escalation
+in v2:
 
-1. **Tier-0 classifier** — a sub-50 ms BERT-or-embedding
+1. **Tier-0 classifier** — a sub-50 ms embedding-cosine
    classifier over a small set of named routes
-   (`trivial-edit`, `single-file`, `multi-file-refactor`,
-   `research`, `reasoning`, `tool-heavy`) that maps each request
-   to a (provider, model, thinking) tuple. Architectural
-   inspiration: vLLM Semantic Router v0.1 "Iris" (98× latency
-   reduction vs. an LLM-as-router) and aurelio-labs's
-   embedding-cosine router (zero-training baseline).
-2. **Cascade with unified deferral** — execute on the cheapest
-   classified tier, run a deferral signal (the existing pi-rs
-   trajectory judge is one source; a FrugalGPT-style DistilBERT
-   scorer is another), and escalate on low confidence. Use the
-   "cascade routing" decision rule from Dekoninck/Baader/Vechev
-   (ETH SRI, ICML 2025) which strictly dominates router-only
-   and cascade-only baselines on RouterBench.
-3. **TALE-EP token-budget self-prediction** — the system prompt
-   asks the executing model to first emit `&lt;budget&gt;N&lt;/budget&gt;`
-   and then answer within it. Zero-training, drops in as a
-   prompt change, reported 45% token reduction.
+   (`fast`, `default`, `hard`) that maps each request to a
+   `(provider, model, thinking)` tuple, plus a `fallback_chain`
+   the *user* can drive manually via `pi --model X` if the
+   classifier picks wrong. Architectural inspiration:
+   aurelio-labs's embedding-cosine router (zero-training
+   baseline) and vLLM Semantic Router v0.1 "Iris" (BERT
+   classifier).
+2. **Telemetry** — every classified request emits a
+   `routing_decision` session entry; `pi-stats` aggregates
+   per-route cost and judge-pass rate. **The data this
+   produces is the input v2 needs to design escalation
+   correctly.**
+
+**No escalation-on-failure in v1.** The v1.0 draft included a
+Stage-2 escalation layer ("walk fallback_chain on parse error /
+non-stop / 5xx"). The second critique surfaced that escalation
+detection is incomplete (silent semantic failures pass through
+with `FinishReason::Stop`), the runtime's `StreamInterceptor`
+hooks only `TextDelta` (not `ToolCallStart` / `ToolInputDelta`),
+and the LOC estimate was unbelievable. We ship v1 as
+measurement-only and design escalation in v2 against real
+failure-distribution data from pi-stats.
+
+**TALE-EP** (token-budget self-prediction) is **opt-in per
+route, telemetry-only**. v1 parses the `&lt;budget&gt;` tag for the
+`(predicted, actual)` pair into pi-stats; the runtime does
+**not** enforce the cap. Whether to enforce in v2 is a
+data-driven decision.
+
+Anthropic's manual 3-tier guidance (Sonnet default, Haiku
+triage, Opus / extended-thinking Sonnet escalation) is the
+**empirical floor** v1 must beat: a learned classifier should
+match or exceed it on cost at iso-quality. The 70-90% cost-
+reduction figure cited by the community is anecdotal — pi-rs
+will measure its own number on its own workload, not assume.
 
 Pi-rs's existing primitives slot in directly: `ModelRegistry`
 becomes the routing target catalogue, `pi-stats` is the
@@ -69,7 +125,9 @@ An audit of the routing-relevant primitives, with file:line
 references, so the proposal can lean on existing code rather
 than re-inventing.
 
-#### Model registry (`crates/pi-ai/src/registry.rs:24-52`)
+#### Model registry (`crates/pi-ai/src/registry.rs`)
+
+The struct (post-RFD 0019) includes:
 
 ```rust
 pub struct ModelInfo {
@@ -91,9 +149,12 @@ pub struct ModelInfo {
 
 Every routing target the router will pick from is already
 described here, with cost fields populated by the RFD-0009
-pricing audit. `ModelRegistry::resolve()` (lines 105-121) is
-the lookup mechanism; the router can call it to validate any
-candidate decision.
+pricing audit. `ModelRegistry::resolve()` is the lookup
+mechanism; the router can call it to validate any candidate
+decision. **Prerequisite for this RFD**: a small additive
+`tier: u8` field on `ModelInfo` (0 for free/local, 1-3 for
+paid tiers) is added in milestone M1 below — used by the
+escalation-on-failure step to walk the `fallback_chain`.
 
 #### Provider dispatch (`crates/pi-ai/src/provider.rs:50-125`)
 
@@ -250,9 +311,11 @@ Full URLs at the bottom of this RFD.
   `ort`/`tract`, no GPU needed.
 * **aurelio-labs/semantic-router**. Embedding-cosine routing:
   each route is a list of utterances, query embedded once,
-  compared to centroids, threshold-decided. Single-digit ms
-  with cached embeddings. Zero training, ships as the v0
-  baseline.
+  compared to centroids, threshold-decided. Low-latency once
+  embeddings/centroids are cached (exact figure depends on
+  embedding backend + hardware — the project's own demo cites
+  single-digit ms; we'll measure on our own deployment).
+  Zero training, ships as the v0 baseline.
 * **RouterBench** (Hu et al., Mar 2024). 405k inference outcomes
   × 64 tasks across an LLM fleet, with a formal cost-quality
   framework: each router is a 2D curve, compared by
@@ -366,16 +429,19 @@ Full URLs at the bottom of this RFD.
   dynamic suffix routing (`:nitro` throughput-sorted, `:floor`
   price-sorted, `:exacto` quality-tuned), auto-fallback on 5xx,
   billed only on success.
-* **Anthropic's official tiering** — "Sonnet default; route
-  easy down to Haiku; escalate hard to Opus" — formalized as a
-  3-tier stack, **reportedly cuts API spend 70-90% in
-  production**. **This is the empirical floor pi-rs's autonomous
-  router must beat.** Cleanest v1 ship: codify this rule, then
-  learn the deviations from pi-stats logs.
+* **Anthropic's tiering guidance** — "Sonnet default; route
+  easy down to Haiku; escalate hard to Opus" is formalized in
+  the platform docs as a 3-tier stack and is widely cited
+  (community-reported "70-90% cost reduction" is a paraphrase,
+  not a documented Anthropic figure — pi-rs measures its own
+  number). This is the empirical floor v1 must beat. Cleanest
+  v1 ship: codify this rule, then learn the deviations from
+  pi-stats logs.
 
 ## Proposal
 
-A three-stage pipeline. Each stage is independently shippable.
+A single-stage classifier in v1, with telemetry plumbing to set
+up v2's escalation design.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -387,41 +453,28 @@ A three-stage pipeline. Each stage is independently shippable.
    ┌─────────────────────────────────────┐
    │  Stage 1: Tier-0 classifier         │
    │  ───────────────────────────────    │
-   │  ModernBERT-style classifier OR     │
-   │  embedding-cosine baseline:         │
-   │    {trivial-edit, single-file,      │
-   │     multi-file, research,           │
-   │     reasoning, tool-heavy}          │
-   │  → (provider, model, ThinkingLevel) │
-   │  + budget: u32                      │
-   │  Sub-50 ms on CPU.                  │
+   │  Embedding-cosine over named routes │
+   │    { fast, default, hard }          │
+   │  → RoutingDecision {                │
+   │      provider, model,               │
+   │      thinking, max_tokens,          │
+   │      route_id, similarity,          │
+   │      fallback_chain (user-driven),  │
+   │      use_tale (per-route opt-in)    │
+   │    }                                │
+   │  Sub-50 ms on CPU, no GPU dep.      │
    └────────────┬────────────────────────┘
                 │
                 ▼
    ┌─────────────────────────────────────┐
-   │  Stage 2: Cascade with deferral      │
+   │  Telemetry                           │
    │  ───────────────────────────────     │
-   │  Run on classified tier.             │
-   │  Trajectory-judge-style scorer       │
-   │  evaluates the result.               │
-   │  Apply ETH unified routing-cascade   │
-   │  rule:                               │
-   │   accept if "likely sufficient";     │
-   │   escalate to next tier if not;      │
-   │   skip tiers if "obviously not       │
-   │    enough" (DP).                     │
-   └────────────┬────────────────────────┘
-                │
-                ▼
-   ┌─────────────────────────────────────┐
-   │  Stage 3: TALE-EP budget enforcement │
-   │  ────────────────────────────────    │
-   │  System prompt instructs the chosen  │
-   │  model:                              │
-   │    "First emit <budget>N</budget>;   │
-   │     then answer within N tokens."    │
-   │  Runtime hard-caps `max_tokens` at   │
-   │  N + safety margin.                  │
+   │  Emit `routing_decision` session     │
+   │  entry. pi-stats aggregates per      │
+   │  route. Trajectory judge runs        │
+   │  post-hoc as today.                  │
+   │  → input data for v2's escalation    │
+   │    design.                           │
    └────────────┬────────────────────────┘
                 │
                 ▼
@@ -429,32 +482,49 @@ A three-stage pipeline. Each stage is independently shippable.
 ```
 
 The pipeline is **opt-in** for v1 (`pi --route auto`), default
-for v2 once empirical Pareto curves on pi-stats data
-demonstrate it beats Anthropic's manual 3-tier rule.
+for v2. v2 is gated on:
+* enough pi-stats data to characterize failure modes (≥1500
+  classified sessions across all three routes), AND
+* an AB-test showing a measurable win on the same workload.
+
+**Stage 2 (escalate-on-failure) is in v2.** The v1.0 design was
+moved to "Future work" because (a) the failure detector misses
+semantic-quality failures with `FinishReason::Stop`,
+(b) `runtime.rs`'s `StreamInterceptor` only hooks `TextDelta`
+not tool-call events, so mid-stream escalation needs the
+runtime's loop redesigned, not a 300-LOC patch, and (c) we
+don't yet know what failure modes actually matter on
+pi-rs traffic — better to measure first.
+
+User can always force a tier with `pi --model X --thinking Y`,
+which bypasses the router entirely. That's the v1 escape hatch.
 
 ### Stage 1: Tier-0 classifier
 
 #### Routes
 
-A small, named, *operator-defined* set. Six routes covers most
-agentic-coding traffic; the system supports adding more without
-retraining (each route is a centroid + threshold over example
-prompts).
+Three routes — `fast`, `default`, `hard`. The embedding-cosine
+classifier's discrimination ceiling on short coding prompts is
+~3 buckets; six was vanity. More routes can be added by users
+in their config without code changes (each route is a centroid
+over example prompts), but v1 ships with three.
 
-| Route id            | Example                                | Default tier            |
-| ------------------- | -------------------------------------- | ----------------------- |
-| `trivial-edit`      | "rename `foo` to `bar` in this file"   | Haiku 4.5 + Off         |
-| `single-file`       | "add a Display impl"                   | Sonnet 4.6 + Low        |
-| `multi-file`        | "extract this trait into its own crate" | Sonnet 4.6 + Medium    |
-| `research`          | "audit OpenAI's Responses API"         | Sonnet 4.6 + Medium + web_search |
-| `reasoning`         | "prove this loop terminates"           | gpt-5.4 Responses + High |
-| `tool-heavy`        | "run the test suite, then fix what fails" | Sonnet 4.6 + Medium  |
+| Route id   | Example                                       | Default tier                |
+| ---------- | --------------------------------------------- | --------------------------- |
+| `fast`     | "rename `foo` to `bar` in this file"          | Haiku 4.5 + Off             |
+| `default`  | "extract this trait into its own crate"       | Sonnet 4.6 + Medium         |
+| `hard`     | "prove this loop terminates"                  | gpt-5.4 Responses + High    |
 
 Defaults are seedable from Anthropic's 3-tier guidance + the
 RFD-0009 pricing audit. The routing table lives in
 `~/.pi/agent/router.toml` (per user) and
 `<repo>/.pi/router.toml` (per repo, takes precedence). Both
 files are observable, hand-editable, and version-controllable.
+
+**Migration invariant**: when no `router.toml` exists, `--route
+static` is functionally identical to today's `--model` /
+`--thinking` flag dispatch. A user upgrading the binary across
+this RFD sees zero behavior change unless they opt in.
 
 #### Implementation choices (ranked)
 
@@ -482,83 +552,128 @@ files are observable, hand-editable, and version-controllable.
 pub struct RoutingDecision {
     pub provider:        String,         // "anthropic"
     pub model:           String,         // "claude-haiku-4-5-..."
-    pub thinking:        ThinkingLevel,  // ThinkingLevel::Off
-    pub max_tokens:      Option<u32>,    // budget for stage 3
-    pub route_id:        String,         // "trivial-edit" — for telemetry
-    pub confidence:      f32,            // 0..1, drives stage 2 deferral
+    pub thinking:        ThinkingLevel,
+    pub max_tokens:      Option<u32>,    // per-route cap, advisory budget
+    pub route_id:        String,         // "fast" — for telemetry
+    pub similarity:      f32,            // raw cosine, NOT a probability
     pub fallback_chain:  Vec<(String, String, ThinkingLevel)>,
+    pub use_tale:        bool,           // opt-in TALE-EP per route
+}
+
+pub struct Outcome {
+    pub cost_usd:           f64,
+    pub latency_ms:         u32,
+    pub stop_reason:        StopReason,
+    pub tool_call_parse_ok: bool,
+    pub max_tokens_overrun: bool,         // true if output > 2× cap
+    pub judge_verdict:      Option<JudgeVerdict>,  // post-hoc only
 }
 ```
 
 The `fallback_chain` is the cascade hierarchy stage 2 climbs
-when the deferral signal fires. The classifier seeds a
-sensible default; user can override per route.
+when escalation fires. The classifier seeds a sensible default;
+user can override per route. `similarity` is **raw cosine
+distance**, not a probability — calibration via Platt scaling
+against pi-stats labels is a v2 concern.
 
-### Stage 2: Cascade with unified deferral
+### Stage 2: deferred to v2 (what we'd build, and why we're not building it now)
 
-The ETH 2024 algorithm: at each step, evaluate two
-probabilities:
+The v1.0 draft proposed an "escalate on concretely-broken
+response" stage. Second critique pass surfaced four unresolved
+issues that together make this premature:
 
-* `p_optimal`: this is the right model
-* `p_sufficient`: this model's answer will pass the deferral
-  test
+1. **Detection completeness.** The failure list (parse error /
+   non-stop / overrun / 5xx) is a good *cost* check but a poor
+   *quality* check. The most common silent failure on a
+   coding-agent workload is "model returned a clean
+   `FinishReason::Stop` with a confident-but-wrong answer";
+   that response slips through. Real escalation needs either
+   (a) a calibrated quality scorer (FrugalGPT DistilBERT or the
+   trajectory judge per-request, both have cost/latency we
+   don't yet know is justified) or (b) a multi-turn user-
+   correction loop, which is its own design.
 
-and pick the model maximizing `(quality - cost · λ) ·
-p_sufficient`. λ is the user's cost-quality tradeoff knob
-(in `~/.pi/agent/router.toml`).
+2. **Vocabulary mismatch.** The v1.0 prose used wire strings
+   (`stop_reason != "end_turn"`) but pi-rs normalizes to
+   `pi_ai::FinishReason::{Stop, ToolUse, Length, Refusal,
+   Aborted, Other}`. The detection logic needs to be re-
+   expressed against the normalized API, which surfaces edge
+   cases (e.g. `FinishReason::ToolUse` is a normal mid-turn
+   state, not a failure).
 
-**Deferral signals**, in order of cost:
+3. **Stream-level abort isn't where the v1.0 RFD said it was.**
+   The runtime's existing `StreamInterceptor::on_text_delta`
+   is the only mid-stream hook; tool-call events are
+   end-of-stream-only. So aborting on a malformed tool call
+   means letting the stream complete, synthesizing an error
+   tool result, and *then* re-prompting on the next tier — a
+   redesign of the runtime loop, not a small patch.
 
-1. **TALE-EP self-consistency** — the model emits its own
-   budget; if it goes over, the deferral fires. Free.
-2. **Trajectory judge** — the existing pi-rs judge (Haiku),
-   reused as a per-request gate rather than post-hoc audit.
-   ~$0.001/check.
-3. **DistilBERT scorer** (FrugalGPT-style) — trained on
-   pi-stats × judge labels offline, deployed via `ort`. ~5 ms
-   inference. Ship in v2 once we have enough labelled data.
+4. **Context-window and history semantics.** A failed first-
+   tier attempt may have emitted partial assistant text + a
+   broken tool call. Escalating to a second tier needs a
+   policy: include the failed attempt in history (consumes
+   window, biases the next model) or strip it (re-cost the
+   prefix). v1.0 didn't choose.
 
-**Cascade tiers**, default chain (overridable):
+**v2 of this RFD owns Stage 2** with a concrete design against
+real pi-stats failure-distribution data collected by v1's
+telemetry. Until then, **the user remains the escalator** via
+`pi --model X` overrides. The classified `RoutingDecision`
+still carries a `fallback_chain: Vec&lt;(provider, model,
+thinking)&gt;` — but in v1 the chain is documentation, not a
+live mechanism.
 
-```
-ollama:tier-0 (free)  →  haiku  →  sonnet  →  opus  →  gpt-5.4 high
-```
+**Local models / Ollama tier-0** is similarly deferred. The
+discovery story is racy (mid-session model adds), tool-call
+schema validation needs to be redesigned (the same gap that
+broke our first integration test), and the cost win is small
+on agentic-coding traffic. Tracked as its own follow-up RFD.
 
-`ollama:tier-0` is **opt-in**: only if `~/.pi/agent/router.toml`
-sets `enable_local = true` AND `GET http://localhost:11434/api/tags`
-returns at least one model. We do not assume Ollama is running.
+### TALE-EP (per-route opt-in, not a stage)
 
-### Stage 3: TALE-EP budget controller
+Demoted from a core stage to a per-route flag because the TALE
+paper's 45-70% token reductions are reported exclusively on
+math-reasoning benchmarks (GSM8K, GSM8K-Zero, MathBench).
+Coding-agent traffic is dominated by tool calls where the
+budget tag is at best uninformative and at worst causes the
+runtime to truncate a partial diff. v1 therefore:
 
-A system-prompt addendum:
+* Ships `use_tale = true` on the `hard` route only.
+* Adds the system-prompt addendum:
+  ```
+  Before answering, on a single line, emit:
+    <budget>N</budget>
+  where N is your best estimate of the token count needed for
+  a high-quality answer. Then answer in at most N tokens.
+  ```
+* Parses the tag for **telemetry only** — emits
+  `(predicted_budget, actual_tokens)` into pi-stats. The
+  runtime does **not** cap on the parsed budget in v1.
+* After 90 days of pi-stats data, the v2 RFD decides whether
+  to enforce the cap, broaden TALE-EP to the `default` route,
+  or remove it.
 
-```
-Before answering, on a single line, emit:
-  <budget>N</budget>
-where N is your best estimate of the token count needed for
-a high-quality answer. Then answer in at most N tokens.
-```
-
-Runtime hard-cap: `max_tokens = parsed_budget + 50` (safety
-margin for the closing tag and accidental over-runs). On parse
-failure, fall back to the route's default `max_tokens`. The
-TALE paper reports 45.3% reduction on average; pi-rs validates
-this on its own workload via pi-stats before turning it on by
-default.
-
-`Thinking::Adaptive` (RFD 0003) **stays**, used in addition to
-TALE-EP — TALE-EP caps the *output*, Adaptive controls
-*reasoning compute*. The two are orthogonal.
+`Thinking::Adaptive` (RFD 0003) is unaffected — Adaptive
+controls *reasoning compute*; TALE-EP (when enforced) caps the
+*output*. The two are orthogonal.
 
 ## Pi-rs concrete design
 
-### New crate: `pi-router`
+### Module: `pi_agent_core::router`
 
-Sits between `pi-coding-agent` and `pi-ai`. Public API:
+**No new crate.** A new `Router` trait + `StaticRouter` +
+`EmbeddingRouter` live in `crates/pi-agent-core/src/router.rs`,
+alongside the existing `RuntimeConfig`. The trajectory-judge-
+based learning piece (deferred to v2) lives in
+`crates/pi-coding-agent/src/evolve/` where the judge already
+sits, avoiding a circular dep.
+
+Public API:
 
 ```rust
 pub trait Router: Send + Sync {
-    /// Pick a model + thinking + budget for this request.
+    /// Pick a model + thinking for this request.
     fn route(
         &self,
         prompt: &str,
@@ -567,31 +682,67 @@ pub trait Router: Send + Sync {
         ctx: &RoutingContext,
     ) -> Result<RoutingDecision>;
 
-    /// Update the router's internal state from a completed
-    /// trajectory (cost, judge verdict, latency). Used for
-    /// online learning / Pareto frontier tracking.
+    /// Post-hoc: record the trajectory's final cost / outcome.
+    /// Drives the v2 LearnedRouter.
     fn observe(&self, decision: &RoutingDecision, outcome: &Outcome);
 }
 
+/// Read-only context the router sees per request. Carries
+/// **primitives only** — no `pi-stats` or `pi-coding-agent`
+/// types, to keep `pi-agent-core` dep-clean. Adapters live
+/// upstream.
 pub struct RoutingContext<'a> {
-    pub registry:     &'a ModelRegistry,
-    pub stats_db:     Option<&'a pi_stats::Connection>,
-    pub user_lambda:  f64,           // cost↔quality tradeoff
-    pub force:        Option<ForceOverride>,
-    pub session_id:   &'a str,
+    pub registry:           &'a ModelRegistry,
+    pub user_lambda:        f64,         // cost↔quality knob (v2)
+    pub force:              Option<ForceOverride>,
+    pub session_id:         &'a str,
+    /// Recent-history cache state from the previous turn's
+    /// `Usage`. Replaces the v1.0 `cache_hit: bool`.
+    pub cache_read_tokens:  u64,
+    pub cache_write_tokens: u64,
+}
+
+/// A normalized post-turn outcome. Carries primitives only;
+/// `pi-coding-agent` adapts judge verdicts into
+/// `quality_score` before calling `Router::observe`.
+pub struct Outcome {
+    pub cost_usd:            f64,
+    pub latency_ms:          u32,
+    pub ttft_ms:             Option<u32>,
+    pub stop_reason:         pi_ai::FinishReason,
+    pub tool_call_parse_ok:  bool,
+    pub max_tokens_overrun:  bool,
+    pub retry_count:         u8,
+    pub reasoning_tokens:    u64,
+    pub cache_read_tokens:   u64,
+    pub cache_write_tokens:  u64,
+    pub quality_score:       Option<f32>,   // 0..1, judge-fed
+    pub final_provider_error:Option<String>,
 }
 ```
 
-Three concrete `Router` implementations, ordered by ship date:
+Two concrete `Router` implementations in v1, ordered by ship
+date:
 
 1. **`StaticRouter`** — reads the routing table directly.
    Equivalent to today's manual model picking but expressed in
-   the router shape. Ships day 0 of this RFD; lets the rest of
-   the runtime integrate without depending on the classifier.
-2. **`EmbeddingRouter`** — Stage 1 + Stage 2 + Stage 3, with
-   the embedding-cosine classifier. Ships in milestone 1.
-3. **`LearnedRouter`** — Stage 1 swapped for the ModernBERT
-   classifier trained on pi-stats. Ships in milestone 2.
+   the router shape. Ships in M1; lets the rest of the runtime
+   integrate without depending on the classifier. Migration-
+   safe: when no `router.toml` exists, behaves identically to
+   today's CLI dispatch.
+2. **`EmbeddingRouter`** — Stage 1 (3 routes). Ships in M2.
+
+Concurrency: `EmbeddingRouter` holds centroids as
+`Arc&lt;Vec&lt;f32&gt;&gt;` and the embedding-model session as `Arc&lt;_&gt;`,
+recomputed only on explicit `Router::reload()` (called when
+`router.toml` mtime changes). No locks on the hot path.
+
+The v0.5 draft's `LearnedRouter` (ModernBERT trained on pi-
+stats) is **deferred to v2**. The bandit problem of learning
+routing decisions from sparse, slow feedback is genuinely
+different from the prose-rewrite problem the evolve daemon was
+designed for; we don't have the labelled trajectories yet, and
+shipping v1 is what creates the data we'd train on.
 
 ### Configuration: `~/.pi/agent/router.toml`
 
@@ -607,13 +758,13 @@ strategy         = "tale-ep"        # "off" | "tale-ep" | "selfbudgeter"
 safety_margin    = 50
 
 [[route]]
-id               = "trivial-edit"
+id               = "fast"
 examples         = [
-  "rename {foo} to {bar}",
-  "add a doc comment to {func}",
-  "remove this println",
+  "rename foo to bar in this file",
+  "add a doc comment to this function",
+  "remove the println at line 42",
 ]
-threshold        = 0.72
+threshold        = 0.55              # raw cosine, similarity-space
 provider         = "anthropic"
 model            = "claude-haiku-4-5-20251001"
 thinking         = "off"
@@ -621,27 +772,39 @@ max_tokens       = 800
 fallback_chain   = ["sonnet:low", "sonnet:medium"]
 
 [[route]]
-id               = "reasoning"
+id               = "default"
 examples         = [
-  "prove that {claim}",
-  "find a counterexample to {prop}",
-  "is this loop guaranteed to terminate?",
+  "extract this trait into its own crate",
+  "audit OpenAI's Responses API and write an RFD",
+  "run the test suite and fix what fails",
 ]
-threshold        = 0.65
+threshold        = 0.50
+provider         = "anthropic"
+model            = "claude-sonnet-4-6"
+thinking         = "medium"
+max_tokens       = 4000
+fallback_chain   = ["opus:medium", "gpt-5.4:high"]
+
+[[route]]
+id               = "hard"
+examples         = [
+  "prove that this loop terminates",
+  "find a counterexample to this invariant",
+  "is the borrow checker sound for this pattern?",
+]
+threshold        = 0.50
 provider         = "openai"
 model            = "gpt-5.4"
 thinking         = "high"
 max_tokens       = 8000
+use_tale         = true              # opt-in TALE-EP, telemetry-only
 fallback_chain   = ["opus:high"]
-
-# … five more routes …
-
-[router.learn]
-flamegraph_path  = "~/.pi/sessions/*/flamegraph.json"
-update_cooldown  = "24h"
-min_samples      = 50
-cost_cap_per_day = 0.50            # USD spent on learning
 ```
+
+The v0.5 draft's `[router.learn]` block (flamegraph_path,
+update_cooldown, cost_cap_per_day) is deferred to v2 with the
+LearnedRouter. The TOML schema is intentionally minimal in v1
+to avoid baking in v2 decisions.
 
 ### Integration points
 
@@ -678,131 +841,210 @@ treats the call as a deferral and escalates.
 
 ## Test plan
 
-1. **`crates/pi-router/tests/embedding_router_routes.rs`** —
-   given a fixed `router.toml` with 6 routes and 5 examples
-   each, hit the router with 30 hand-labelled prompts; assert
-   correct route ≥ 90% of the time. Pure: no network.
-2. **`crates/pi-router/tests/cascade_decision_rule.rs`** — given
-   a fixed (cost, p_optimal, p_sufficient) table for 4 tiers,
-   assert the ETH unified rule returns the cost-optimal tier.
-   Hand-derived golden output.
-3. **`crates/pi-router/tests/tale_ep_budget_extraction.rs`** —
-   feed model output beginning with `<budget>123</budget>...`,
-   assert the runtime hard-cap is applied. Round-trip with
-   parse failures (`<budget>foo</budget>` → fallback to default).
-4. **`crates/pi-router/tests/static_router_compat.rs`** — assert
-   that with `mode = "static"`, the router emits the same
-   decision as today's CLI flag dispatch for 20 sample requests.
-   The router is non-disruptive by default.
-5. **`crates/pi-router/tests/observe_updates_stats.rs`** —
-   `Router::observe()` writes a `routing_decision` SessionEntry,
+All paths refreshed (no more `crates/pi-router/...`). Tests
+that referenced the deleted Stage 2 (ETH cascade rule, TALE-EP
+hard-cap enforcement) are removed; new tests cover the failure
+modes the critique surfaced.
+
+1. **`crates/pi-agent-core/tests/embedding_router_routes.rs`** —
+   given the bundled 3-route default config, hit the router
+   with 30 hand-labelled prompts; assert correct route on the
+   unambiguous prompts and that the ambiguous prompts (debug-
+   ging, semantic review — see Open question 4) deterministi-
+   cally fall to one specific route. No network.
+2. **`crates/pi-agent-core/tests/static_router_compat.rs`** —
+   with `mode = "static"`, the router emits the same decision
+   as today's CLI flag dispatch for 20 sample requests. Pins
+   migration safety.
+3. **`crates/pi-agent-core/tests/router_no_config_falls_back.rs`** —
+   with no `router.toml` present, `Router::route` returns the
+   `RuntimeConfig`'s default model + thinking unchanged.
+4. **`crates/pi-agent-core/tests/router_resolve_failure.rs`** —
+   if a configured route's model isn't in `ModelRegistry`
+   (e.g. a stale `ollama/...` entry), `Router::route` returns
+   `RouterError::UnknownModel(name)` rather than panicking.
+5. **`crates/pi-agent-core/tests/router_force_override.rs`** —
+   `RoutingContext::force = Some(ForceOverride::CliFlag {
+   model, thinking })` short-circuits the classifier and
+   returns the override unchanged.
+6. **`crates/pi-stats/tests/by_route_id_aggregation.rs`** —
+   ingest a synthetic JSONL containing
+   `routing_decision` + `usage` pairs across three routes;
+   assert `dashboard().by_route_id` returns expected counts and
+   per-route mean cost.
+7. **`crates/pi-stats/tests/session_entry_unknown_kind.rs`** —
+   feed a session JSONL containing a `kind: "future_kind"`
+   line; ingestion must **skip the line and continue**, not
+   fail-fast. Pins forward-compatibility for new entry kinds.
+8. **`crates/pi-coding-agent/tests/router_observe_writes_stats.rs`** —
+   `Router::observe(decision, outcome)` writes a SessionEntry,
    `pi_stats::ingest::sync_all` picks it up, `dashboard()`
-   surfaces it in `by_route_id`. End-to-end smoke.
-6. **End-to-end manual** — `pi --route auto -p
-   "rename foo to bar in src/main.rs"` routes to Haiku, costs
-   < $0.001. `pi --route auto -p "prove the borrow checker is
-   sound"` routes to gpt-5.4 high. Both visible in `pi /cost`.
+   surfaces it. End-to-end smoke.
+9. **`crates/pi-coding-agent/tests/tale_ep_budget_telemetry.rs`** —
+   for a route with `use_tale = true`, the parsed `&lt;budget&gt;`
+   is written to telemetry alongside actual `output_tokens`.
+   Runtime does **not** cap; assert `max_tokens` honored
+   verbatim from the route config.
+10. **End-to-end manual** — `pi --route auto -p "rename foo to
+    bar in src/main.rs"` routes to Haiku. `pi --route auto -p
+    "prove the borrow checker is sound for this pattern"`
+    routes to gpt-5.4 with thinking=high. Both visible in
+    `pi /cost`.
 
 ### Empirical validation (post-ship)
 
-* Run RouterBench-style evaluation on pi-stats trajectories:
-  re-emit each historical request through the router with
-  every (route, model) combo, plot the Pareto frontier, assert
-  the router's chosen path is on or near the frontier.
-* AB-test against Anthropic's manual 3-tier rule: 100 sessions
-  with `mode = "static"` (manual tiers), 100 with `mode =
-  "auto"` (learned router). Compare cost, judge-pass rate, and
-  user-reported quality. Target: ≥ 30% cost reduction at
-  iso-quality before flipping `mode = "auto"` to default.
+* Run a RouterBench-shaped evaluation on pi-stats trajec-
+  tories: re-emit each historical request through the router
+  with every (route, model) combo, plot the cost-quality
+  Pareto frontier, assert the router's chosen path lies on or
+  near the frontier.
+* AB-test per the **revised** acceptance criteria above
+  (≥1500 sessions, ≥30% cost reduction, ≤5 pp pass-rate
+  drop, ≤+50 ms TTFT delta).
 
-## Out of scope
+## Out of scope (v1)
 
-* **xRouter-style LLM router** — too expensive at pi-rs's per-
-  request scale; would dominate the cost the router saves.
-* **Speculative decoding** — pi-rs doesn't host its own
-  weights; it dispatches to provider HTTP APIs. If we ever ship
-  a local-first mode, this RFD's `tier:0 = ollama` slot is the
-  natural place to layer spec-decode in via llama.cpp's
-  built-in support.
-* **Multi-round routing (Router-R1)** — the cascade already
-  gives most of the multi-round benefit, and Router-R1's
-  multi-LLM aggregation conflicts with pi-rs's single-stream
-  output contract.
-* **VeriMAP-style planner-emitted VFs per subtask** — the
-  trajectory judge is a single VF over the whole turn, which
-  is enough for v1. Per-subtask VFs are a follow-up RFD.
-* **Per-token streaming budget enforcement** — TALE-EP caps the
-  full response; mid-stream interruption would require provider
-  cooperation we don't have today.
-* **Cross-provider Pareto evaluation harness** — landing
-  RouterBench's harness as a pi-rs CI dependency is its own
-  RFD; for now we emit the cost/quality JSON and keep the plot
-  external.
+Split into two groups: **deferred** items get their own
+follow-up RFD or a v2 of this one when the prerequisite data
+exists; **architecturally rejected** items don't fit pi-rs's
+shape and won't ship at all.
 
-## Open questions
+### Deferred to v2 / follow-up RFDs
 
-1. **Is Anthropic's 3-tier rule strong enough as v1?** The
-   literature suggests learned routers add ~10-30% cost
-   improvement on top, but only after ≥1k labelled trajectories.
-   Pi-stats today has thousands per heavy user; for new users,
-   the manual tiers are the only signal. **Lean: ship
-   `EmbeddingRouter` with manual centroids, gate
-   `LearnedRouter` behind ≥500 trajectories in pi-stats.**
-2. **Where do the routing centroid examples live?** Per-user
+* **Stage 2: escalate-on-failure**. v2 of *this* RFD; designed
+  against pi-stats failure-distribution data captured by v1's
+  telemetry milestone (M3).
+* **ETH cascade-routing decision rule** (calibrated
+  `p_optimal`, `p_sufficient`). v2 of this RFD; needs the
+  labelled-outcome data v1 collects.
+* **`LearnedRouter`** (ModernBERT trained on pi-stats). v2 of
+  this RFD; needs ≥1500 labelled trajectories.
+* **`RoutingMutator` + evolve daemon plumbing**. v2 of this
+  RFD; same data dependency.
+* **TALE-EP hard-cap enforcement**. v2 of this RFD; v1 captures
+  `(predicted_budget, actual_tokens)` pairs to inform whether
+  enforcement helps or hurts on real coding traffic.
+* **Ollama / local tier-0**. Its own follow-up RFD. The
+  discovery race conditions and tool-call schema validation
+  warrant a focused design.
+* **VeriMAP-style per-subtask verification functions**. Its
+  own follow-up RFD; the trajectory judge is one VF over the
+  whole turn — per-subtask VFs need a planner redesign.
+* **PII detection head**. Its own follow-up RFD if needed —
+  taxonomy choice, false-positive economics, and a
+  classifier-bake-off all warrant a focused design.
+* **Cross-provider Pareto evaluation harness** (RouterBench
+  in CI). Its own follow-up RFD; v1 emits the cost/quality
+  JSON, plotting stays external.
+
+### Architecturally rejected
+
+* **xRouter-style LLM-as-router**. Too expensive at pi-rs's
+  per-request scale — the router itself would dominate the
+  cost it's trying to save. (RL-trained 7B routers make sense
+  at SaaS scale, not on a developer laptop.)
+* **Speculative decoding**. Pi-rs doesn't host its own
+  weights; it dispatches over provider HTTP APIs. The
+  technique requires control of the inference loop we don't
+  own.
+* **Multi-round routing (Router-R1)**. Conflicts with pi-rs's
+  single-stream output contract — pi-rs streams one assistant
+  turn at a time, not aggregated multi-LLM responses.
+* **Per-token streaming budget enforcement**. Would require
+  provider cooperation (mid-stream cancellation tied to a
+  semantic budget) that no major provider exposes.
+
+## Open questions (v1)
+
+Critique pass dropped OQ4 (deferral signal cost — answered by
+the Stage-2 redesign) and OQ6 (PII — moved to out-of-scope).
+Remaining:
+
+1. **Where do the routing centroid examples live?** Per-user
    (`~/.pi/agent/router.toml`), per-repo
    (`<repo>/.pi/router.toml`), or bundled defaults
-   (`crates/pi-router/data/default_routes.toml`)? **Lean:
-   bundled defaults override-able by per-repo, override-able by
-   per-user.** Pi-rs precedent matches this (AGENTS.md, agent
-   files).
-3. **Do we expose λ (cost-quality tradeoff) to the user?**
-   `pi --route auto --lambda 2.0` (heavy on quality) vs. the
-   default `1.0`. **Lean: yes; trivial to add and useful.**
-4. **What about the deferral signal cost?** Calling the
-   trajectory judge per request adds latency. **Lean: gate
-   stage 2 by `confidence < 0.85` from stage 1; if the
-   classifier is confident, skip the judge.**
-5. **Budget compliance enforcement** — TALE-EP's hard cap can
-   truncate mid-answer. Do we re-prompt with a higher budget?
-   **Lean: yes, if the response ends mid-token (no stop reason
-   = "stop") and the deferral fires.**
-6. **Multi-tenancy + safety** — should the router refuse to
-   send PII to local models with weaker guardrails?
-   **Lean: yes, Stage 1 includes a PII-detector head (vLLM
-   Iris already does this); on positive detection, force the
-   tier ≥ 1 paid path.**
-7. **Compatibility with subagents that pin a model.** Today
-   `.pi/agents/code-reviewer.md` says `model: gpt-5.4`. **Lean:
-   pinned model = force override; the router does not second-
-   guess the agent author.**
+   (`crates/pi-agent-core/data/default_routes.toml`)? **Lean:
+   bundled defaults override-able by per-repo, override-able
+   by per-user.** Pi-rs precedent matches this (AGENTS.md,
+   agent files).
+2. **Do we expose λ (cost-quality tradeoff) to the user?**
+   `pi --route auto --lambda 2.0`. **Lean: yes; trivial,
+   useful, but only meaningful once Stage 2 has a calibrated
+   confidence signal in v2 — for v1 it's an unused field on
+   `RoutingContext` reserved for the v2 surface.**
+3. **Compatibility with subagents that pin a model.** Today
+   `.pi/agents/code-reviewer.md` says `model: gpt-5.4`. The
+   precedence ladder when both an agent file and a route apply:
+   * `--model` CLI flag → wins everything (force override).
+   * Agent frontmatter `model:` → wins over the router.
+   * `--route` decision → applies if no force override.
+   * Settings.json `default_model` → fallback if no router.
+   **Lean: spell this out in the docstring on `Router::route`.**
+4. **Embedding-model distribution.** `gte-small` ONNX is ~140
+   MB. Bundle in the binary (size jump), download on first run
+   (offline-mode regression), or require user provisioning?
+   **Lean: download on first run with a clean error if offline,
+   plus a `pi router fetch-embeddings` command.**
+5. **`pi /route` UI affordance.** v0.5 critique flagged the
+   asymmetric failure cost: routing a hard prompt to Haiku
+   produces a fast wrong answer the user trusts because the UI
+   is silent. **Lean: ship a `pi /route` slash command that
+   shows the last decision + a one-key escalation
+   (`pi /route up`).**
+6. **What about the `off` mode?** v0.5 listed `mode = "off"`
+   in the TOML enum but didn't wire it. **Lean: `off` skips
+   the trait entirely — the runtime checks the mode flag and,
+   if `off`, dispatches as today without ever calling
+   `Router::route`. Test 4 in §Test plan pins this.**
+7. **Provider rate-limit awareness in `cascade_step`.** Should
+   429s short-circuit the chain to the next provider rather
+   than the next tier? **Lean: yes. `Outcome.stop_reason` gains
+   a `RateLimited(provider)` variant; `cascade_step` skips any
+   chain entry on the rate-limited provider for the rest of
+   the session.**
 
 ## Implementation plan
 
-This RFD splits naturally into milestones, each shippable
-independently and dogfood-able through pi-rs's own evolve loop.
+v1 ships in **three milestones**. Total: ~1300 LOC, expected
+$2 in dogfood spend.
 
-| Milestone | Worktree                        | Scope                                                                                                              | Est. LOC |
-| --------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------ | -------- |
-| **M1**    | `claude/router-static`          | New `pi-router` crate. `Router` trait + `StaticRouter`. Reads `router.toml`. `--route static` flag wired in CLI.    | ~500     |
-| **M2**    | `claude/router-classifier`      | Embedding-cosine classifier. `EmbeddingRouter`. Ships with default 6-route bundle. `--route auto` is now valid.   | ~700     |
-| **M3**    | `claude/router-cascade`         | ETH unified routing-cascade decision rule + judge integration as deferral signal. Cascade tier descent.            | ~600     |
-| **M4**    | `claude/router-tale-ep`         | TALE-EP system-prompt addendum + budget extractor + runtime hard-cap. Off by default; turn on per-route in TOML.   | ~250     |
-| **M5**    | `claude/router-stats`           | `pi-stats` extensions: `by_route_id`, dashboard panel, `routing_decision` SessionEntry kind, flamegraph annotation. | ~400     |
-| **M6**    | `claude/router-evolve`          | `RoutingMutator` + plumbing into the evolve daemon. AGENTS.md gains a routing section.                              | ~500     |
-| **M7**    | `claude/router-learned`         | ModernBERT-style classifier head trained on pi-stats. Replaces the embedding classifier when `≥500` samples.        | ~600     |
-| **M8**    | `claude/router-ollama-tier0`    | Local-model discovery, tool-call validator, fall-through escalation.                                                | ~400     |
+| Milestone | Worktree                       | Scope                                                                                                                                                                                       | Est. LOC |
+| --------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| **M1**    | `claude/router-static`         | `Router` trait + `Outcome` + `RoutingContext` + `StaticRouter` in `pi_agent_core::router`. Adds `tier: u8` to `ModelInfo`. Reads `router.toml`. `--route static` flag. Migration-safe.        | ~600 |
+| **M2**    | `claude/router-classifier`     | `EmbeddingRouter`. `gte-small` ONNX downloaded on first run (`pi router fetch-embeddings`), not bundled in binary. 3-route default bundle. `--route auto` flag.                              | ~700 |
+| **M3**    | `claude/router-stats`          | `pi-stats` extensions: `by_route_id` aggregation, `routing_decision` SessionEntry kind (with `unknown ⇒ skip` forward-compatibility), dashboard panel. TALE-EP telemetry-only on `hard` route. | ~400 |
 
-Each milestone follows the established pi-rs dogfood pattern
-(RFD 0011 / 0019): branch from main, implement on Opus 4.7 in
-a worktree, generate a commit message that fully documents
-the diff, push for review by the bundled `code-reviewer`
-subagent (now functional on `gpt-5.4` after RFD 0019 landed),
-merge via the generic merge orchestrator. Total: roughly
-~4000 LOC across 8 worktrees, expected ~$5–10 in dogfood spend.
+**v1.0 draft's M3 (`router-escalate`)** is removed. Stage 2 is
+in v2 of this RFD, designed against real failure-distribution
+data from the M3 telemetry above.
 
-The order is dependency-first (M1 unlocks everything; M2
-unlocks M3-4; M5 unlocks M7) but M4 (TALE-EP) and M6 (evolve
-plumbing) can run in parallel with M3.
+**v0.5 draft's M5/M6/M7 (RoutingMutator, LearnedRouter, Ollama
+tier-0)** stay deferred. They need data v1 hasn't generated yet.
+
+Order: M1 unlocks M2 and M3. M2 and M3 can run in parallel.
+
+### Acceptance criteria for v1 → v2 flip
+
+The v1.0 draft proposed "100 sessions/arm with judge pass-rate
+within ±2 pp." The second critique noted this is statistically
+indefensible: 95% CI on a 100/arm pass-rate difference is
+~±13.9 pp, power to detect a true 2 pp difference is ~6%. The
+revised criteria:
+
+* **Volume gate**: ≥1500 classified sessions across all three
+  routes recorded in pi-stats.
+* **Cost win**: `--route auto` ≤ 0.7× `--route static` 30-day
+  rolling cost on the same workload (Pareto-frontier
+  evaluation per RouterBench shape).
+* **Quality guardrail**: judge pass-rate ≥ static baseline
+  − 5 pp, sustained over the 30-day window (a wider, honest
+  guardrail given the realistic sample size).
+* **Latency guardrail**: median TTFT no worse than +50 ms
+  (the classifier's budget).
+
+When all four hold, flip the default to `auto` and start
+designing v2 escalation against the captured pi-stats failure
+distribution.
 
 ## References
 
