@@ -170,6 +170,53 @@ The JSON shape exists so `--evolve` (and your own scripts) can ingest
 trajectory shape without parsing HTML. See
 [RFD 0012](rfd/0012-judge-context-and-flamegraph-json.md).
 
+## Autonomous router
+
+```sh
+pi --route off          # bypass routing entirely; use --provider/--model verbatim
+pi --route static       # default — your --model wins, no per-prompt re-dispatch
+pi --route auto         # embed each prompt, pick the cheapest route that fits
+pi --route learned      # bandit over auto's choices (RFD 0020 §Stage 2 stub)
+```
+
+`--route auto` classifies each user turn against three built-in routes
+and dispatches accordingly:
+
+| Route | Provider/model | Thinking | Picks for prompts like |
+| --- | --- | --- | --- |
+| `fast` | anthropic / claude-haiku-4-5 | off | "rename foo to bar", "add a doc comment", trivial diffs |
+| `default` | anthropic / claude-sonnet-4-6 | medium | "extract this trait", "run tests and fix what fails", normal coding work |
+| `hard` | openai / gpt-5.4 | xhigh | "prove this loop terminates", borrow-checker / unsafe / soundness questions |
+
+Routing fires **per turn**, not just once at session start — the
+`runtime` re-classifies each user message (plus the last 4 history
+turns + the available tool list) and may switch models mid-session.
+Every decision lands in the session JSONL as a `routing_decision`
+entry, which `pi --stats` aggregates as `by_route_id` (decisions,
+distinct sessions, average TALE-EP budget).
+
+Manual overrides on top of `--route auto`:
+
+```sh
+pi --route auto -m sonnet            # pin the model; thinking still routed
+pi --route auto --thinking xhigh     # pin thinking; model still routed
+pi --route auto -m sonnet --thinking high  # both pinned, route_id=forced
+```
+
+**TALE-EP budgets** (telemetry-only on the `hard` route): inline a
+`<budget>N</budget>` tag in your prompt and the parsed `N` is stamped
+on the `routing_decision` entry as `budget_tokens`. The runtime never
+enforces it; it just makes the budget visible to `pi --stats` so you
+can see how much of the hard-route spend is actually budgeted by you
+vs. unbounded.
+
+The auto router ships a hashed-similarity classifier today
+(RFD 0020 v1.1 §Stage 1 — accepts hashed embeddings as a v1
+implementation). The bundled `gte-small.onnx` model lives at
+`~/.pi/agent/embeddings/gte-small.onnx` for forward-compat with
+real ONNX inference; fetch it with `pi router fetch-embeddings`.
+See [RFD 0020](rfd/0020-autonomous-model-router.md).
+
 ## Evolve
 
 The evolve daemon reads recorded `Outcome` entries from your sessions,
