@@ -154,13 +154,27 @@ async fn context_load_emitted_once_before_first_user_entry() {
     assert!(sources.iter().any(|s| s.ends_with("AGENTS.md")));
     assert!(sources.iter().any(|s| s.ends_with("CLAUDE.md")));
 
-    // tokens estimated as bytes/4 (rounded up).
+    // tokens come from the real BPE tokenizer (RFD 0014), not the
+    // RFD 0012 bytes/4 heuristic. Sanity-check the count is positive
+    // and not exactly bytes/4 for at least one fixture (regression
+    // guard that the real tokenizer is plumbed in).
+    let mut saw_non_bytes_div_4 = false;
     for e in &context_loads {
         if let SessionEntryKind::ContextLoad { bytes, tokens, .. } = &e.kind {
-            let expected = (*bytes).div_ceil(4);
-            assert_eq!(*tokens, Some(expected));
+            let t = tokens.expect("tokens populated");
+            assert!(t > 0, "expected non-zero tokens for {bytes} bytes");
+            if t != *bytes / 4 && t != (*bytes).div_ceil(4) {
+                saw_non_bytes_div_4 = true;
+            }
         }
     }
+    // "hello world" (11 bytes) → cl100k says 2 tokens, bytes/4 = 2,
+    // they match. "another file" (12 bytes) → cl100k says 2,
+    // bytes/4 = 3, so this fires.
+    assert!(
+        saw_non_bytes_div_4,
+        "at least one ContextLoad should differ from bytes/4 once the real tokenizer is plumbed in"
+    );
 
     // Ordering: every ContextLoad sits before the first User entry.
     let first_user_idx = branch
