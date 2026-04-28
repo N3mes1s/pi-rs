@@ -561,6 +561,24 @@ impl AgentSession {
                 &self.id,
                 SessionEntryKind::Assistant { message: assistant_msg.clone() },
             );
+            // Persist the per-turn token / cost roll-up so trajectory
+            // recorders + pi-stats ingest can attribute spend back to
+            // this exact assistant turn. Skipped when the provider
+            // didn't emit a non-zero Usage (e.g. transport error
+            // before message_delta).
+            if usage_total.input_tokens
+                | usage_total.output_tokens
+                | usage_total.cache_read_tokens
+                | usage_total.cache_write_tokens
+                | usage_total.reasoning_tokens
+                != 0
+                || usage_total.cost_usd > 0.0
+            {
+                let _ = self.cfg.session_manager.append(
+                    &self.id,
+                    SessionEntryKind::Usage { usage: usage_total.clone() },
+                );
+            }
             self.emit(AgentEventKind::AssistantMessage { message: assistant_msg.clone() }).await;
             last_assistant = Some(assistant_msg);
 
