@@ -1,14 +1,43 @@
-//! Cost computation helper (RFD 0008 + 0010).
+//! Cost computation helper (RFD 0008 + 0010 + 0015).
 //!
-//! Lives outside `provider/anthropic.rs` so OpenAI / Google / Bedrock can
-//! share it once they get their RFD-0008-style `Usage` population.
+//! `UsageAcc` is the shared cumulative-usage accumulator threaded through
+//! every provider's stream loop; `compute_cost` and `UsageAcc::into_usage`
+//! are the canonical helpers for turning that accumulator into a
+//! billable `Usage` record.
 //!
 //! Cache traffic is billed per-row when `cache_read_cost_per_mtok` /
 //! `cache_write_cost_per_mtok` are populated; rows that omit them inherit
 //! `input_cost_per_mtok` (the RFD-0008 fallback path).
 
-use crate::provider::anthropic::UsageAcc;
+use crate::message::Usage;
 use crate::registry::ModelInfo;
+
+/// Cumulative usage accumulated across stream chunks.
+///
+/// Lives here (rather than next to a single provider) so OpenAI / Google /
+/// Bedrock / Anthropic all share one struct (RFD 0015).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct UsageAcc {
+    pub input_tokens: u64,
+    pub cache_read_tok: u64,
+    pub cache_write_tok: u64,
+    pub output_tokens: u64,
+    pub reasoning_tok: u64,
+}
+
+impl UsageAcc {
+    /// Materialise the accumulator into a `Usage` event with cost filled in.
+    pub fn into_usage(self, model: &ModelInfo) -> Usage {
+        Usage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cache_read_tokens: self.cache_read_tok,
+            cache_write_tokens: self.cache_write_tok,
+            reasoning_tokens: self.reasoning_tok,
+            cost_usd: compute_cost(model, &self),
+        }
+    }
+}
 
 /// Compute USD cost for a streamed turn given its accumulated usage.
 ///

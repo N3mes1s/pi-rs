@@ -5,11 +5,12 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::auth::AuthMethod;
-use crate::message::{ContentBlock, FinishReason, Role, ThinkingLevel, Usage};
+use crate::message::{ContentBlock, Role, ThinkingLevel};
 use crate::registry::{ModelInfo, ProviderConfig};
 use crate::stream::{StreamEvent, StreamEventKind};
 use crate::{AiError, GenerateRequest, Result};
 
+use super::anthropic_stream::{handle_anthropic_event, ToolAcc};
 use super::{EventStream, Provider};
 
 pub struct AnthropicProvider {
@@ -18,16 +19,7 @@ pub struct AnthropicProvider {
     pub client: Client,
 }
 
-pub use crate::cost::compute_cost;
-
-#[derive(Default, Clone, Copy)]
-pub struct UsageAcc {
-    pub input_tokens: u64,
-    pub cache_read_tok: u64,
-    pub cache_write_tok: u64,
-    pub output_tokens: u64,
-    pub reasoning_tok: u64,
-}
+pub use crate::cost::{compute_cost, UsageAcc};
 
 impl AnthropicProvider {
     pub fn new(config: ProviderConfig, auth: AuthMethod) -> Self {
@@ -182,8 +174,7 @@ impl Provider for AnthropicProvider {
 
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
-        let tool_inputs: std::collections::HashMap<u32, (String, String, String)> =
-            std::collections::HashMap::new();
+        let tool_inputs: ToolAcc = std::collections::HashMap::new();
 
         let model_owned = model.clone();
         let s = stream::unfold(
@@ -212,172 +203,25 @@ impl Provider for AnthropicProvider {
                             Err(_) => continue,
                         };
                         let etype = data.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                        match etype {
-                            "message_start" => {
-                                if let Some(u) =
-                                    data.get("message").and_then(|m| m.get("usage"))
-                                {
-                                    usage_running.input_tokens = u
-                                        .get("input_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
-                                    usage_running.cache_read_tok = u
-                                        .get("cache_read_input_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
-                                    usage_running.cache_write_tok = u
-                                        .get("cache_creation_input_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0);
-                                }
-                                return Some((
-                                    Ok(StreamEvent::new(StreamEventKind::MessageStart)),
-                                    (es, acc, false, usage_running),
-                                ));
+                        if let Some(kind) = handle_anthropic_event(
+                            etype,
+                            &data,
+                            &mut acc,
+                            &mut usage_running,
+                            &model_owned,
+                        ) {
+                            let terminal = matches!(etype, "message_stop");
+                            if terminal {
+                                done = true;
+                                let _ = done;
                             }
-                        "content_block_start" => {
-                            let idx = data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            let block = data.get("content_block").cloned().unwrap_or(Value::Null);
-                            if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                                let id = block
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let name = block
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                acc.insert(idx, (id.clone(), name.clone(), String::new()));
-                                return Some((
-                                    Ok(StreamEvent::new(StreamEventKind::ToolCallStart {
-                                        id,
-                                        name,
-                                    })),
-                                    (es, acc, false, usage_running),
-                                ));
-                            }
-                        }
-                        "content_block_delta" => {
-                            let idx = data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            let delta = data.get("delta").cloned().unwrap_or(Value::Null);
-                            match delta.get("type").and_then(|v| v.as_str()) {
-                                Some("text_delta") => {
-                                    let t = delta
-                                        .get("text")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    return Some((
-                                        Ok(StreamEvent::new(StreamEventKind::TextDelta { text: t })),
-                                        (es, acc, false, usage_running),
-                                    ));
-                                }
-                                Some("thinking_delta") => {
-                                    let t = delta
-                                        .get("thinking")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    return Some((
-                                        Ok(StreamEvent::new(StreamEventKind::ThinkingDelta {
-                                            text: t,
-                                        })),
-                                        (es, acc, false, usage_running),
-                                    ));
-                                }
-                                Some("input_json_delta") => {
-                                    let partial = delta
-                                        .get("partial_json")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    if let Some((id, _, buf)) = acc.get_mut(&idx) {
-                                        buf.push_str(&partial);
-                                        return Some((
-                                            Ok(StreamEvent::new(StreamEventKind::ToolInputDelta {
-                                                id: id.clone(),
-                                                partial_json: partial,
-                                            })),
-                                            (es, acc, false, usage_running),
-                                        ));
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        "content_block_stop" => {
-                            let idx = data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            if let Some((id, name, buf)) = acc.remove(&idx) {
-                                let input = if buf.is_empty() {
-                                    Value::Object(serde_json::Map::new())
-                                } else {
-                                    serde_json::from_str(&buf).unwrap_or(Value::Null)
-                                };
-                                return Some((
-                                    Ok(StreamEvent::new(StreamEventKind::ToolCallComplete {
-                                        id,
-                                        name,
-                                        input,
-                                    })),
-                                    (es, acc, false, usage_running),
-                                ));
-                            }
-                        }
-                        "message_delta" => {
-                            if let Some(usage) = data.get("usage") {
-                                usage_running.output_tokens = usage
-                                    .get("output_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(usage_running.output_tokens);
-                                let final_usage = Usage {
-                                    input_tokens: usage_running.input_tokens,
-                                    output_tokens: usage_running.output_tokens,
-                                    cache_read_tokens: usage_running.cache_read_tok,
-                                    cache_write_tokens: usage_running.cache_write_tok,
-                                    reasoning_tokens: usage_running.reasoning_tok,
-                                    cost_usd: compute_cost(&model_owned, &usage_running),
-                                };
-                                return Some((
-                                    Ok(StreamEvent::new(StreamEventKind::Usage {
-                                        usage: final_usage,
-                                    })),
-                                    (es, acc, false, usage_running),
-                                ));
-                            }
-                            if let Some(reason) = data
-                                .get("delta")
-                                .and_then(|d| d.get("stop_reason"))
-                                .and_then(|v| v.as_str())
-                            {
-                                let r = match reason {
-                                    "tool_use" => FinishReason::ToolUse,
-                                    "end_turn" => FinishReason::Stop,
-                                    "max_tokens" => FinishReason::Length,
-                                    "refusal" => FinishReason::Refusal,
-                                    _ => FinishReason::Other,
-                                };
-                                return Some((
-                                    Ok(StreamEvent::new(StreamEventKind::Finish { reason: r })),
-                                    (es, acc, false, usage_running),
-                                ));
-                            }
-                        }
-                        "message_stop" => {
-                            done = true;
-                            let _ = done;
                             return Some((
-                                Ok(StreamEvent::new(StreamEventKind::Finish {
-                                    reason: FinishReason::Stop,
-                                })),
-                                (es, acc, true, usage_running),
+                                Ok(StreamEvent::new(kind)),
+                                (es, acc, terminal, usage_running),
                             ));
                         }
-                        _ => {}
                     }
-                }
-                None
+                    None
                 }
             },
         );

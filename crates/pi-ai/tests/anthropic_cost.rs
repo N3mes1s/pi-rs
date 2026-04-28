@@ -2,7 +2,6 @@
 
 use pi_ai::provider::anthropic::{compute_cost, UsageAcc};
 use pi_ai::registry::ModelInfo;
-
 fn opus_4_7() -> ModelInfo {
     ModelInfo {
         provider: "anthropic".into(),
@@ -117,4 +116,26 @@ fn cache_fields_none_falls_back_to_input_rate() {
     let cost = compute_cost(&model, &u);
     // 1M @ 5.0 + 1M @ 5.0 = 10.0
     assert!((cost - 10.0).abs() < 1e-9, "got {cost}");
+}
+
+// --- RFD 0015: UsageAcc::into_usage round-trip ------------------------
+
+#[test]
+fn into_usage_matches_compute_cost_directly() {
+    let model = opus_4_7();
+    let acc = UsageAcc {
+        input_tokens: 1_000_000,
+        output_tokens: 1_000_000,
+        cache_read_tok: 1_000_000,
+        cache_write_tok: 0,
+        reasoning_tok: 0,
+    };
+    let direct = compute_cost(&model, &acc);
+    let usage = acc.into_usage(&model);
+    assert!((usage.cost_usd - direct).abs() < 1e-9, "cost mismatch");
+    assert_eq!(usage.input_tokens, 1_000_000);
+    assert_eq!(usage.output_tokens, 1_000_000);
+    assert_eq!(usage.cache_read_tokens, 1_000_000);
+    assert_eq!(usage.cache_write_tokens, 0);
+    assert_eq!(usage.reasoning_tokens, 0);
 }
