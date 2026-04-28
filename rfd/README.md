@@ -43,3 +43,4 @@ crosses crate boundaries.
 | 0009 | Audit + calibrate the model pricing table        | Discussion |
 | 0010 | Differential cache pricing in `compute_cost`     | Discussion |
 | 0011 | Self-dogfood pi-rs (AGENTS.md + evolve + flamegraph) | Discussion |
+| 0012 | Trajectory judge context-awareness + flamegraph JSON | Discussion |
