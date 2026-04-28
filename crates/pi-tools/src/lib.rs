@@ -18,6 +18,7 @@ pub mod edit;
 pub mod find;
 pub mod grep;
 pub mod ls;
+pub mod monitor;
 pub mod read;
 pub mod web_search;
 pub mod write;
