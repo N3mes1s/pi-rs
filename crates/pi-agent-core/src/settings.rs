@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Settings persisted to `~/.pi/agent/settings.json` (with project overrides
@@ -46,6 +47,42 @@ pub struct Settings {
     /// Autonomous AGENTS.md evolution daemon settings.
     #[serde(default)]
     pub evolve: EvolveSettings,
+    /// Native LSP integration settings (D1 / H5). Mirror of
+    /// `pi_coding_agent::native::lsp::LspConfig` — kept in this crate to
+    /// avoid a dependency cycle. The coding-agent crate converts via
+    /// `From<&LspSettings>` at startup.
+    #[serde(default)]
+    pub lsp: LspSettings,
+    /// Subagent (`task` tool) settings — fan-out cap and per-agent
+    /// model overrides. See `pi_coding_agent::native::task` (RFD 0005).
+    #[serde(default)]
+    pub task: TaskSettings,
+}
+
+/// Configuration for the `task` tool / subagent system. Lives here so
+/// `Settings` is self-contained; consumed by
+/// `pi_coding_agent::native::task`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskSettings {
+    /// Default subagent fan-out cap (matches oh-my-pi).
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: usize,
+    /// Per-agent overrides — agent name → model id/alias.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_models: BTreeMap<String, String>,
+}
+
+impl Default for TaskSettings {
+    fn default() -> Self {
+        Self {
+            max_concurrency: default_max_concurrency(),
+            agent_models: BTreeMap::new(),
+        }
+    }
+}
+
+fn default_max_concurrency() -> usize {
+    5
 }
 
 /// Configuration for the autonomous evolution loop (G8).
@@ -201,12 +238,87 @@ impl Default for Settings {
             scoped_models: false,
             roles: ModelRoles::default(),
             evolve: EvolveSettings::default(),
+            lsp: LspSettings::default(),
+            task: TaskSettings::default(),
         }
     }
 }
 
 fn default_provider() -> String {
     "anthropic".into()
+}
+
+/// Mirror of `pi_coding_agent::native::lsp::LspConfig`. Lives in
+/// pi-agent-core so `Settings` can hold it without taking a dependency
+/// on the coding-agent crate. The defaults here must stay in sync with
+/// `LspConfig::default()` (master switch off, format-on-write off,
+/// diagnostics-on-write on).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LspSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub format_on_write: bool,
+    #[serde(default = "default_lsp_diagnostics_on_write")]
+    pub diagnostics_on_write: bool,
+    #[serde(default)]
+    pub languages: std::collections::BTreeMap<String, LspLanguageSettings>,
+}
+
+impl Default for LspSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            format_on_write: false,
+            diagnostics_on_write: default_lsp_diagnostics_on_write(),
+            languages: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+fn default_lsp_diagnostics_on_write() -> bool {
+    true
+}
+
+/// Per-language override block for `LspSettings`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LspLanguageSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    /// Override the `FormattingOptions` block sent with
+    /// `textDocument/formatting`. Missing fields inherit the hardcoded
+    /// engine defaults (tab_size=4, insert_spaces=true, trim/newline=true).
+    /// RFD 0007.
+    #[serde(default, skip_serializing_if = "FormattingOptions::is_empty")]
+    pub format_options: FormattingOptions,
+}
+
+/// Per-language override of LSP `FormattingOptions` (LSP 3.17 §3.17.13).
+/// Each `None` field falls back to the engine default. RFD 0007.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FormattingOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_spaces: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_trailing_whitespace: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_final_newline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_final_newlines: Option<bool>,
+}
+
+impl FormattingOptions {
+    pub fn is_empty(&self) -> bool {
+        self.tab_size.is_none()
+            && self.insert_spaces.is_none()
+            && self.trim_trailing_whitespace.is_none()
+            && self.insert_final_newline.is_none()
+            && self.trim_final_newlines.is_none()
+    }
 }
 
 fn default_model() -> String {

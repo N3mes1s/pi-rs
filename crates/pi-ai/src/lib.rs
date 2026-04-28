@@ -6,12 +6,14 @@
 //! quirks.
 
 pub mod auth;
+pub mod cost;
 pub mod discover;
 pub mod message;
 pub mod oauth;
 pub mod provider;
 pub mod registry;
 pub mod stream;
+pub mod tokenizer;
 pub mod tool;
 
 pub use auth::{AuthMethod, AuthStorage};

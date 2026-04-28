@@ -186,6 +186,7 @@ impl AgentSessionRuntime {
                 model: cfg.settings.model.clone(),
                 thinking: cfg.settings.thinking.into(),
                 tools: cfg.tools.clone(),
+                context_loads_emitted: false,
             })),
             cfg,
         })
@@ -232,6 +233,9 @@ impl AgentSessionRuntime {
                 model: meta.model,
                 thinking: cfg.settings.thinking.into(),
                 tools: cfg.tools.clone(),
+                // Reopened sessions: assume any context_files emit
+                // happened on first creation. Don't double-emit.
+                context_loads_emitted: true,
             })),
             cfg,
         })
@@ -255,6 +259,10 @@ struct AgentSessionInner {
     model: String,
     thinking: ThinkingLevel,
     tools: ToolRegistry,
+    /// One-shot guard for emitting [`SessionEntryKind::ContextLoad`]
+    /// entries: the runtime walks `cfg.context_files` exactly once per
+    /// session (before the first user turn) and flips this to `true`.
+    context_loads_emitted: bool,
 }
 
 impl AgentSession {
@@ -378,6 +386,34 @@ impl AgentSession {
     }
 
     pub async fn prompt(&self, user_text: String) -> Result<Message, RuntimeError> {
+        // RFD 0012 Part A: emit one ContextLoad JSONL entry per
+        // discovered context file, exactly once per session, before the
+        // very first User entry. Downstream consumers (the trajectory
+        // judge, the flamegraph, evolve) need this to know the agent
+        // *had* AGENTS.md / CLAUDE.md in its system prompt.
+        let emit_context_loads = {
+            let mut g = self.inner.lock().await;
+            if g.context_loads_emitted {
+                false
+            } else {
+                g.context_loads_emitted = true;
+                true
+            }
+        };
+        if emit_context_loads {
+            for ctx in &self.cfg.context_files {
+                let bytes = ctx.content.len() as u64;
+                let _ = self.cfg.session_manager.append(
+                    &self.id,
+                    SessionEntryKind::ContextLoad {
+                        source: ctx.path.display().to_string(),
+                        bytes,
+                        tokens: Some(pi_ai::tokenizer::count_default(&ctx.content)),
+                    },
+                );
+            }
+        }
+
         let user_msg = Message::user_text(user_text);
         {
             let mut g = self.inner.lock().await;
@@ -561,6 +597,24 @@ impl AgentSession {
                 &self.id,
                 SessionEntryKind::Assistant { message: assistant_msg.clone() },
             );
+            // Persist the per-turn token / cost roll-up so trajectory
+            // recorders + pi-stats ingest can attribute spend back to
+            // this exact assistant turn. Skipped when the provider
+            // didn't emit a non-zero Usage (e.g. transport error
+            // before message_delta).
+            if usage_total.input_tokens
+                | usage_total.output_tokens
+                | usage_total.cache_read_tokens
+                | usage_total.cache_write_tokens
+                | usage_total.reasoning_tokens
+                != 0
+                || usage_total.cost_usd > 0.0
+            {
+                let _ = self.cfg.session_manager.append(
+                    &self.id,
+                    SessionEntryKind::Usage { usage: usage_total.clone() },
+                );
+            }
             self.emit(AgentEventKind::AssistantMessage { message: assistant_msg.clone() }).await;
             last_assistant = Some(assistant_msg);
 

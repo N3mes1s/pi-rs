@@ -234,15 +234,33 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         // and a structured `display.ask` payload otherwise (the TUI picker
         // wiring is still pending).
         tools.register(Arc::new(crate::native::ask::AskTool));
-        // Native lsp tool (D1). Inert by default — the master switch in
-        // `LspConfig::default()` is off, so the engine won't spawn any
-        // language servers until a user opts in (currently via
-        // per-process config; settings.toml wiring is a follow-up). The
-        // tool itself is always registered so the agent can at least
-        // call the `status` op and see "no servers running".
+        // RFD 0005: subagents + `task` tool. Always registered when
+        // tools are enabled — discovery (project / user / bundled)
+        // happens lazily on the first invocation. The host must wrap
+        // its `session.prompt(...)` call in
+        // `crate::native::task::tool::with_runtime(handle, …)` for
+        // the tool to find a parent handle; otherwise the call returns
+        // a clean `is_error: true` result.
+        tools.register(Arc::new(crate::native::task::TaskTool::new()));
+        // Native lsp tool (D1 + H5). Wired through `Settings::lsp` so
+        // users opt in via the `lsp` block in settings.json. Defaults
+        // keep the master switch off; the tool stays registered so the
+        // agent can call the `status` op and see "no servers running"
+        // when LSP is disabled.
+        let lsp_cfg = crate::native::lsp::LspConfig::from(&settings.lsp);
         tools.register(Arc::new(crate::native::lsp::LspTool::new(
-            crate::native::lsp::LspConfig::default(),
+            lsp_cfg.clone(),
         )));
+        // RFD 0001: when LSP is enabled, swap the bare `write` tool
+        // for the wrapper that fires `format_on_write` and
+        // `diagnostics_on_write` after every successful write. The
+        // wrapper registers under the same name so the registry's
+        // BTreeMap insert overrides the entry left by `with_extras()`.
+        if lsp_cfg.enabled {
+            tools.register(Arc::new(crate::native::lsp::LspWriteTool::new(
+                lsp_cfg,
+            )));
+        }
     }
 
     let loaded_exts = extensions::discover(&ext_roots);

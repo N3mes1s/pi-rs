@@ -156,14 +156,17 @@ fn estimates_tokens_from_chars_when_no_usage() {
         entry(
             "u1",
             SessionEntryKind::User {
-                // 40 chars / 4 = 10 tokens estimate.
+                // 40 chars: bytes/4 estimated 10 tokens; RFD-0014's
+                // real BPE tokenizer returns somewhere in [3, 14].
                 message: Message::user_text("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             },
         ),
     ];
     let html = render("s1", &branch);
-    // Just sanity check it didn't panic and total is plausible.
-    assert!(html.contains("estimated tokens: 10"));
+    // Just sanity-check the render didn't panic and emitted a token
+    // estimate. Exact count varies with the tokenizer encoding
+    // (see RFD 0014).
+    assert!(html.contains("estimated tokens"), "html missing estimate: {html}");
 }
 
 #[test]
@@ -206,4 +209,139 @@ fn outcome_and_evolve_marker_render_as_meta_blocks() {
     let html = render("s1", &branch);
     assert!(html.contains("evolve gen 5"));
     assert!(html.contains("outcome: win"));
+}
+
+// ─── RFD 0012: JSON output ─────────────────────────────────────────────
+
+#[test]
+fn json_format_round_trip_produces_expected_block_kinds() {
+    use pi_coding_agent::native::trajectory::flamegraph::{
+        build_trajectory, render_json, Format,
+    };
+    use serde_json::Value;
+
+    let branch = vec![
+        entry(
+            "m",
+            SessionEntryKind::Meta {
+                cwd: "/tmp".into(),
+                provider: "anthropic".into(),
+                model: "sonnet".into(),
+                title: None,
+            },
+        ),
+        entry(
+            "ctx",
+            SessionEntryKind::ContextLoad {
+                source: "/repo/AGENTS.md".into(),
+                bytes: 800,
+                tokens: Some(200),
+            },
+        ),
+        entry("u1", SessionEntryKind::User { message: Message::user_text("run ls") }),
+        entry(
+            "a1",
+            SessionEntryKind::Assistant {
+                message: Message::assistant_text("ok, running"),
+            },
+        ),
+        entry(
+            "tc",
+            SessionEntryKind::ToolCall {
+                call: ToolCall {
+                    id: "tc".into(),
+                    name: "bash".into(),
+                    input: json!({"command": "ls /tmp"}),
+                },
+            },
+        ),
+        entry(
+            "tr",
+            SessionEntryKind::ToolResult {
+                result: ToolResult {
+                    tool_use_id: "tc".into(),
+                    model_output: "file1\nfile2".into(),
+                    display: None,
+                    is_error: false,
+                },
+            },
+        ),
+        entry(
+            "use",
+            SessionEntryKind::Usage {
+                usage: Usage {
+                    input_tokens: 100,
+                    output_tokens: 200,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    reasoning_tokens: 0,
+                    cost_usd: 0.0042,
+                },
+            },
+        ),
+        entry(
+            "oc",
+            SessionEntryKind::Outcome {
+                success: true,
+                source: pi_agent_core::OutcomeSource::LlmJudge,
+                score: Some(0.9),
+                notes: None,
+            },
+        ),
+    ];
+
+    // Confirm Format::Json parses from the public string form.
+    assert_eq!(Format::parse("json"), Some(Format::Json));
+    assert_eq!(Format::parse("html"), Some(Format::Html));
+    assert_eq!(Format::parse("xml"), None);
+
+    let traj = build_trajectory("session-abc", &branch);
+    let json = render_json(&traj);
+    let v: Value = serde_json::from_str(&json).expect("valid json");
+    assert_eq!(v["session_id"], "session-abc");
+    assert_eq!(v["estimated_tokens"], 300);
+
+    let turns = v["turns"].as_array().expect("turns array");
+    let mut all_kinds: Vec<String> = Vec::new();
+    for t in turns {
+        for b in t["blocks"].as_array().unwrap() {
+            all_kinds.push(b["kind"].as_str().unwrap().to_string());
+        }
+    }
+    for needle in [
+        "meta",
+        "user",
+        "assistant_text",
+        "tool_call",
+        "tool_result",
+        "outcome",
+        "context_load",
+    ] {
+        assert!(
+            all_kinds.iter().any(|k| k == needle),
+            "missing kind {needle:?} in {all_kinds:?}"
+        );
+    }
+
+    // The assistant_text block in the same turn as Usage carries the cost.
+    let mut found_cost = false;
+    for t in turns {
+        for b in t["blocks"].as_array().unwrap() {
+            if b["kind"] == "assistant_text" {
+                if let Some(c) = b.get("cost_usd").and_then(|v| v.as_f64()) {
+                    assert!((c - 0.0042).abs() < 1e-9);
+                    found_cost = true;
+                }
+            }
+        }
+    }
+    assert!(found_cost, "expected cost_usd on assistant_text block");
+
+    // Outcome block exposes structured outcome.
+    let outcome = turns
+        .iter()
+        .flat_map(|t| t["blocks"].as_array().unwrap().iter())
+        .find(|b| b["kind"] == "outcome")
+        .expect("outcome");
+    assert_eq!(outcome["outcome"]["success"], true);
 }

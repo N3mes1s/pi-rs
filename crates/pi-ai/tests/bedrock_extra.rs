@@ -38,6 +38,8 @@ fn model() -> ModelInfo {
         supports_vision: false,
         input_cost_per_mtok: 0.0,
         output_cost_per_mtok: 0.0,
+        cache_read_cost_per_mtok: None,
+        cache_write_cost_per_mtok: None,
     }
 }
 
@@ -496,4 +498,76 @@ async fn bedrock_system_role_messages_filtered() {
 
     let resp = provider.generate(r, &model()).await.expect("ok");
     assert_eq!(resp.message.text(), "filtered");
+}
+
+// --- RFD 0015: Bedrock parity with Anthropic Usage shape -----------------
+
+fn shared_anthropic_sse_body() -> String {
+    let mut s = String::new();
+    s.push_str("event: message_start\n");
+    s.push_str("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"usage\":{\"input_tokens\":1200,\"cache_read_input_tokens\":300,\"cache_creation_input_tokens\":50}}}\n\n");
+    s.push_str("event: content_block_delta\n");
+    s.push_str("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello, \"}}\n\n");
+    s.push_str("event: content_block_delta\n");
+    s.push_str("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"world!\"}}\n\n");
+    s.push_str("event: message_delta\n");
+    s.push_str("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n");
+    s.push_str("event: message_stop\n");
+    s.push_str("data: {\"type\":\"message_stop\"}\n\n");
+    s
+}
+
+#[tokio::test]
+async fn bedrock_usage_shape_matches_anthropic_byte_for_byte() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path(bedrock_path()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(shared_anthropic_sse_body()),
+        )
+        .mount(&server)
+        .await;
+
+    // Same opus model as anthropic_stream test for cost-shape parity.
+    let opus = ModelInfo {
+        provider: "bedrock".into(),
+        id: "anthropic.claude-test".into(),
+        alias: None,
+        context_window: 200_000,
+        max_output_tokens: 32_000,
+        supports_thinking: true,
+        supports_tools: true,
+        supports_vision: true,
+        input_cost_per_mtok: 15.0,
+        output_cost_per_mtok: 75.0,
+        cache_read_cost_per_mtok: None,
+        cache_write_cost_per_mtok: None,
+    };
+
+    let provider = BedrockAnthropicProvider::new(
+        cfg(server.uri()),
+        AuthMethod::ApiKey { value: "tok".into() },
+    );
+
+    let resp = provider.generate(req(), &opus).await.expect("ok");
+    assert_eq!(resp.usage.input_tokens, 1200);
+    assert_eq!(resp.usage.output_tokens, 42);
+    assert_eq!(resp.usage.cache_read_tokens, 300);
+    assert_eq!(resp.usage.cache_write_tokens, 50);
+    assert_eq!(resp.usage.reasoning_tokens, 0);
+    assert!(resp.usage.cost_usd > 0.0);
+    // Cross-check: same input → same cost as the helper.
+    use pi_ai::cost::{compute_cost, UsageAcc};
+    let acc = UsageAcc {
+        input_tokens: 1200,
+        output_tokens: 42,
+        cache_read_tok: 300,
+        cache_write_tok: 50,
+        reasoning_tok: 0,
+    };
+    let expected = compute_cost(&opus, &acc);
+    assert!((resp.usage.cost_usd - expected).abs() < 1e-12);
 }

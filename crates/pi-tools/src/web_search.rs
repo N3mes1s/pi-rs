@@ -527,7 +527,7 @@ async fn anthropic_search(
         .header("x-api-key", &cfg.api_key)
         .header("anthropic-version", "2023-06-01")
         .json(&json!({
-            "model": "claude-3-5-sonnet-latest",
+            "model": "claude-haiku-4-5-20251001",
             "max_tokens": 1024,
             "messages": [{"role": "user", "content": query}],
             "tools": [{"type": "web_search_20250305", "name": "web_search"}]

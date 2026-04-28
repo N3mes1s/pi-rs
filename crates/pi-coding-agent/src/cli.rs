@@ -120,13 +120,23 @@ pub struct Cli {
 
     /// AGENTS.md auto-evolution control: `status` (print state),
     /// `off` (disable for cwd), `on` (re-enable for cwd).
-    #[arg(long = "evolve", value_parser = clap::builder::PossibleValuesParser::new(["status", "off", "on", "dry-run"]))]
+    #[arg(long = "evolve", value_parser = clap::builder::PossibleValuesParser::new(["status", "off", "on", "dry-run", "apply"]))]
     pub evolve: Option<String>,
 
     /// Render a trajectory flamegraph for a session id (or path) to
     /// HTML and exit.
     #[arg(long = "flamegraph", value_name = "SESSION_OR_PATH")]
     pub flamegraph: Option<String>,
+
+    /// Output format for `--flamegraph`: `html` (default; the self-
+    /// contained dark-mode page) or `json` (agent-readable trajectory
+    /// shape with per-turn blocks). RFD 0012.
+    #[arg(
+        long = "flamegraph-format",
+        value_name = "FORMAT",
+        value_parser = clap::builder::PossibleValuesParser::new(["html", "json"])
+    )]
+    pub flamegraph_format: Option<String>,
 
     /// Render a session as a self-contained HTML transcript and write
     /// it to `~/.pi/agent/shares/<id>.html` (path printed on stdout).
@@ -174,9 +184,38 @@ pub struct Cli {
     #[arg(long, env = "PI_PLAN_MODEL")]
     pub plan: Option<String>,
 
+    /// Stats subcommand: `server` (default — bind dashboard on
+    /// `--stats-port`), `sync` (ingest then exit), or `json` (ingest
+    /// then dump `DashboardStats` to stdout). Short-circuits the
+    /// agent loop. RFD 0004.
+    #[arg(long = "stats", value_name = "VERB", num_args = 0..=1,
+          default_missing_value = "server")]
+    pub stats: Option<String>,
+
+    /// Port for `--stats server` (default 3847).
+    #[arg(long = "stats-port", default_value_t = 3847)]
+    pub stats_port: u16,
+
     /// Free-form positional args. `@file` references add attachments.
     #[arg(value_name = "MESSAGE_OR_AT_FILES")]
     pub positionals: Vec<String>,
+
+    /// Run this invocation inside a private git worktree (RFD 0006).
+    /// The parent branch is not touched; on success, changes land on
+    /// `pi/task/<id>` (or as a patch artifact when
+    /// `--worktree-mode=patch`).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub worktree: bool,
+
+    /// Reconciliation mode for `--worktree`: `branch` (default) or
+    /// `patch`.
+    #[arg(long = "worktree-mode", value_name = "MODE",
+          value_parser = clap::builder::PossibleValuesParser::new(["branch", "patch"]))]
+    pub worktree_mode: Option<String>,
+
+    /// Explicit task id for `--worktree`. Defaults to a random UUID.
+    #[arg(long = "worktree-id", value_name = "ID")]
+    pub worktree_id: Option<String>,
 }
 
 impl Cli {

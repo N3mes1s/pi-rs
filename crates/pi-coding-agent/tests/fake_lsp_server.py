@@ -161,6 +161,48 @@ def handle_message(msg):
                 },
             }
         )
+    elif method == "textDocument/formatting":
+        # Return a deterministic single TextEdit that replaces line 0
+        # entirely with `"FORMATTED\n"`. The integration test relies on
+        # the on-disk byte sequence after the wrapper applies this edit.
+        write_frame(
+            {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": [
+                    {
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 1, "character": 0},
+                        },
+                        "newText": "FORMATTED\n",
+                    }
+                ],
+            }
+        )
+    elif method == "textDocument/diagnostic":
+        # LSP 3.17 pull-diagnostics shape. One synthetic warning so tests
+        # can assert the wrapper attaches `display.diagnostics`.
+        write_frame(
+            {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "kind": "full",
+                    "items": [
+                        {
+                            "range": {
+                                "start": {"line": 0, "character": 0},
+                                "end": {"line": 0, "character": 1},
+                            },
+                            "severity": 2,
+                            "message": "fake diagnostic",
+                            "_marker": "diagnostics",
+                        }
+                    ],
+                },
+            }
+        )
     elif method == "textDocument/codeAction":
         # Echo the range back inside a single canned CodeAction.
         write_frame(

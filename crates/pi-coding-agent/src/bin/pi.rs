@@ -48,13 +48,72 @@ fn main() -> anyhow::Result<()> {
         return cmd::run_evolve(verb);
     }
     if let Some(target) = &cli.flamegraph {
-        return cmd::run_flamegraph(target);
+        // RFD 0012: dispatch on --flamegraph-format. The HTML path
+        // delegates to cmd::run_flamegraph (unchanged); the JSON path
+        // builds a Trajectory in-place and prints it.
+        let format = cli
+            .flamegraph_format
+            .as_deref()
+            .and_then(pi_coding_agent::native::trajectory::flamegraph::Format::parse)
+            .unwrap_or(pi_coding_agent::native::trajectory::flamegraph::Format::Html);
+        match format {
+            pi_coding_agent::native::trajectory::flamegraph::Format::Html => {
+                return cmd::run_flamegraph(target);
+            }
+            pi_coding_agent::native::trajectory::flamegraph::Format::Json => {
+                use pi_agent_core::SessionEntry;
+                use pi_coding_agent::context::sessions_dir;
+                use pi_coding_agent::native::trajectory::flamegraph;
+                let path = if std::path::Path::new(target).is_file() {
+                    std::path::PathBuf::from(target)
+                } else {
+                    let cwd = std::env::current_dir()?;
+                    let slug = cwd.display().to_string().replace(['/', '\\', ':'], "_");
+                    let dir = sessions_dir().join(slug);
+                    let candidate = dir.join(format!("{target}.jsonl"));
+                    if !candidate.exists() {
+                        anyhow::bail!(
+                            "no session jsonl at {} (looked up id={} for cwd={})",
+                            candidate.display(),
+                            target,
+                            cwd.display()
+                        );
+                    }
+                    candidate
+                };
+                let txt = std::fs::read_to_string(&path)?;
+                let entries: Vec<SessionEntry> = txt
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .filter_map(|l| serde_json::from_str(l).ok())
+                    .collect();
+                let session_id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("session")
+                    .to_string();
+                let trajectory = flamegraph::build_trajectory(&session_id, &entries);
+                println!("{}", flamegraph::render_json(&trajectory));
+                return Ok(());
+            }
+        }
     }
     if let Some(target) = &cli.share {
         return cmd::run_share(target);
     }
     if let Some(spec) = &cli.policy {
         return cmd::run_policy(spec);
+    }
+    if let Some(verb) = cli.stats.clone() {
+        let parsed = pi_stats::cli::StatsVerb::parse(&verb)?;
+        let cfg = pi_stats::cli::StatsConfig {
+            port: cli.stats_port,
+            ..Default::default()
+        };
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return rt.block_on(pi_stats::cli::run(parsed, cfg));
     }
 
     tracing_subscriber::fmt()
@@ -70,12 +129,62 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(async move {
-        let startup = startup::assemble(cli.clone()).await?;
-        match cli.effective_mode() {
+        let mut startup = startup::assemble(cli.clone()).await?;
+
+        // RFD 0006: --worktree wraps the whole agent run in an
+        // isolated git worktree. We swap the runtime config's cwd to
+        // the worktree dir, run normally, then reconcile the result.
+        let mut wt_guard: Option<pi_coding_agent::native::worktree::WorktreeGuard> = None;
+        let mut wt_finish: Option<(
+            std::path::PathBuf,
+            std::path::PathBuf,
+            pi_coding_agent::native::worktree::WorktreeBaseline,
+            String,
+            pi_coding_agent::native::worktree::ReconcileMode,
+        )> = None;
+        if cli.worktree {
+            use pi_coding_agent::native::worktree as wt;
+            let repo_root = wt::git::repo_root(&startup.runtime_config.cwd)
+                .await
+                .unwrap_or_else(|_| startup.runtime_config.cwd.clone());
+            let id = cli
+                .worktree_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let dir = wt::ensure(&repo_root, &id).await?;
+            let baseline = wt::capture_baseline(&repo_root).await?;
+            wt::apply_baseline(&dir, &baseline).await?;
+            startup.runtime_config.cwd = dir.clone();
+            let mode = match cli.worktree_mode.as_deref() {
+                Some("patch") => wt::ReconcileMode::Patch,
+                _ => wt::ReconcileMode::Branch,
+            };
+            wt_guard = Some(wt::WorktreeGuard::new(dir.clone()));
+            wt_finish = Some((repo_root, dir, baseline, id, mode));
+        }
+
+        let agent_result = match cli.effective_mode() {
             pi_coding_agent::cli::Mode::Print => modes::print::run(startup).await,
             pi_coding_agent::cli::Mode::Json => modes::json::run(startup).await,
             pi_coding_agent::cli::Mode::Rpc => modes::rpc::run(startup).await,
             pi_coding_agent::cli::Mode::Interactive => modes::interactive::run(startup).await,
+        };
+
+        if let Some((repo_root, dir, baseline, id, mode)) = wt_finish {
+            use pi_coding_agent::native::worktree as wt;
+            match wt::finish(&repo_root, &dir, &baseline, &id, mode).await {
+                Ok(rec) => {
+                    if let Ok(s) = serde_json::to_string(&rec) {
+                        println!("{s}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("worktree reconcile failed: {e}");
+                }
+            }
         }
+        // Drop guard ⇒ cleanup.
+        drop(wt_guard);
+        agent_result
     })
 }

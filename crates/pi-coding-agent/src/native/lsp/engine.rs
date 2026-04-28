@@ -239,6 +239,49 @@ impl LspEngine {
         Ok(client.send_request("textDocument/diagnostic", params).await?)
     }
 
+    /// `textDocument/formatting` — full-document formatting (LSP 3.17
+    /// §3.17.13). Returns `TextEdit[]` (or `null`) verbatim. Sends
+    /// conventional defaults for `FormattingOptions`; per-file overrides
+    /// are out of scope (see RFD 0002 P1 0007).
+    pub async fn formatting(&self, file: &Path) -> Result<Value, EngineError> {
+        let client = self.prepare(file).await?;
+        let language = Self::language_for(file)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "plaintext".to_string());
+        let options = self.formatting_options_for(&language);
+        let params = json!({
+            "textDocument": { "uri": Self::file_uri(file) },
+            "options": options,
+        });
+        Ok(client.send_request("textDocument/formatting", params).await?)
+    }
+
+    /// Build the LSP `FormattingOptions` JSON object for `language`,
+    /// applying per-language overrides from `LspConfig.languages` on top
+    /// of the engine defaults (`tab_size=4`, `insert_spaces=true`, all
+    /// three trim/newline flags `true`). Pure / synchronous so it can be
+    /// unit-tested without spawning a server. RFD 0007.
+    fn formatting_options_for(&self, language: &str) -> Value {
+        let cfg = self
+            .config
+            .languages
+            .get(language)
+            .map(|l| &l.format_options);
+        let tab_size = cfg.and_then(|f| f.tab_size).unwrap_or(4);
+        let insert_spaces = cfg.and_then(|f| f.insert_spaces).unwrap_or(true);
+        let trim_trailing_whitespace =
+            cfg.and_then(|f| f.trim_trailing_whitespace).unwrap_or(true);
+        let insert_final_newline = cfg.and_then(|f| f.insert_final_newline).unwrap_or(true);
+        let trim_final_newlines = cfg.and_then(|f| f.trim_final_newlines).unwrap_or(true);
+        json!({
+            "tabSize": tab_size,
+            "insertSpaces": insert_spaces,
+            "trimTrailingWhitespace": trim_trailing_whitespace,
+            "insertFinalNewline": insert_final_newline,
+            "trimFinalNewlines": trim_final_newlines,
+        })
+    }
+
     pub async fn definition(
         &self,
         file: &Path,
@@ -448,14 +491,19 @@ mod tests {
                     "python3".into(),
                     path.to_string_lossy().into_owned(),
                 ]),
+                format_options: Default::default(),
             },
         );
         let engine = LspEngine::new(cfg, PathBuf::from("/tmp"));
-        // diagnostics/definition will get a `Method not found` error
-        // from the fake server, surfaced as TransportError::Rpc — that's
-        // fine, what we're proving is the spawn + handshake landed.
+        // `hover` is intentionally NOT implemented in the fake server,
+        // so the request hits its `else` branch and bounces back as
+        // `-32601 Method not found`. That's what proves the spawn +
+        // handshake + request/response round-trip all landed; we don't
+        // actually care about hover semantics here. (Earlier this test
+        // used `diagnostics`, but RFD-0001 added a fake-server handler
+        // for `textDocument/diagnostic` so that op now succeeds.)
         let err = engine
-            .diagnostics(Path::new("/tmp/x.rs"))
+            .hover(Path::new("/tmp/x.rs"), 1, 1)
             .await
             .unwrap_err();
         match err {
@@ -468,5 +516,49 @@ mod tests {
         assert_eq!(engine.running_languages().await, vec!["rust".to_string()]);
         assert!(engine.reload("rust").await);
         assert!(engine.running_languages().await.is_empty());
+    }
+
+    #[test]
+    fn formatting_options_unknown_language_uses_engine_defaults() {
+        // RFD 0007: with no per-language `format_options` block (or an
+        // entirely missing language entry), every wire key falls back
+        // to the hardcoded engine default.
+        let engine = LspEngine::new(LspConfig::default(), PathBuf::from("/tmp"));
+        let v = engine.formatting_options_for("never-heard-of-it");
+        assert_eq!(v["tabSize"], 4);
+        assert_eq!(v["insertSpaces"], true);
+        assert_eq!(v["trimTrailingWhitespace"], true);
+        assert_eq!(v["insertFinalNewline"], true);
+        assert_eq!(v["trimFinalNewlines"], true);
+    }
+
+    #[test]
+    fn formatting_options_partial_override_falls_back_for_other_fields() {
+        // RFD 0007: a partial override (here `tab_size=2` and
+        // `insert_final_newline=false`) flows through to the wire while
+        // the other three keys keep their engine defaults.
+        let mut cfg = LspConfig::default();
+        cfg.languages.insert(
+            "python".into(),
+            super::super::config::LanguageConfig {
+                enabled: None,
+                command: None,
+                format_options: super::super::config::FormattingOptions {
+                    tab_size: Some(2),
+                    insert_spaces: None,
+                    trim_trailing_whitespace: None,
+                    insert_final_newline: Some(false),
+                    trim_final_newlines: None,
+                },
+            },
+        );
+        let engine = LspEngine::new(cfg, PathBuf::from("/tmp"));
+        let v = engine.formatting_options_for("python");
+        assert_eq!(v["tabSize"], 2);
+        assert_eq!(v["insertFinalNewline"], false);
+        // unspecified → engine defaults
+        assert_eq!(v["insertSpaces"], true);
+        assert_eq!(v["trimTrailingWhitespace"], true);
+        assert_eq!(v["trimFinalNewlines"], true);
     }
 }

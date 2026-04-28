@@ -6,6 +6,7 @@ members = [
     "crates/pi-agent-core",
     "crates/pi-tui",
     "crates/pi-coding-agent",
+    "crates/pi-stats",
 ]
 
 [workspace.package]
@@ -56,11 +57,14 @@ rand = "0.8"
 ring = "0.17"
 percent-encoding = "2"
 unicode-segmentation = "1"
+serde_yaml = "0.9"
+tiktoken-rs = "0.5"
 
 pi-ai = { path = "crates/pi-ai" }
 pi-tools = { path = "crates/pi-tools" }
 pi-agent-core = { path = "crates/pi-agent-core" }
 pi-tui = { path = "crates/pi-tui" }
+pi-stats = { path = "crates/pi-stats" }
 
 [profile.release]
 lto = "fat"

@@ -5,11 +5,13 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::auth::AuthMethod;
-use crate::message::{FinishReason, Role, ThinkingLevel, Usage};
+use crate::cost::UsageAcc;
+use crate::message::{Role, ThinkingLevel};
 use crate::registry::{ModelInfo, ProviderConfig};
 use crate::stream::{StreamEvent, StreamEventKind};
 use crate::{AiError, GenerateRequest, Result};
 
+use super::anthropic_stream::{handle_anthropic_event, ToolAcc};
 use super::{EventStream, Provider};
 
 /// AWS Bedrock provider that wraps the Anthropic Messages wire format.
@@ -154,180 +156,55 @@ impl Provider for BedrockAnthropicProvider {
 
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
-        let tool_inputs: std::collections::HashMap<u32, (String, String, String)> =
-            std::collections::HashMap::new();
+        let tool_inputs: ToolAcc = std::collections::HashMap::new();
 
+        let model_owned = model.clone();
         let s = stream::unfold(
-            (event_stream, tool_inputs, false),
-            move |(mut es, mut acc, mut done)| async move {
-                let _ = &mut done;
-                if done {
-                    return None;
-                }
-                while let Some(item) = es.next().await {
-                    let ev = match item {
-                        Ok(ev) => ev,
-                        Err(e) => {
-                            return Some((
-                                Ok(StreamEvent::new(StreamEventKind::Error {
-                                    message: e.to_string(),
-                                })),
-                                (es, acc, true),
-                            ));
-                        }
-                    };
-                    let data: Value = match serde_json::from_str(&ev.data) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    let etype = data.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    match etype {
-                        "message_start" => {
-                            return Some((
-                                Ok(StreamEvent::new(StreamEventKind::MessageStart)),
-                                (es, acc, false),
-                            ));
-                        }
-                        "content_block_start" => {
-                            let idx =
-                                data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            let block =
-                                data.get("content_block").cloned().unwrap_or(Value::Null);
-                            if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                                let id = block
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let name = block
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                acc.insert(idx, (id.clone(), name.clone(), String::new()));
-                                return Some((
-                                    Ok(StreamEvent::new(StreamEventKind::ToolCallStart {
-                                        id,
-                                        name,
-                                    })),
-                                    (es, acc, false),
-                                ));
-                            }
-                        }
-                        "content_block_delta" => {
-                            let idx =
-                                data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            let delta = data.get("delta").cloned().unwrap_or(Value::Null);
-                            match delta.get("type").and_then(|v| v.as_str()) {
-                                Some("text_delta") => {
-                                    let t = delta
-                                        .get("text")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    return Some((
-                                        Ok(StreamEvent::new(StreamEventKind::TextDelta {
-                                            text: t,
-                                        })),
-                                        (es, acc, false),
-                                    ));
-                                }
-                                Some("thinking_delta") => {
-                                    let t = delta
-                                        .get("thinking")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    return Some((
-                                        Ok(StreamEvent::new(StreamEventKind::ThinkingDelta {
-                                            text: t,
-                                        })),
-                                        (es, acc, false),
-                                    ));
-                                }
-                                Some("input_json_delta") => {
-                                    let partial = delta
-                                        .get("partial_json")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    if let Some((id, _, buf)) = acc.get_mut(&idx) {
-                                        buf.push_str(&partial);
-                                        return Some((
-                                            Ok(StreamEvent::new(StreamEventKind::ToolInputDelta {
-                                                id: id.clone(),
-                                                partial_json: partial,
-                                            })),
-                                            (es, acc, false),
-                                        ));
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        "content_block_stop" => {
-                            let idx =
-                                data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            if let Some((id, name, buf)) = acc.remove(&idx) {
-                                let input = if buf.is_empty() {
-                                    Value::Object(serde_json::Map::new())
-                                } else {
-                                    serde_json::from_str(&buf).unwrap_or(Value::Null)
-                                };
-                                return Some((
-                                    Ok(StreamEvent::new(StreamEventKind::ToolCallComplete {
-                                        id,
-                                        name,
-                                        input,
-                                    })),
-                                    (es, acc, false),
-                                ));
-                            }
-                        }
-                        "message_delta" => {
-                            if let Some(usage) = data.get("usage") {
-                                let u = Usage {
-                                    output_tokens: usage
-                                        .get("output_tokens")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0),
-                                    ..Default::default()
-                                };
-                                return Some((
-                                    Ok(StreamEvent::new(StreamEventKind::Usage { usage: u })),
-                                    (es, acc, false),
-                                ));
-                            }
-                            if let Some(reason) = data
-                                .get("delta")
-                                .and_then(|d| d.get("stop_reason"))
-                                .and_then(|v| v.as_str())
-                            {
-                                let r = match reason {
-                                    "tool_use" => FinishReason::ToolUse,
-                                    "end_turn" => FinishReason::Stop,
-                                    "max_tokens" => FinishReason::Length,
-                                    "refusal" => FinishReason::Refusal,
-                                    _ => FinishReason::Other,
-                                };
-                                return Some((
-                                    Ok(StreamEvent::new(StreamEventKind::Finish { reason: r })),
-                                    (es, acc, false),
-                                ));
-                            }
-                        }
-                        "message_stop" => {
-                            return Some((
-                                Ok(StreamEvent::new(StreamEventKind::Finish {
-                                    reason: FinishReason::Stop,
-                                })),
-                                (es, acc, true),
-                            ));
-                        }
-                        _ => {}
+            (event_stream, tool_inputs, false, UsageAcc::default()),
+            move |(mut es, mut acc, mut done, mut usage_running)| {
+                let model_owned = model_owned.clone();
+                async move {
+                    let _ = &mut done;
+                    if done {
+                        return None;
                     }
+                    while let Some(item) = es.next().await {
+                        let ev = match item {
+                            Ok(ev) => ev,
+                            Err(e) => {
+                                return Some((
+                                    Ok(StreamEvent::new(StreamEventKind::Error {
+                                        message: e.to_string(),
+                                    })),
+                                    (es, acc, true, usage_running),
+                                ));
+                            }
+                        };
+                        let data: Value = match serde_json::from_str(&ev.data) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let etype = data.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        if let Some(kind) = handle_anthropic_event(
+                            etype,
+                            &data,
+                            &mut acc,
+                            &mut usage_running,
+                            &model_owned,
+                        ) {
+                            let terminal = matches!(etype, "message_stop");
+                            if terminal {
+                                done = true;
+                                let _ = done;
+                            }
+                            return Some((
+                                Ok(StreamEvent::new(kind)),
+                                (es, acc, terminal, usage_running),
+                            ));
+                        }
+                    }
+                    None
                 }
-                None
             },
         );
 

@@ -2,9 +2,11 @@
 
 use pi_coding_agent::evolve::{
     add_poison, append_generation, backup_and_apply, best_strict_improvement, is_poisoned,
-    pareto_frontier, poisoned_hashes, read_generations, rollback, should_rollback,
+    pareto_frontier, poisoned_hashes, read_generations, should_rollback,
     BenchmarkSummary, Candidate, GenerationLogEntry, PendingApply,
 };
+// Disambiguate from the new `evolve::rollback` module (RFD 0013).
+use pi_coding_agent::evolve::apply::rollback;
 
 fn summary(pass_rate: f32, mean_score: f32, p95: u64, cost: f32) -> BenchmarkSummary {
     BenchmarkSummary {

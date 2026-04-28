@@ -48,6 +48,10 @@ Rules:
 - An agent that completed the task without running tests is fine if the task didn't require them.
 - A final reply that says \"I cannot do this\" or punts back to the user, on a task the user \
   clearly wanted done, is a failure.
+- A correct answer that quotes content from a `<context_loaded>` file is not a fabrication. \
+  Tool calls are evidence of work, not a prerequisite for success. If the agent's reply is \
+  grounded in a context file, score it on whether it answered the user's question — not on \
+  whether it re-fetched the file.
 
 Reply with a SINGLE JSON object on one line and nothing else:
 {\"success\": true|false, \"score\": 0.0-1.0, \"reason\": \"...\", \"salient_wins\": [\"...\"], \"salient_failures\": [\"...\"]}";
@@ -246,23 +250,50 @@ pub fn features_only_outcome(features: &TrajectoryFeatures) -> Option<SessionEnt
 
 // ─── prompt assembly ────────────────────────────────────────────────────
 
-fn build_user_message(branch: &[SessionEntry], features: &TrajectoryFeatures) -> String {
+pub fn build_user_message(branch: &[SessionEntry], features: &TrajectoryFeatures) -> String {
     let user_request = first_user_text(branch).unwrap_or_else(|| "(no user message)".into());
     let final_reply = last_assistant_text(branch).unwrap_or_else(|| "(no assistant reply)".into());
+    let context_loaded = collect_context_loads(branch);
     let features_json =
         serde_json::to_string_pretty(features).unwrap_or_else(|_| "{}".into());
     let digest = action_digest(branch);
 
     format!(
         "<user_request>\n{}\n</user_request>\n\n\
+         <context_loaded>\n{}\n</context_loaded>\n\n\
          <assistant_final_reply>\n{}\n</assistant_final_reply>\n\n\
          <features>\n{}\n</features>\n\n\
          <action_digest>\n{}\n</action_digest>",
         truncate(&user_request, 4000),
+        context_loaded,
         truncate(&final_reply, 4000),
         features_json,
         digest,
     )
+}
+
+/// Collect any `ContextLoad` entries from the branch into a one-line-
+/// per-file bullet list. Tells the judge which files (AGENTS.md,
+/// CLAUDE.md, …) were already in the agent's system prompt — so a reply
+/// that quotes them isn't mis-scored as a fabrication.
+fn collect_context_loads(branch: &[SessionEntry]) -> String {
+    let entries: Vec<String> = branch
+        .iter()
+        .filter_map(|e| match &e.kind {
+            SessionEntryKind::ContextLoad { source, bytes, tokens } => Some(format!(
+                "- {} ({} bytes, ~{} tokens)",
+                source,
+                bytes,
+                tokens.unwrap_or(0),
+            )),
+            _ => None,
+        })
+        .collect();
+    if entries.is_empty() {
+        "(no context files were loaded into the system prompt)".into()
+    } else {
+        entries.join("\n")
+    }
 }
 
 fn first_user_text(branch: &[SessionEntry]) -> Option<String> {
