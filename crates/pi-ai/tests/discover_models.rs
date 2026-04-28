@@ -196,7 +196,7 @@ fn registry_merge_discovered_appends_new_only_keeps_static_on_conflict() {
     let after_count = reg.total_models();
     assert_eq!(after_count, before_count + 1, "only the novel id is appended");
     let (_p, m) = reg.resolve("anthropic/claude-opus-4-7").unwrap();
-    assert_eq!(m.input_cost_per_mtok, 15.0, "static cost preserved");
+    assert_eq!(m.input_cost_per_mtok, 5.0, "static cost preserved");
     let (_p, m) = reg.resolve("anthropic/claude-future-7-0").unwrap();
     assert_eq!(m.id, novel.id);
 }
