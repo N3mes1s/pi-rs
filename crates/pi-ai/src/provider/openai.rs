@@ -134,27 +134,14 @@ impl Provider for OpenAiProvider {
     async fn stream(&self, req: GenerateRequest, model: &ModelInfo) -> Result<EventStream> {
         match model.api_kind {
             ApiKind::ChatCompletions => self.stream_chat_completions(req, model).await,
-            ApiKind::Responses => self.stream_responses(req, model).await,
+            ApiKind::Responses => {
+                super::openai_responses::stream_responses(self, req, model).await
+            }
         }
     }
 }
 
 impl OpenAiProvider {
-    /// Stub for the `/v1/responses` dispatch path (RFD 0019). The actual
-    /// request building + SSE parser is being implemented in
-    /// `claude/responses-core`; this stub exists so the registry-side
-    /// dispatch wiring (this branch) compiles and routes correctly.
-    async fn stream_responses(
-        &self,
-        _req: GenerateRequest,
-        _model: &ModelInfo,
-    ) -> Result<EventStream> {
-        Err(AiError::Unsupported(
-            "RFD 0019: Responses API not yet implemented; awaits claude/responses-core merge"
-                .into(),
-        ))
-    }
-
     async fn stream_chat_completions(
         &self,
         req: GenerateRequest,
