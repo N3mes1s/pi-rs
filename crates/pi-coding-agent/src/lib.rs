@@ -42,6 +42,7 @@ pub mod settings_ui;
 pub mod share;
 pub mod skills;
 pub mod slash;
+pub mod slash_cost;
 pub mod startup;
 pub mod telemetry;
 pub mod themes;
