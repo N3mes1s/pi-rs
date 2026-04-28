@@ -1,6 +1,6 @@
 # RFD 0021 — `pi --orchestrate` (built-in campaign mode)
 
-- **Status:** Discussion (v1.1)
+- **Status:** Discussion (v1.2)
 - **Author:** pi-rs maintainers (drafter: opus-4-7, thinking=high)
 - **Created:** 2026-04-29
 - **Implemented:** &lt;pending&gt;
@@ -11,7 +11,8 @@
 | ------- | -------- | ----- |
 | v0.5    | 675f109  | Initial draft. Built-in `pi --orchestrate <campaign.toml>` subcommand. TOML schema, serial+DAG execution, fix-loop, override rules, resume/dry-run/status, persisted state at `~/.pi/orchestrate/<id>/`. 4 implementation milestones. |
 | v1.0    | 8ea4327  | Applied first critique pass (gpt-5.4 xhigh). Corrected primitives gap (`task` `isolated` flag is a no-op today; bundled-agent loading returns empty; `auto-approve` modes are `ask / auto-policy / auto-judge / yolo`; no repo-global branch-name guard; `pi-stats` has no per-session-id query surface). Split state machine (`MERGE_PENDING` separated from review verdict; `BLOCKED_ON_CONFLICT` / `BLOCKED_ON_REVIEW_STALE` as terminals). Tightened override rules (unmatched concern text = in-scope; `forward_to` only legal to `PENDING` milestones, validated up-front). Added serialised merge queue against parent-HEAD drift. Demoted `pi-orchestrate` from a new crate to a module under `pi-coding-agent`. Cost from session-JSONL `Usage` sums in v1, pi-stats integration deferred. Misc citation tightening. |
-| v1.1    | (this)   | Applied second critique pass (gpt-5.4 xhigh). Concretised the merge queue's "review snapshot" as the persisted tuple `(reviewed_branch_sha, reviewed_target_head_sha)`. Reformulated the validator rule as "`forward_to` MUST be a strict descendant of the source milestone in the dependency DAG" instead of an underspecified scheduler-theorem-prover. Added an **Operator recovery** subsection with concrete `--orchestrate-reset <milestone-id>` and `--orchestrate-re-review <milestone-id>` flows so `BLOCKED_ON_*` terminals are not dead-ends. Reworked the reviewer-parser contract into explicit structured-mode vs fallback-mode rules (heading + ≥1 bullet → structured; prose between bullets captured as implicit-in-scope chunks; missing heading or zero bullets → fallback full-redispatch). Picked **cherry-pick** as the single v1 merge primitive (matching the worktree reconciler). Demoted `PI_ORCHESTRATE_PARALLEL ≤ 4` from spec contract to implementation cap. Purged stale `CONFLICT_ABORT` references. Fixed the report's cost-source wording. Citation cleanup: `reconcile.rs` paths normalised to `crates/pi-coding-agent/src/native/worktree/reconcile.rs:124-163`. Added two tests (parser prose-between-bullets; forwarded-concern dedup on resume). |
+| v1.1    | 9afd0b8  | Applied second critique pass (gpt-5.4 xhigh). Concretised the merge queue's "review snapshot" as the persisted tuple `(reviewed_branch_sha, reviewed_target_head_sha)`. Reformulated the validator rule as "`forward_to` MUST be a strict descendant of the source milestone in the dependency DAG" instead of an underspecified scheduler-theorem-prover. Added an **Operator recovery** subsection with concrete `--orchestrate-reset <milestone-id>` and `--orchestrate-re-review <milestone-id>` flows so `BLOCKED_ON_*` terminals are not dead-ends. Reworked the reviewer-parser contract into explicit structured-mode vs fallback-mode rules (heading + ≥1 bullet → structured; prose between bullets captured as implicit-in-scope chunks; missing heading or zero bullets → fallback full-redispatch). Picked **cherry-pick** as the single v1 merge primitive (matching the worktree reconciler). Demoted `PI_ORCHESTRATE_PARALLEL ≤ 4` from spec contract to implementation cap. Purged stale `CONFLICT_ABORT` references. Fixed the report's cost-source wording. Citation cleanup: `reconcile.rs` paths normalised to `crates/pi-coding-agent/src/native/worktree/reconcile.rs:124-163`. Added two tests (parser prose-between-bullets; forwarded-concern dedup on resume). |
+| v1.2    | (this)   | Applied third critique pass (gpt-5.4 xhigh). Internal consistency on the cherry-pick choice (purged the stray "fast-forwarded / cherry-picked" copy in the state-machine comment); M3 implementation-plan row now uses `BLOCKED_ON_CONFLICT` instead of "conflict-abort". Made `--orchestrate-re-review` semantics explicit when the milestone branch HEAD has changed since the blocked snapshot. Annotated the `/tmp/task-router-orchestrator-v2.txt` reference as historical local context, not a repo-stable artifact. Critique-pass cap reached. |
 
 ## Summary
 
@@ -66,7 +67,10 @@ limited to milestone scope, branch names, and override rules.
 Re-typing this for every campaign is wasteful and error-prone
 — missing the GPG-unsigned-commit clause, forgetting to skip
 the two LSP deadlock tests, and misnaming the report file are
-the recurring foot-guns.
+the recurring foot-guns. *(Note: the two `/tmp/...` paths are
+historical local context from the in-flight RFD 0020 v1.1
+campaign — they are not repo-stable artifacts; cite them as
+provenance for the pattern, not as load-bearing references.)*
 
 ### Existing primitives this composes from
 
@@ -328,7 +332,7 @@ PENDING
 
 REVIEWED + verdict=READY_TO_MERGE
   → MERGE_PENDING               (queued in the global merge queue)
-  → MERGED                      (target_branch fast-forwarded / cherry-picked)
+  → MERGED                      (reviewed_branch_sha cherry-picked onto target_branch)
   | BLOCKED_ON_CONFLICT         (cherry-pick or merge conflict)
   | BLOCKED_ON_REVIEW_STALE     (target HEAD moved since reviewer snapshot)
 
@@ -526,13 +530,17 @@ pi --orchestrate-re-review <campaign.toml> --milestone <id>
   milestone from `PENDING`.
 - **`--orchestrate-re-review`** is the lighter-weight path
   for `BLOCKED_ON_REVIEW_STALE` only: it skips re-dispatching
-  the implementer, reuses the existing branch HEAD, and
-  re-runs the reviewer against the new `target_branch` HEAD.
-  On `READY_TO_MERGE` it re-records the snapshot tuple
-  `(reviewed_branch_sha, reviewed_target_head_sha)` and
-  re-enters `MERGE_PENDING`. Refused for
-  `BLOCKED_ON_CONFLICT` (where the branch itself needs
-  human intervention).
+  the implementer, takes the milestone branch HEAD as-is
+  (whatever the operator has rebased it to, or unchanged),
+  and re-runs the reviewer against the new `target_branch`
+  HEAD. If the milestone branch HEAD differs from the
+  `reviewed_branch_sha` recorded in the blocked snapshot,
+  the new HEAD simply becomes the new review subject — no
+  rejection. On `READY_TO_MERGE` it re-records the snapshot
+  tuple `(reviewed_branch_sha, reviewed_target_head_sha)`
+  with the fresh values and re-enters `MERGE_PENDING`.
+  Refused for `BLOCKED_ON_CONFLICT` (where the branch
+  itself needs human intervention).
 
 Both commands are no-ops if the campaign-id has no
 existing state, and both are idempotent under repeated
@@ -565,7 +573,7 @@ of every run (success, partial, or aborted). Schema:
 `cargo test --workspace --target ... -- --skip lsp_real_rust_analyzer --skip lsp_write_tool_real_rust_analyzer` → N passed / M failed / K skipped
 
 ## Deviations
-- bullet (e.g. "M3 conflict-aborted, manual merge required").
+- bullet (e.g. "M3 BLOCKED_ON_CONFLICT, manual merge required").
 ```
 
 The report is **idempotent**: re-running a partially-completed
@@ -798,7 +806,7 @@ run becomes the validation artifact.
 | -- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ------------- |
 | M1 | `claude/orchestrate-schema`     | TOML schema parser (`#[serde(deny_unknown_fields)]`), validator, `--orchestrate-dry-run`. Module under `crates/pi-coding-agent/src/orchestrate/`. State-dir layout defined but not written. Bundled `code-reviewer.md` shipped via `include_dir!` on `crates/pi-coding-agent/agents/`. | ~700     | $1            |
 | M2 | `claude/orchestrate-serial`     | Serial executor (`PI_ORCHESTRATE_PARALLEL=1` forced): dispatch → review → fix-loop → merge → report on the topological walk. `modes/orchestrate.rs` entry point, direct executor call (not via `task` tool JSON). State.jsonl read/write. Override-rule engine with the strict reviewer parser. Per-milestone session JSONL recording + `compute_cost` rollup for the report. | ~1300    | $3            |
-| M3 | `claude/orchestrate-parallel`   | Lift the parallel-1 cap up to `PI_ORCHESTRATE_PARALLEL` (≤4). Worktree-per-milestone wiring against `native/worktree/{git,reconcile}.rs` directly. Single-threaded merge queue with target-HEAD-drift detection. Push retry, conflict-abort, review-stale handling. | ~600     | $2            |
+| M3 | `claude/orchestrate-parallel`   | Lift the parallel-1 cap up to `PI_ORCHESTRATE_PARALLEL` (≤4). Worktree-per-milestone wiring against `native/worktree/{git,reconcile}.rs` directly. Single-threaded merge queue with target-HEAD-drift detection. Push retry, `BLOCKED_ON_CONFLICT` handling, and review-stale handling. | ~600     | $2            |
 | M4 | `claude/orchestrate-resume`     | `--orchestrate-resume`, `--orchestrate-status`. Drift detection (`E_SPEC_DRIFT`). `Ctrl-C`-twice handling and `.aborted` session preservation. Exit-code matrix.                                                                                                                                                                                                                            | ~400     | $1            |
 
 **Total LOC: ~3000.** **Total dogfood spend: ~$7.** (For
