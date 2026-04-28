@@ -104,22 +104,26 @@ pub fn build_trajectory(session_id: &str, branch: &[SessionEntry]) -> Trajectory
     let mut turns = Vec::with_capacity(turns_raw.len());
     for (i, turn) in turns_raw.iter().enumerate() {
         let mut blocks: Vec<Block> = Vec::new();
-        // Locate any Usage entry in this turn so we can attach
-        // cost_usd to the assistant_text block.
-        let mut turn_cost: Option<f64> = None;
+        // Attribute each Usage entry's cost_usd to the most recent
+        // assistant_text block that precedes it within the turn.
+        // Multi-round turns (one Usage per provider round) get
+        // per-block costs instead of a back-filled turn total.
+        let mut pending_assistant: Option<usize> = None;
         for e in turn {
             if let SessionEntryKind::Usage { usage } = &e.kind {
                 if usage.cost_usd > 0.0 {
-                    turn_cost = Some(usage.cost_usd);
+                    if let Some(idx) = pending_assistant.take() {
+                        blocks[idx].cost_usd = Some(usage.cost_usd);
+                    }
                 }
+                continue;
             }
-        }
-        for e in turn {
-            if let Some(mut b) = entry_as_block(e) {
-                if b.kind == "assistant_text" && b.cost_usd.is_none() {
-                    b.cost_usd = turn_cost;
-                }
+            if let Some(b) = entry_as_block(e) {
+                let is_assistant = b.kind == "assistant_text";
                 blocks.push(b);
+                if is_assistant {
+                    pending_assistant = Some(blocks.len() - 1);
+                }
             }
         }
         turns.push(Turn {

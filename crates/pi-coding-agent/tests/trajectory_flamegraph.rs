@@ -345,3 +345,114 @@ fn json_format_round_trip_produces_expected_block_kinds() {
         .expect("outcome");
     assert_eq!(outcome["outcome"]["success"], true);
 }
+
+#[test]
+fn multi_round_turn_attributes_each_usage_to_its_preceding_assistant_text() {
+    // RFD bugfix #3: a multi-round turn (user → assistant₁ → tool →
+    // result → usage₁ → assistant₂ → tool → result → usage₂ → …)
+    // must give each assistant_text block its own usage's cost,
+    // not the turn-total back-filled onto every block.
+    use pi_coding_agent::native::trajectory::flamegraph::{build_trajectory, render_json};
+    use serde_json::Value;
+
+    let mk_round = |n: u32, cost: f64| -> Vec<SessionEntry> {
+        vec![
+            entry(
+                &format!("a{n}"),
+                SessionEntryKind::Assistant {
+                    message: Message::assistant_text(format!("round {n}").as_str()),
+                },
+            ),
+            entry(
+                &format!("tc{n}"),
+                SessionEntryKind::ToolCall {
+                    call: ToolCall {
+                        id: format!("tc{n}"),
+                        name: "bash".into(),
+                        input: json!({"command": format!("echo {n}")}),
+                    },
+                },
+            ),
+            entry(
+                &format!("tr{n}"),
+                SessionEntryKind::ToolResult {
+                    result: ToolResult {
+                        tool_use_id: format!("tc{n}"),
+                        model_output: format!("out {n}"),
+                        display: None,
+                        is_error: false,
+                    },
+                },
+            ),
+            entry(
+                &format!("us{n}"),
+                SessionEntryKind::Usage {
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 20,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                        reasoning_tokens: 0,
+                        cost_usd: cost,
+                    },
+                },
+            ),
+        ]
+    };
+
+    let mut branch = vec![entry(
+        "u1",
+        SessionEntryKind::User {
+            message: Message::user_text("do a thing"),
+        },
+    )];
+    branch.extend(mk_round(1, 0.01));
+    branch.extend(mk_round(2, 0.02));
+    branch.extend(mk_round(3, 0.03));
+
+    let traj = build_trajectory("multi-round", &branch);
+    let v: Value = serde_json::from_str(&render_json(&traj)).unwrap();
+    let turns = v["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 1, "single user → single turn");
+
+    let costs: Vec<f64> = turns[0]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|b| b["kind"] == "assistant_text")
+        .map(|b| b["cost_usd"].as_f64().expect("cost present"))
+        .collect();
+    assert_eq!(costs, vec![0.01, 0.02, 0.03]);
+}
+
+#[test]
+fn assistant_text_without_following_usage_has_no_cost() {
+    use pi_coding_agent::native::trajectory::flamegraph::{build_trajectory, render_json};
+    use serde_json::Value;
+
+    let branch = vec![
+        entry(
+            "u1",
+            SessionEntryKind::User {
+                message: Message::user_text("hi"),
+            },
+        ),
+        entry(
+            "a1",
+            SessionEntryKind::Assistant {
+                message: Message::assistant_text("hello"),
+            },
+        ),
+        // No Usage entry — cost stays None and the field is omitted.
+    ];
+
+    let traj = build_trajectory("no-usage", &branch);
+    let v: Value = serde_json::from_str(&render_json(&traj)).unwrap();
+    let block = v["turns"][0]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["kind"] == "assistant_text")
+        .unwrap();
+    assert!(block.get("cost_usd").is_none(), "cost_usd should be omitted");
+}
