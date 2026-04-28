@@ -186,6 +186,7 @@ impl AgentSessionRuntime {
                 model: cfg.settings.model.clone(),
                 thinking: cfg.settings.thinking.into(),
                 tools: cfg.tools.clone(),
+                context_loads_emitted: false,
             })),
             cfg,
         })
@@ -232,6 +233,9 @@ impl AgentSessionRuntime {
                 model: meta.model,
                 thinking: cfg.settings.thinking.into(),
                 tools: cfg.tools.clone(),
+                // Reopened sessions: assume any context_files emit
+                // happened on first creation. Don't double-emit.
+                context_loads_emitted: true,
             })),
             cfg,
         })
@@ -255,6 +259,17 @@ struct AgentSessionInner {
     model: String,
     thinking: ThinkingLevel,
     tools: ToolRegistry,
+    /// One-shot guard for emitting [`SessionEntryKind::ContextLoad`]
+    /// entries: the runtime walks `cfg.context_files` exactly once per
+    /// session (before the first user turn) and flips this to `true`.
+    context_loads_emitted: bool,
+}
+
+/// Rough approximation: 1 token ≈ 4 bytes for English text. Off by
+/// ~20 % vs. real tokenizers; good enough for the trajectory judge's
+/// ranking. RFD 0012 — plumbing a real tokenizer is RFD 0014.
+fn estimate_tokens(s: &str) -> u64 {
+    (s.len() as u64).div_ceil(4)
 }
 
 impl AgentSession {
@@ -378,6 +393,34 @@ impl AgentSession {
     }
 
     pub async fn prompt(&self, user_text: String) -> Result<Message, RuntimeError> {
+        // RFD 0012 Part A: emit one ContextLoad JSONL entry per
+        // discovered context file, exactly once per session, before the
+        // very first User entry. Downstream consumers (the trajectory
+        // judge, the flamegraph, evolve) need this to know the agent
+        // *had* AGENTS.md / CLAUDE.md in its system prompt.
+        let emit_context_loads = {
+            let mut g = self.inner.lock().await;
+            if g.context_loads_emitted {
+                false
+            } else {
+                g.context_loads_emitted = true;
+                true
+            }
+        };
+        if emit_context_loads {
+            for ctx in &self.cfg.context_files {
+                let bytes = ctx.content.len() as u64;
+                let _ = self.cfg.session_manager.append(
+                    &self.id,
+                    SessionEntryKind::ContextLoad {
+                        source: ctx.path.display().to_string(),
+                        bytes,
+                        tokens: Some(estimate_tokens(&ctx.content)),
+                    },
+                );
+            }
+        }
+
         let user_msg = Message::user_text(user_text);
         {
             let mut g = self.inner.lock().await;

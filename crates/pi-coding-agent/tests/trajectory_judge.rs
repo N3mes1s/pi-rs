@@ -307,3 +307,53 @@ fn verdict_serialisation_round_trips() {
     let back: JudgeVerdict = serde_json::from_str(&json).unwrap();
     assert_eq!(v, back);
 }
+
+// ─── RFD 0012: judge sees ContextLoad entries ──────────────────────────
+
+#[test]
+fn build_user_message_includes_context_loaded_block_with_source_path() {
+    use pi_coding_agent::native::trajectory::{build_user_message, extract};
+
+    let branch = vec![
+        entry(
+            "ctx",
+            SessionEntryKind::ContextLoad {
+                source: "/repo/AGENTS.md".into(),
+                bytes: 4321,
+                tokens: Some(1080),
+            },
+        ),
+        user("u1", "what does AGENTS.md say?"),
+        entry(
+            "a1",
+            SessionEntryKind::Assistant {
+                message: Message::assistant_text("it says use real prices."),
+            },
+        ),
+    ];
+    let features = extract(&branch);
+    let msg = build_user_message(&branch, &features);
+    assert!(msg.contains("<context_loaded>"), "missing block tag: {msg}");
+    assert!(msg.contains("</context_loaded>"));
+    assert!(msg.contains("/repo/AGENTS.md"), "missing source path: {msg}");
+    assert!(msg.contains("4321 bytes"));
+    assert!(msg.contains("1080 tokens"));
+}
+
+#[test]
+fn build_user_message_signals_no_context_when_branch_empty_of_loads() {
+    use pi_coding_agent::native::trajectory::{build_user_message, extract};
+    let branch = vec![
+        user("u1", "hi"),
+        entry(
+            "a1",
+            SessionEntryKind::Assistant {
+                message: Message::assistant_text("hello"),
+            },
+        ),
+    ];
+    let features = extract(&branch);
+    let msg = build_user_message(&branch, &features);
+    assert!(msg.contains("<context_loaded>"));
+    assert!(msg.contains("(no context files were loaded into the system prompt)"));
+}
