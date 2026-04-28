@@ -47,3 +47,4 @@ crosses crate boundaries.
 | 0013 | Auto-apply the evolve daemon's AGENTS.md mutations | Implemented |
 | 0014 | Real tokenizer for `ContextLoad.tokens`           | Implemented |
 | 0015 | Replicate Usage population to OpenAI / Google / Bedrock | Implemented |
+| 0017 | Native `monitor` tool for streaming background events | Discussion |
