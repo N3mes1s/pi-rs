@@ -118,15 +118,7 @@ fn embedding_router_consults_history_and_tools() {
     assert_eq!(decision.route_id, "hard");
 }
 
-// Self-loading the ONNX file via `path.exists()` is harmless on its
-// own, but `ort` test-binary setup (linked into this binary's
-// dependency graph) deadlocks at process start on musl-static
-// targets — the same pattern as the LSP rust-analyzer tests
-// already #[ignore]'d in 415ab0e. Mark this `#[ignore]` so cargo
-// test on the campaign machine doesn't wedge here. Run on a
-// dynamic-linked target with `cargo test --ignored`.
 #[test]
-#[ignore = "ort/onnxruntime init deadlocks on musl-static; run with --ignored on dynamic targets"]
 fn downloaded_onnx_path_is_loadable() {
     let path = default_embedding_model_path();
     assert!(path.exists(), "embedding model should be fetched before smoke tests");
