@@ -7,6 +7,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct OverallStats {
     pub total_requests: u64,
+    pub total_sessions: u64,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cache_read_tokens: u64,
@@ -21,6 +22,7 @@ pub struct ModelStats {
     pub model: String,
     pub provider: String,
     pub requests: u64,
+    pub sessions: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
@@ -76,6 +78,7 @@ pub fn overall(c: &Connection) -> rusqlite::Result<OverallStats> {
     c.query_row(
         "SELECT
            COUNT(*),
+           COUNT(DISTINCT session_file),
            COALESCE(SUM(input_tokens), 0),
            COALESCE(SUM(output_tokens), 0),
            COALESCE(SUM(cache_read_tok), 0),
@@ -88,13 +91,14 @@ pub fn overall(c: &Connection) -> rusqlite::Result<OverallStats> {
         |row| {
             Ok(OverallStats {
                 total_requests: row.get::<_, i64>(0)? as u64,
-                total_input_tokens: row.get::<_, i64>(1)? as u64,
-                total_output_tokens: row.get::<_, i64>(2)? as u64,
-                total_cache_read_tokens: row.get::<_, i64>(3)? as u64,
-                total_cost: row.get(4)?,
-                avg_duration_ms: row.get(5)?,
-                avg_ttft_ms: row.get(6)?,
-                error_count: row.get::<_, i64>(7)? as u64,
+                total_sessions: row.get::<_, i64>(1)? as u64,
+                total_input_tokens: row.get::<_, i64>(2)? as u64,
+                total_output_tokens: row.get::<_, i64>(3)? as u64,
+                total_cache_read_tokens: row.get::<_, i64>(4)? as u64,
+                total_cost: row.get(5)?,
+                avg_duration_ms: row.get(6)?,
+                avg_ttft_ms: row.get(7)?,
+                error_count: row.get::<_, i64>(8)? as u64,
             })
         },
     )
@@ -103,6 +107,7 @@ pub fn overall(c: &Connection) -> rusqlite::Result<OverallStats> {
 pub fn by_model(c: &Connection) -> rusqlite::Result<Vec<ModelStats>> {
     let mut stmt = c.prepare(
         "SELECT model, provider, COUNT(*),
+                COUNT(DISTINCT session_file),
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_read_tok), 0),
@@ -116,10 +121,11 @@ pub fn by_model(c: &Connection) -> rusqlite::Result<Vec<ModelStats>> {
             model: r.get(0)?,
             provider: r.get(1)?,
             requests: r.get::<_, i64>(2)? as u64,
-            input_tokens: r.get::<_, i64>(3)? as u64,
-            output_tokens: r.get::<_, i64>(4)? as u64,
-            cache_read_tokens: r.get::<_, i64>(5)? as u64,
-            cost: r.get(6)?,
+            sessions: r.get::<_, i64>(3)? as u64,
+            input_tokens: r.get::<_, i64>(4)? as u64,
+            output_tokens: r.get::<_, i64>(5)? as u64,
+            cache_read_tokens: r.get::<_, i64>(6)? as u64,
+            cost: r.get(7)?,
         })
     })?;
     rows.collect()

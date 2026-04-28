@@ -26,6 +26,7 @@
   <table id="by_model"><thead><tr>
     <th>model</th><th>provider</th>
     <th class="num">requests</th>
+    <th class="num">sessions</th>
     <th class="num">in</th><th class="num">out</th>
     <th class="num">cache_read</th><th class="num">cost ($)</th>
   </tr></thead><tbody></tbody></table>
@@ -62,6 +63,7 @@
           mtbody.insertAdjacentHTML('beforeend',
             `<tr><td>${m.model}</td><td>${m.provider}</td>
               <td class="num">${fmt(m.requests)}</td>
+              <td class="num">${fmt(m.sessions)}</td>
               <td class="num">${fmt(m.input_tokens)}</td>
               <td class="num">${fmt(m.output_tokens)}</td>
               <td class="num">${fmt(m.cache_read_tokens)}</td>
