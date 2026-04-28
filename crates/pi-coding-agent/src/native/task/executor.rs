@@ -224,6 +224,7 @@ pub async fn run_one(
             ThinkingLevel::Low => pi_agent_core::settings::ThinkingSetting::Low,
             ThinkingLevel::Medium => pi_agent_core::settings::ThinkingSetting::Medium,
             ThinkingLevel::High => pi_agent_core::settings::ThinkingSetting::High,
+            ThinkingLevel::XHigh => pi_agent_core::settings::ThinkingSetting::XHigh,
         };
     }
 

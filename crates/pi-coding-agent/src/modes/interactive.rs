@@ -821,6 +821,7 @@ fn thinking_label(t: ThinkingSetting) -> &'static str {
         ThinkingSetting::Low => "low",
         ThinkingSetting::Medium => "medium",
         ThinkingSetting::High => "high",
+        ThinkingSetting::XHigh => "xhigh",
     }
 }
 
@@ -829,7 +830,8 @@ fn cycle_thinking(t: ThinkingSetting) -> ThinkingSetting {
         ThinkingSetting::Off => ThinkingSetting::Low,
         ThinkingSetting::Low => ThinkingSetting::Medium,
         ThinkingSetting::Medium => ThinkingSetting::High,
-        ThinkingSetting::High => ThinkingSetting::Off,
+        ThinkingSetting::High => ThinkingSetting::XHigh,
+        ThinkingSetting::XHigh => ThinkingSetting::Off,
     }
 }
 

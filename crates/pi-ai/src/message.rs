@@ -16,6 +16,10 @@ pub enum ThinkingLevel {
     Low,
     Medium,
     High,
+    /// Maximum reasoning compute on OpenAI's Responses API
+    /// (`reasoning.effort = "xhigh"`). For Anthropic providers,
+    /// this falls back to High at the wire level.
+    XHigh,
 }
 
 impl Default for ThinkingLevel {

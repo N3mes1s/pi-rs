@@ -202,6 +202,7 @@ impl OpenAiProvider {
                 ThinkingLevel::Low => Some("low"),
                 ThinkingLevel::Medium => Some("medium"),
                 ThinkingLevel::High => Some("high"),
+                ThinkingLevel::XHigh => Some("xhigh"),
             };
             if let Some(e) = effort {
                 body["reasoning_effort"] = json!(e);

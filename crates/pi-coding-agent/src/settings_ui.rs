@@ -106,6 +106,7 @@ fn thinking_label(t: ThinkingSetting) -> &'static str {
         ThinkingSetting::Low => "low",
         ThinkingSetting::Medium => "medium",
         ThinkingSetting::High => "high",
+        ThinkingSetting::XHigh => "xhigh",
     }
 }
 
@@ -115,6 +116,7 @@ fn parse_thinking(s: &str) -> Option<ThinkingSetting> {
         "low" => Some(ThinkingSetting::Low),
         "medium" => Some(ThinkingSetting::Medium),
         "high" => Some(ThinkingSetting::High),
+        "xhigh" => Some(ThinkingSetting::XHigh),
         _ => None,
     }
 }

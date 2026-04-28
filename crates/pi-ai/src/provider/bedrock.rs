@@ -132,8 +132,9 @@ impl Provider for BedrockAnthropicProvider {
                 let budget = match level {
                     ThinkingLevel::Low => 4_000,
                     ThinkingLevel::Medium => 16_000,
-                    ThinkingLevel::High => 32_000,
-                    _ => 0,
+                    // Bedrock has no xhigh tier; share the High budget.
+                    ThinkingLevel::High | ThinkingLevel::XHigh => 32_000,
+                    ThinkingLevel::Off => unreachable!(),
                 };
                 body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
             }

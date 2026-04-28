@@ -394,6 +394,10 @@ pub enum ThinkingSetting {
     Low,
     Medium,
     High,
+    /// Maximum reasoning effort. On OpenAI Responses-API models
+    /// (gpt-5.x, o-series) this maps to `effort: "xhigh"`. On
+    /// Anthropic and Bedrock providers it clamps to `High`.
+    XHigh,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,6 +466,7 @@ impl From<ThinkingSetting> for pi_ai::ThinkingLevel {
             ThinkingSetting::Low => pi_ai::ThinkingLevel::Low,
             ThinkingSetting::Medium => pi_ai::ThinkingLevel::Medium,
             ThinkingSetting::High => pi_ai::ThinkingLevel::High,
+            ThinkingSetting::XHigh => pi_ai::ThinkingLevel::XHigh,
         }
     }
 }

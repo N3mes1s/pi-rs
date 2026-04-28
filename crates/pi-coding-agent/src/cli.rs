@@ -17,8 +17,10 @@ pub struct Cli {
     #[arg(long)]
     pub models: Option<String>,
 
-    /// Thinking level: off, low, medium, high.
-    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(["off","low","medium","high"]))]
+    /// Thinking level: off, low, medium, high, xhigh.
+    /// `xhigh` maps to OpenAI Responses-API `effort:"xhigh"` for gpt-5.x;
+    /// on Anthropic/Bedrock it clamps to `high`.
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(["off","low","medium","high","xhigh"]))]
     pub thinking: Option<String>,
 
     /// Allowlist of tool names. Comma-separated.
