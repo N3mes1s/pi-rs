@@ -139,18 +139,23 @@ impl LspEngine {
                 .ok_or_else(|| EngineError::UnknownLanguage(language.into()))?;
             entry.command.iter().copied().collect()
         };
-        let client = LspClient::spawn(&argv).await.map_err(|source| EngineError::Spawn {
-            language: language.into(),
-            source,
-        })?;
+        let client = LspClient::spawn(&argv)
+            .await
+            .map_err(|source| EngineError::Spawn {
+                language: language.into(),
+                source,
+            })?;
         // The spec demands an `initialize` round-trip before any other
         // request. `rootUri` is constructed from the engine's pinned
         // workspace root.
         let root_uri = format!("file://{}", self.root.display());
-        client.initialize(&root_uri).await.map_err(|source| EngineError::Spawn {
-            language: language.into(),
-            source,
-        })?;
+        client
+            .initialize(&root_uri)
+            .await
+            .map_err(|source| EngineError::Spawn {
+                language: language.into(),
+                source,
+            })?;
         let entry = Arc::new(ServerEntry {
             client: Arc::new(client),
             opened: Mutex::new(HashSet::new()),
@@ -180,11 +185,7 @@ impl LspEngine {
     /// keeps tracking the document for the life of the process). Files
     /// that fail to read are silently skipped — the request will fail
     /// downstream with a clearer message from the server.
-    async fn ensure_opened(
-        &self,
-        entry: &ServerEntry,
-        file: &Path,
-    ) -> Result<(), EngineError> {
+    async fn ensure_opened(&self, entry: &ServerEntry, file: &Path) -> Result<(), EngineError> {
         {
             let opened = entry.opened.lock().await;
             if opened.contains(file) {
@@ -195,7 +196,9 @@ impl LspEngine {
             return Ok(());
         };
         let language = language_for_extension(
-            file.extension().and_then(|e| e.to_str()).unwrap_or_default(),
+            file.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default(),
         )
         .map(|e| e.language)
         .unwrap_or("plaintext");
@@ -236,7 +239,9 @@ impl LspEngine {
         let params = json!({
             "textDocument": { "uri": Self::file_uri(file) },
         });
-        Ok(client.send_request("textDocument/diagnostic", params).await?)
+        Ok(client
+            .send_request("textDocument/diagnostic", params)
+            .await?)
     }
 
     /// `textDocument/formatting` — full-document formatting (LSP 3.17
@@ -253,7 +258,9 @@ impl LspEngine {
             "textDocument": { "uri": Self::file_uri(file) },
             "options": options,
         });
-        Ok(client.send_request("textDocument/formatting", params).await?)
+        Ok(client
+            .send_request("textDocument/formatting", params)
+            .await?)
     }
 
     /// Build the LSP `FormattingOptions` JSON object for `language`,
@@ -269,8 +276,7 @@ impl LspEngine {
             .map(|l| &l.format_options);
         let tab_size = cfg.and_then(|f| f.tab_size).unwrap_or(4);
         let insert_spaces = cfg.and_then(|f| f.insert_spaces).unwrap_or(true);
-        let trim_trailing_whitespace =
-            cfg.and_then(|f| f.trim_trailing_whitespace).unwrap_or(true);
+        let trim_trailing_whitespace = cfg.and_then(|f| f.trim_trailing_whitespace).unwrap_or(true);
         let insert_final_newline = cfg.and_then(|f| f.insert_final_newline).unwrap_or(true);
         let trim_final_newlines = cfg.and_then(|f| f.trim_final_newlines).unwrap_or(true);
         json!({
@@ -282,18 +288,15 @@ impl LspEngine {
         })
     }
 
-    pub async fn definition(
-        &self,
-        file: &Path,
-        line: u32,
-        col: u32,
-    ) -> Result<Value, EngineError> {
+    pub async fn definition(&self, file: &Path, line: u32, col: u32) -> Result<Value, EngineError> {
         let client = self.prepare(file).await?;
         let params = json!({
             "textDocument": { "uri": Self::file_uri(file) },
             "position": { "line": line, "character": col },
         });
-        Ok(client.send_request("textDocument/definition", params).await?)
+        Ok(client
+            .send_request("textDocument/definition", params)
+            .await?)
     }
 
     pub async fn hover(&self, file: &Path, line: u32, col: u32) -> Result<Value, EngineError> {
@@ -305,25 +308,24 @@ impl LspEngine {
         Ok(client.send_request("textDocument/hover", params).await?)
     }
 
-    pub async fn references(
-        &self,
-        file: &Path,
-        line: u32,
-        col: u32,
-    ) -> Result<Value, EngineError> {
+    pub async fn references(&self, file: &Path, line: u32, col: u32) -> Result<Value, EngineError> {
         let client = self.prepare(file).await?;
         let params = json!({
             "textDocument": { "uri": Self::file_uri(file) },
             "position": { "line": line, "character": col },
             "context": { "includeDeclaration": true },
         });
-        Ok(client.send_request("textDocument/references", params).await?)
+        Ok(client
+            .send_request("textDocument/references", params)
+            .await?)
     }
 
     pub async fn symbols(&self, file: &Path) -> Result<Value, EngineError> {
         let client = self.prepare(file).await?;
         let params = json!({ "textDocument": { "uri": Self::file_uri(file) }});
-        Ok(client.send_request("textDocument/documentSymbol", params).await?)
+        Ok(client
+            .send_request("textDocument/documentSymbol", params)
+            .await?)
     }
 
     /// `textDocument/typeDefinition` — same wire shape as `definition`.
@@ -480,17 +482,14 @@ mod tests {
     /// binary being installed.
     #[tokio::test]
     async fn command_override_lets_engine_use_fake_server_for_rust() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fake_lsp_server.py");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake_lsp_server.py");
         let mut cfg = cfg_enabled();
         cfg.languages.insert(
             "rust".into(),
             super::super::config::LanguageConfig {
                 enabled: Some(true),
-                command: Some(vec![
-                    "python3".into(),
-                    path.to_string_lossy().into_owned(),
-                ]),
+                command: Some(vec!["python3".into(), path.to_string_lossy().into_owned()]),
                 format_options: Default::default(),
             },
         );

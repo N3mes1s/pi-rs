@@ -89,9 +89,11 @@ fn clone_branch_replays_multiple_tool_pairs_in_order() {
     let mut tool_inputs: Vec<String> = new_branch
         .iter()
         .filter_map(|e| match &e.kind {
-            SessionEntryKind::ToolCall { call } => {
-                call.input.get("cmd").and_then(|v| v.as_str()).map(String::from)
-            }
+            SessionEntryKind::ToolCall { call } => call
+                .input
+                .get("cmd")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             _ => None,
         })
         .collect();

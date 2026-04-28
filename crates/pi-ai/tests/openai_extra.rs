@@ -9,10 +9,10 @@
 use futures::StreamExt;
 use pi_ai::auth::AuthMethod;
 use pi_ai::message::{Attachment, AttachmentKind, ContentBlock, Message, Role, ThinkingLevel};
+use pi_ai::provider::openai::message_to_openai;
 use pi_ai::provider::{
     GenerateRequest, OpenAiCompatProvider, OpenAiProvider, Provider, ProviderKind,
 };
-use pi_ai::provider::openai::message_to_openai;
 use pi_ai::registry::{ModelInfo, ProviderConfig};
 use pi_ai::stream::StreamEventKind;
 use pi_ai::{AiError, FinishReason, ToolSpec};
@@ -131,10 +131,8 @@ async fn openai_compat_provider_delegates() {
         .mount(&server)
         .await;
 
-    let compat = OpenAiCompatProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    let compat =
+        OpenAiCompatProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let resp = compat.generate(req(), &model()).await.expect("ok");
     assert_eq!(resp.message.text(), "compat");
@@ -245,7 +243,12 @@ async fn openai_content_filter_gives_refusal() {
     let mut saw_refusal = false;
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
-            if matches!(e.kind, StreamEventKind::Finish { reason: FinishReason::Refusal }) {
+            if matches!(
+                e.kind,
+                StreamEventKind::Finish {
+                    reason: FinishReason::Refusal
+                }
+            ) {
                 saw_refusal = true;
             }
         }
@@ -276,7 +279,12 @@ async fn openai_length_finish_reason() {
     let mut saw_length = false;
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
-            if matches!(e.kind, StreamEventKind::Finish { reason: FinishReason::Length }) {
+            if matches!(
+                e.kind,
+                StreamEventKind::Finish {
+                    reason: FinishReason::Length
+                }
+            ) {
                 saw_length = true;
             }
         }
@@ -394,7 +402,9 @@ async fn openai_function_call_finish_reason_tool_use() {
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
             match &e.kind {
-                StreamEventKind::Finish { reason: FinishReason::ToolUse } => {
+                StreamEventKind::Finish {
+                    reason: FinishReason::ToolUse,
+                } => {
                     saw_tool_use = true;
                 }
                 StreamEventKind::ToolCallComplete { name, .. } if name == "run" => {
@@ -404,7 +414,10 @@ async fn openai_function_call_finish_reason_tool_use() {
             }
         }
     }
-    assert!(saw_tool_use || saw_tool_complete, "expected ToolUse finish or ToolCallComplete");
+    assert!(
+        saw_tool_use || saw_tool_complete,
+        "expected ToolUse finish or ToolCallComplete"
+    );
 }
 
 // ── [DONE] with pending tool call flushes ToolCallComplete ────────────────────
@@ -434,7 +447,8 @@ async fn openai_done_flushes_pending_tool_call() {
     let mut saw_complete = false;
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
-            if matches!(&e.kind, StreamEventKind::ToolCallComplete { name, .. } if name == "flush_tool") {
+            if matches!(&e.kind, StreamEventKind::ToolCallComplete { name, .. } if name == "flush_tool")
+            {
                 saw_complete = true;
             }
         }

@@ -211,7 +211,12 @@ fn passing_tests_produce_heuristic_win() {
     let f = extract(&branch);
     let oc = features_only_outcome(&f).unwrap();
     match oc {
-        SessionEntryKind::Outcome { success, source, score, .. } => {
+        SessionEntryKind::Outcome {
+            success,
+            source,
+            score,
+            ..
+        } => {
             assert!(success);
             assert_eq!(source, OutcomeSource::Heuristic);
             assert!(score.unwrap() > 0.9);
@@ -335,7 +340,10 @@ fn build_user_message_includes_context_loaded_block_with_source_path() {
     let msg = build_user_message(&branch, &features, 0);
     assert!(msg.contains("<context_loaded>"), "missing block tag: {msg}");
     assert!(msg.contains("</context_loaded>"));
-    assert!(msg.contains("/repo/AGENTS.md"), "missing source path: {msg}");
+    assert!(
+        msg.contains("/repo/AGENTS.md"),
+        "missing source path: {msg}"
+    );
     assert!(msg.contains("4321 bytes"));
     assert!(msg.contains("1080 tokens"));
 }

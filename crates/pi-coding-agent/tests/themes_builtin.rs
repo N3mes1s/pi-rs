@@ -75,6 +75,10 @@ fn user_theme_with_same_name_overrides_builtin() {
 fn every_builtin_json_blob_parses_as_a_theme() {
     for (label, json) in BUILTIN_THEMES {
         let parsed: Result<pi_tui::Theme, _> = serde_json::from_str(json);
-        assert!(parsed.is_ok(), "{label} failed to parse: {:?}", parsed.err());
+        assert!(
+            parsed.is_ok(),
+            "{label} failed to parse: {:?}",
+            parsed.err()
+        );
     }
 }

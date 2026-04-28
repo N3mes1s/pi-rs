@@ -41,14 +41,24 @@ impl Tool for GrepTool {
             .get("pattern")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing `pattern`".into()))?;
-        let max = input.get("max_results").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+        let max = input
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(200) as usize;
         let path = match input.get("path").and_then(|v| v.as_str()) {
             Some(p) => resolve_path(ctx, p),
             None => ctx.cwd.clone(),
         };
-        let glob = input.get("glob").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let glob = input
+            .get("glob")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let re = Regex::new(pattern).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-        let pat = glob.as_deref().map(glob::Pattern::new).transpose().map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+        let pat = glob
+            .as_deref()
+            .map(glob::Pattern::new)
+            .transpose()
+            .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
 
         let mut walker = WalkBuilder::new(&path);
         walker.standard_filters(true).hidden(false);

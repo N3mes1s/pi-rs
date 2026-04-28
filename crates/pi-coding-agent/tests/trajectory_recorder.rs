@@ -13,8 +13,7 @@ use serde_json::json;
 fn fresh_manager() -> (SessionManager, tempfile::TempDir, tempfile::TempDir) {
     let base = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
-    let mgr =
-        SessionManager::on_disk(base.path().to_path_buf(), cwd.path().to_path_buf()).unwrap();
+    let mgr = SessionManager::on_disk(base.path().to_path_buf(), cwd.path().to_path_buf()).unwrap();
     (mgr, base, cwd)
 }
 
@@ -65,9 +64,13 @@ async fn fallback_outcome_appended_to_session_jsonl() {
     .unwrap();
 
     // No judge → features-only fallback should fire.
-    let outcome = finalize_session(&mgr, &meta.id, None).await.expect("outcome");
+    let outcome = finalize_session(&mgr, &meta.id, None)
+        .await
+        .expect("outcome");
     match outcome {
-        SessionEntryKind::Outcome { success, source, .. } => {
+        SessionEntryKind::Outcome {
+            success, source, ..
+        } => {
             assert!(success);
             assert_eq!(source, OutcomeSource::Heuristic);
         }
@@ -77,7 +80,10 @@ async fn fallback_outcome_appended_to_session_jsonl() {
     // The Outcome should be the last entry on disk.
     let txt = std::fs::read_to_string(&meta.path).unwrap();
     let last_line = txt.lines().last().unwrap();
-    assert!(last_line.contains("\"kind\":\"outcome\""), "last line: {last_line}");
+    assert!(
+        last_line.contains("\"kind\":\"outcome\""),
+        "last line: {last_line}"
+    );
 }
 
 #[tokio::test]

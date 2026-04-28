@@ -28,7 +28,11 @@ async fn branch_mode_creates_branch_and_cherry_picks() {
         .unwrap();
 
     match outcome {
-        wt::ReconcileOutcome::Branch { branch, sha, merged } => {
+        wt::ReconcileOutcome::Branch {
+            branch,
+            sha,
+            merged,
+        } => {
             assert_eq!(branch, "pi/task/task-br");
             assert!(!sha.is_empty());
             assert!(merged, "clean parent ⇒ cherry-pick should succeed");
@@ -41,7 +45,10 @@ async fn branch_mode_creates_branch_and_cherry_picks() {
             // The commit's tree contains hello.txt.
             let show = git(&repo, &["show", "--name-only", "--pretty=", &sha]).stdout;
             let names = String::from_utf8(show).unwrap();
-            assert!(names.contains("hello.txt"), "commit touches hello.txt: {names}");
+            assert!(
+                names.contains("hello.txt"),
+                "commit touches hello.txt: {names}"
+            );
 
             // Cherry-pick landed on parent HEAD.
             assert!(

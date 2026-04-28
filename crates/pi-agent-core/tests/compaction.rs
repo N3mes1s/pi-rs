@@ -1,13 +1,13 @@
 use async_trait::async_trait;
-use pi_agent_core::{discover_context_files, Compactor, Settings};
 use pi_agent_core::compaction::LlmCompactor;
+use pi_agent_core::{discover_context_files, Compactor, Settings};
 use pi_ai::auth::AuthMethod;
 use pi_ai::provider::EventStream;
 use pi_ai::registry::ProviderConfig;
 use pi_ai::stream::StreamEvent;
 use pi_ai::{
-    ContentBlock, GenerateRequest, GenerateResponse, Message, ModelInfo, Provider,
-    ProviderKind, Result as AiResult, Role, ToolCall, FinishReason, Usage,
+    ContentBlock, FinishReason, GenerateRequest, GenerateResponse, Message, ModelInfo, Provider,
+    ProviderKind, Result as AiResult, Role, ToolCall, Usage,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -97,11 +97,7 @@ impl Provider for MockProvider {
             usage: Usage::default(),
         })
     }
-    async fn stream(
-        &self,
-        _req: GenerateRequest,
-        _model: &ModelInfo,
-    ) -> AiResult<EventStream> {
+    async fn stream(&self, _req: GenerateRequest, _model: &ModelInfo) -> AiResult<EventStream> {
         // Not used because we override generate().
         Ok(Box::pin(futures::stream::empty::<AiResult<StreamEvent>>()))
     }
@@ -153,7 +149,11 @@ async fn llm_compactor_emits_context_recap_with_mock_provider() {
         msgs.push(assistant(&format!("a{i}")));
     }
     let (out, summary) = c.compact(&msgs, Some("focus on TODOs")).await.unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "provider should be called once");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "provider should be called once"
+    );
     assert_eq!(summary, "FAKE_SUMMARY");
     let first_text = match &out[0].content[0] {
         ContentBlock::Text { text } => text.clone(),

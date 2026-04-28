@@ -25,10 +25,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use pi_ai::{
-    AnthropicProvider, AuthMethod, AuthStorage, AzureOpenAiProvider,
-    BedrockAnthropicProvider, GenerateRequest, GoogleProvider, Message, ModelInfo,
-    ModelRegistry, OpenAiCompatProvider, OpenAiProvider, Provider, ProviderConfig,
-    ProviderKind, ThinkingLevel,
+    AnthropicProvider, AuthMethod, AuthStorage, AzureOpenAiProvider, BedrockAnthropicProvider,
+    GenerateRequest, GoogleProvider, Message, ModelInfo, ModelRegistry, OpenAiCompatProvider,
+    OpenAiProvider, Provider, ProviderConfig, ProviderKind, ThinkingLevel,
 };
 
 use super::agents_md::{AgentsMd, Section};
@@ -187,12 +186,12 @@ impl Mutator {
 
         let provider = self.provider.clone();
         let model = self.model_info.clone();
-        let resp =
-            match tokio::time::timeout(MUTATE_TIMEOUT, provider.generate(req, &model)).await {
-                Err(_) => return Err(MutateError::Timeout),
-                Ok(Err(e)) => return Err(MutateError::Provider(e.to_string())),
-                Ok(Ok(r)) => r,
-            };
+        let resp = match tokio::time::timeout(MUTATE_TIMEOUT, provider.generate(req, &model)).await
+        {
+            Err(_) => return Err(MutateError::Timeout),
+            Ok(Err(e)) => return Err(MutateError::Provider(e.to_string())),
+            Ok(Ok(r)) => r,
+        };
 
         let raw = resp.message.text();
         post_process(&raw, section.body.len(), self.config.length_cap_factor)
@@ -310,7 +309,9 @@ fn strip_code_fences(s: &str) -> String {
 fn trim_blank_lines(s: &str) -> String {
     let mut start = 0;
     let bytes = s.as_bytes();
-    while start < bytes.len() && (bytes[start] == b'\n' || bytes[start] == b' ' || bytes[start] == b'\t') {
+    while start < bytes.len()
+        && (bytes[start] == b'\n' || bytes[start] == b' ' || bytes[start] == b'\t')
+    {
         if bytes[start] == b'\n' {
             start += 1;
         } else {

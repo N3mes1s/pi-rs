@@ -91,7 +91,10 @@ async fn azure_stream_assembles_text_and_finish() {
     )
     .with_api_version("2024-10-21");
 
-    let resp = provider.generate(req(), &model()).await.expect("generate ok");
+    let resp = provider
+        .generate(req(), &model())
+        .await
+        .expect("generate ok");
     assert_eq!(resp.message.text(), "Hello from Azure!");
     assert!(matches!(resp.finish_reason, FinishReason::Stop));
     assert!(resp.tool_calls.is_empty());
@@ -160,7 +163,10 @@ async fn azure_stream_reports_usage() {
         },
     );
 
-    let resp = provider.generate(req(), &model()).await.expect("generate ok");
+    let resp = provider
+        .generate(req(), &model())
+        .await
+        .expect("generate ok");
     assert_eq!(resp.usage.input_tokens, 5);
     assert_eq!(resp.usage.output_tokens, 4);
 }
@@ -185,7 +191,11 @@ async fn azure_5xx_yields_provider_error() {
         },
     );
 
-    let err = provider.stream(req(), &model()).await.err().expect("expected error");
+    let err = provider
+        .stream(req(), &model())
+        .await
+        .err()
+        .expect("expected error");
     match err {
         AiError::Provider { status, body } => {
             assert_eq!(status, 503);

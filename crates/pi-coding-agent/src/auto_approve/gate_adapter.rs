@@ -24,7 +24,11 @@ struct Inner {
 impl AutoApproveGate {
     pub fn new(mode: Mode, policy: Policy, judge: Option<Judge>) -> Self {
         Self {
-            inner: Arc::new(Inner { mode, policy, judge }),
+            inner: Arc::new(Inner {
+                mode,
+                policy,
+                judge,
+            }),
         }
     }
 
@@ -35,11 +39,7 @@ impl AutoApproveGate {
 
 #[async_trait]
 impl ToolGate for AutoApproveGate {
-    async fn approve(
-        &self,
-        tool_name: &str,
-        input: &serde_json::Value,
-    ) -> ToolGateOutcome {
+    async fn approve(&self, tool_name: &str, input: &serde_json::Value) -> ToolGateOutcome {
         let out = gate(
             self.inner.mode,
             &self.inner.policy,

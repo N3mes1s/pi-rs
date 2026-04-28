@@ -98,8 +98,6 @@ pub fn resolve(spec: &str, registry: &PromptRegistry, args: &str) -> Result<Stri
             None => return Err(format!("template not found: {spec}")),
         }
     };
-    let out = body
-        .replace("{{args}}", args)
-        .replace("{{ARGS}}", args);
+    let out = body.replace("{{args}}", args).replace("{{ARGS}}", args);
     Ok(out)
 }

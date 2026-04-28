@@ -27,21 +27,20 @@ pub mod rollback;
 pub mod tick;
 
 pub use agents_md::{AgentsMd, Section};
-pub use benchmark::{
-    load_cases, run_all, summarize, BenchmarkCase, BenchmarkError, BenchmarkSummary, Replay,
-    RolloutResult, SubprocessReplay,
-};
-pub use mutate::{
-    build_prompt, post_process, EvidenceItem, MutateError, Mutator, MutatorConfig,
-    MutationEvidence,
-};
-pub use orchestrator::{check_rollback, run_tick, TickError, TickInputs, TickReport};
 pub use apply::{
     add_poison, append_generation, append_history, backup_and_apply, best_strict_improvement,
     commit, decide, default_history_path, is_poisoned, pareto_frontier, poisoned_hashes,
     read_generations, read_history, rollback as restore_from_backup, should_rollback,
     ApplyDecision, Candidate, GenerationLogEntry, HistoryEntry, PendingApply,
 };
+pub use benchmark::{
+    load_cases, run_all, summarize, BenchmarkCase, BenchmarkError, BenchmarkSummary, Replay,
+    RolloutResult, SubprocessReplay,
+};
+pub use mutate::{
+    build_prompt, post_process, EvidenceItem, MutateError, MutationEvidence, Mutator, MutatorConfig,
+};
+pub use orchestrator::{check_rollback, run_tick, TickError, TickInputs, TickReport};
 pub use rollback::{tick as rollback_tick, RollbackOutcome};
 pub use tick::{
     evolve_dir, is_disabled, should_run, CostLedger, Lock, SkipReason, State, TickDecision,

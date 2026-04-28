@@ -55,15 +55,9 @@ fn req() -> GenerateRequest {
 async fn google_text_stream_captures_text() {
     let server = MockServer::start().await;
     let mut body = String::new();
-    body.push_str(
-        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello \"}]}}]}\n\n",
-    );
-    body.push_str(
-        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"world\"}]}}]}\n\n",
-    );
-    body.push_str(
-        "data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
-    );
+    body.push_str("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello \"}]}}]}\n\n");
+    body.push_str("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"world\"}]}}]}\n\n");
+    body.push_str("data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n");
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-test:streamGenerateContent"))
         .respond_with(
@@ -87,9 +81,7 @@ async fn google_function_call_emits_tool_call() {
     body.push_str(
         "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"deploy\",\"args\":{\"target\":\"prod\"}}}]}}]}\n\n",
     );
-    body.push_str(
-        "data: {\"candidates\":[{\"finishReason\":\"TOOL_USE\"}]}\n\n",
-    );
+    body.push_str("data: {\"candidates\":[{\"finishReason\":\"TOOL_USE\"}]}\n\n");
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-test:streamGenerateContent"))
         .respond_with(
@@ -146,7 +138,12 @@ async fn google_safety_finish_reason_is_refusal() {
     let mut found_refusal = false;
     while let Some(ev) = s.next().await {
         if let Ok(e) = ev {
-            if matches!(e.kind, StreamEventKind::Finish { reason: FinishReason::Refusal }) {
+            if matches!(
+                e.kind,
+                StreamEventKind::Finish {
+                    reason: FinishReason::Refusal
+                }
+            ) {
                 found_refusal = true;
                 break;
             }
@@ -161,7 +158,10 @@ fn google_message_to_parts_handles_all_block_types() {
     use pi_ai::provider::google::message_to_google_parts;
     let blocks = vec![
         ContentBlock::Text { text: "hi".into() },
-        ContentBlock::Thinking { text: "ponder".into(), signature: None },
+        ContentBlock::Thinking {
+            text: "ponder".into(),
+            signature: None,
+        },
         ContentBlock::ToolUse {
             id: "c1".into(),
             name: "ls".into(),
@@ -174,7 +174,10 @@ fn google_message_to_parts_handles_all_block_types() {
         },
         ContentBlock::Attachment {
             attachment: Attachment {
-                kind: AttachmentKind::Image { mime: "image/png".into(), base64: "abc".into() },
+                kind: AttachmentKind::Image {
+                    mime: "image/png".into(),
+                    base64: "abc".into(),
+                },
             },
         },
     ];
@@ -219,8 +222,7 @@ async fn google_emits_single_cumulative_usage_at_terminal_chunk() {
         .mount(&server)
         .await;
 
-    let provider =
-        GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider = GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let mut s = provider.stream(req(), &model()).await.expect("ok");
     let mut usages = Vec::new();
     while let Some(ev) = s.next().await {

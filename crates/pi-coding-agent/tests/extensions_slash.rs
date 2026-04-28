@@ -1,8 +1,6 @@
 //! Integration tests for extension-registered slash commands.
 
-use pi_coding_agent::extensions::{
-    ExtensionCommandManifest, ExtensionManifest, LoadedExtension,
-};
+use pi_coding_agent::extensions::{ExtensionCommandManifest, ExtensionManifest, LoadedExtension};
 use pi_coding_agent::slash::{SlashKind, SlashRegistry};
 use std::path::PathBuf;
 
@@ -20,7 +18,7 @@ fn mock_extension(commands: Vec<ExtensionCommandManifest>, executable: &str) -> 
             commands,
             timeout_ms: None,
             keybindings: vec![],
-                hooks: vec![],
+            hooks: vec![],
             replaces_builtin: vec![],
             startup_executable: None,
         },
@@ -109,11 +107,7 @@ fn extensions_slash_names_includes_registered_command() {
 /// its path.
 fn write_echo_script(dir: &std::path::Path) -> PathBuf {
     let path = dir.join("echo_args.sh");
-    std::fs::write(
-        &path,
-        "#!/bin/sh\necho \"$@\"\n",
-    )
-    .expect("write script");
+    std::fs::write(&path, "#!/bin/sh\necho \"$@\"\n").expect("write script");
 
     #[cfg(unix)]
     {
@@ -143,7 +137,7 @@ async fn extensions_slash_run_command_captures_stdout_with_args() {
             }],
             timeout_ms: Some(5_000),
             keybindings: vec![],
-                hooks: vec![],
+            hooks: vec![],
             replaces_builtin: vec![],
             startup_executable: None,
         },

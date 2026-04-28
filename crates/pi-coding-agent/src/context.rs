@@ -21,7 +21,10 @@ pub fn project_dir() -> PathBuf {
 }
 
 pub fn settings_paths() -> (PathBuf, PathBuf) {
-    (agent_dir().join("settings.json"), project_dir().join("settings.json"))
+    (
+        agent_dir().join("settings.json"),
+        project_dir().join("settings.json"),
+    )
 }
 
 /// Returns the global (user-level) settings.json path.
@@ -50,13 +53,22 @@ pub fn skills_dirs() -> Vec<PathBuf> {
 }
 
 pub fn prompts_dirs() -> Vec<PathBuf> {
-    vec![agent_dir().join("prompts"), PathBuf::from(".pi").join("prompts")]
+    vec![
+        agent_dir().join("prompts"),
+        PathBuf::from(".pi").join("prompts"),
+    ]
 }
 
 pub fn themes_dirs() -> Vec<PathBuf> {
-    vec![agent_dir().join("themes"), PathBuf::from(".pi").join("themes")]
+    vec![
+        agent_dir().join("themes"),
+        PathBuf::from(".pi").join("themes"),
+    ]
 }
 
 pub fn system_prompt_paths() -> Vec<PathBuf> {
-    vec![agent_dir().join("SYSTEM.md"), PathBuf::from(".pi").join("SYSTEM.md")]
+    vec![
+        agent_dir().join("SYSTEM.md"),
+        PathBuf::from(".pi").join("SYSTEM.md"),
+    ]
 }

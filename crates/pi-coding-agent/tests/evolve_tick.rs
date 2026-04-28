@@ -254,7 +254,10 @@ fn should_run_skips_when_recent_tick_and_few_new_outcomes() {
     };
     let decision = should_run(&s, &mut cost, &state, dir.path(), 100, true);
     // 1 new outcome (100-99) < 5 needed; 1 hour < 24 needed → skip.
-    assert!(matches!(decision, TickDecision::Skip(SkipReason::TooSoon { .. })));
+    assert!(matches!(
+        decision,
+        TickDecision::Skip(SkipReason::TooSoon { .. })
+    ));
 }
 
 #[test]

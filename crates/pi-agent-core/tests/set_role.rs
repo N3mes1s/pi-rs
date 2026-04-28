@@ -2,7 +2,9 @@
 
 use async_trait::async_trait;
 use pi_agent_core::settings::{ModelRoles, Role};
-use pi_agent_core::{create_agent_session, ProviderFactory, RuntimeConfig, SessionManager, Settings};
+use pi_agent_core::{
+    create_agent_session, ProviderFactory, RuntimeConfig, SessionManager, Settings,
+};
 use pi_ai::provider::EventStream;
 use pi_ai::{
     AuthMethod, AuthStorage, GenerateRequest, ModelInfo, ModelRegistry, Provider, ProviderConfig,

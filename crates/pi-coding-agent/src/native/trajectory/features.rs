@@ -220,14 +220,28 @@ fn termination_state(branch: &[SessionEntry]) -> Termination {
 fn is_test_command(cmd: &str) -> bool {
     let lc = cmd.to_lowercase();
     [
-        "cargo test", "cargo nextest", "cargo bench",
-        "pytest", "python -m pytest", "python -m unittest",
-        "npm test", "npm run test", "yarn test", "pnpm test",
-        "npx jest", "npx vitest", "jest", "vitest",
+        "cargo test",
+        "cargo nextest",
+        "cargo bench",
+        "pytest",
+        "python -m pytest",
+        "python -m unittest",
+        "npm test",
+        "npm run test",
+        "yarn test",
+        "pnpm test",
+        "npx jest",
+        "npx vitest",
+        "jest",
+        "vitest",
         "go test",
-        "mvn test", "gradle test",
-        "bundle exec rspec", "rake test", "rspec",
-        "mix test", "phpunit",
+        "mvn test",
+        "gradle test",
+        "bundle exec rspec",
+        "rake test",
+        "rspec",
+        "mix test",
+        "phpunit",
     ]
     .iter()
     .any(|p| lc.contains(p))
@@ -236,13 +250,23 @@ fn is_test_command(cmd: &str) -> bool {
 fn is_compile_command(cmd: &str) -> bool {
     let lc = cmd.to_lowercase();
     [
-        "cargo build", "cargo check", "cargo clippy",
-        "tsc", "tsc --noemit",
-        "mypy", "ruff check", "pyright",
-        "npm run build", "yarn build", "pnpm build",
-        "make", "cmake --build",
-        "go build", "go vet",
-        "javac", "mvn compile",
+        "cargo build",
+        "cargo check",
+        "cargo clippy",
+        "tsc",
+        "tsc --noemit",
+        "mypy",
+        "ruff check",
+        "pyright",
+        "npm run build",
+        "yarn build",
+        "pnpm build",
+        "make",
+        "cmake --build",
+        "go build",
+        "go vet",
+        "javac",
+        "mvn compile",
     ]
     .iter()
     .any(|p| lc.contains(p))
@@ -266,11 +290,25 @@ fn canonicalise_input(call: &ToolCall) -> String {
             .unwrap_or_default(),
         "grep" => format!(
             "{}|{}",
-            call.input.get("pattern").map(|v| v.to_string()).unwrap_or_default(),
-            call.input.get("path").map(|v| v.to_string()).unwrap_or_default(),
+            call.input
+                .get("pattern")
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            call.input
+                .get("path")
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
         ),
-        "find" => call.input.get("path").map(|v| v.to_string()).unwrap_or_default(),
-        "ls" => call.input.get("path").map(|v| v.to_string()).unwrap_or_default(),
+        "find" => call
+            .input
+            .get("path")
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        "ls" => call
+            .input
+            .get("path")
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
         _ => call.input.to_string(),
     }
 }

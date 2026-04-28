@@ -118,9 +118,7 @@ pub async fn gate(
             Outcome::AskUser(format!("policy says ASK for tool `{tool_name}`"))
         }
         (Mode::AutoJudge, Decision::Ask) => match judge {
-            None => Outcome::Reject(
-                "auto-judge mode active but no judge model configured".into(),
-            ),
+            None => Outcome::Reject("auto-judge mode active but no judge model configured".into()),
             Some(j) => match j.judge(tool_name, tool_input).await {
                 Ok(judge::JudgeVerdict::Approve) => Outcome::Approve,
                 Ok(judge::JudgeVerdict::Reject(reason)) => Outcome::Reject(reason),

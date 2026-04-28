@@ -211,7 +211,13 @@ async fn tick_runs_baseline_when_zero_generations_configured() {
     let auth = AuthStorage::in_memory();
     let registry = ModelRegistry::new(auth.clone());
     let agents_md = write_agents_md(cwd.path(), "# Title\n\n## Tools\nuse cargo\n");
-    write_session_jsonl(sessions.path(), &cwd_slug(cwd.path()), "s1", "fix bug", true);
+    write_session_jsonl(
+        sessions.path(),
+        &cwd_slug(cwd.path()),
+        "s1",
+        "fix bug",
+        true,
+    );
 
     let inputs = TickInputs {
         cwd: cwd.path(),
@@ -279,7 +285,10 @@ fn check_rollback_restores_on_regression() {
     assert_eq!(std::fs::read_to_string(&agents_md).unwrap(), "v1");
     // PendingApply cleared, hash poisoned.
     assert!(PendingApply::load(cwd.path()).is_none());
-    assert!(pi_coding_agent::evolve::is_poisoned(cwd.path(), "h_candidate"));
+    assert!(pi_coding_agent::evolve::is_poisoned(
+        cwd.path(),
+        "h_candidate"
+    ));
 }
 
 #[test]

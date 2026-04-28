@@ -60,14 +60,20 @@ fn inline_contains_kept_count() {
 #[test]
 fn inline_contains_metric_name() {
     let s = render_inline(&sample_state());
-    assert!(s.contains("total_µs"), "should contain metric name; got: {s}");
+    assert!(
+        s.contains("total_µs"),
+        "should contain metric name; got: {s}"
+    );
 }
 
 #[test]
 fn inline_contains_best_value() {
     let s = render_inline(&sample_state());
     // 15_200 formatted with comma separator → "15,200"
-    assert!(s.contains("15,200"), "should contain formatted best value; got: {s}");
+    assert!(
+        s.contains("15,200"),
+        "should contain formatted best value; got: {s}"
+    );
 }
 
 #[test]
@@ -76,7 +82,10 @@ fn inline_contains_percent_change() {
     // baseline=17300, best=15200, Lower → pct = (15200-17300)/17300 ≈ -12.1%
     // Just check for a percent sign and a minus sign.
     assert!(s.contains('%'), "should contain percent sign; got: {s}");
-    assert!(s.contains('-'), "should contain minus for improvement; got: {s}");
+    assert!(
+        s.contains('-'),
+        "should contain minus for improvement; got: {s}"
+    );
 }
 
 #[test]
@@ -187,7 +196,10 @@ fn table_contains_direction() {
     let state = sample_state();
     let runs = sample_runs();
     let t = render_table(&state, &runs);
-    assert!(t.contains("lower"), "direction should appear in table; got: {t}");
+    assert!(
+        t.contains("lower"),
+        "direction should appear in table; got: {t}"
+    );
 }
 
 #[test]
@@ -196,7 +208,10 @@ fn table_contains_baseline() {
     let runs = sample_runs();
     let t = render_table(&state, &runs);
     // baseline = 17,300
-    assert!(t.contains("17,300") || t.contains("17300"), "baseline should appear; got: {t}");
+    assert!(
+        t.contains("17,300") || t.contains("17300"),
+        "baseline should appear; got: {t}"
+    );
 }
 
 // ── percent formatting edge cases ─────────────────────────────────────────────
@@ -215,5 +230,8 @@ fn inline_higher_direction_positive_pct() {
     };
     let s = render_inline(&state);
     // improvement = (1200-1000)/1000 = +20%
-    assert!(s.contains('+'), "higher direction improvement should be positive; got: {s}");
+    assert!(
+        s.contains('+'),
+        "higher direction improvement should be positive; got: {s}"
+    );
 }

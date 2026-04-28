@@ -103,7 +103,7 @@ fn install_adds_provider_retrievable_via_get() {
             output_cost_per_mtok: 0.0,
             cache_read_cost_per_mtok: None,
             cache_write_cost_per_mtok: None,
-        api_kind: Default::default(),
+            api_kind: Default::default(),
         }],
     };
     reg.install(cfg);
@@ -133,7 +133,10 @@ fn registry_includes_o3_o3_pro_and_o4_mini() {
             .unwrap_or_else(|| panic!("missing openai/{id}"));
         assert_eq!(provider.name, "openai");
         assert_eq!(m.id, *id);
-        assert!(m.supports_thinking, "{id} should advertise supports_thinking");
+        assert!(
+            m.supports_thinking,
+            "{id} should advertise supports_thinking"
+        );
     }
 }
 
@@ -144,7 +147,10 @@ fn registry_includes_gpt_5_family_with_thinking() {
         let (_, m) = reg
             .resolve(&format!("openai/{id}"))
             .unwrap_or_else(|| panic!("missing openai/{id}"));
-        assert!(m.supports_thinking, "{id} should advertise supports_thinking");
+        assert!(
+            m.supports_thinking,
+            "{id} should advertise supports_thinking"
+        );
         assert!(m.supports_vision, "{id} should advertise vision");
     }
 }

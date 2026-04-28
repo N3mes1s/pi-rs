@@ -125,10 +125,7 @@ pub fn load_snapshot(
     }
     let baseline = sample_values.first().copied().unwrap_or(0.0);
     let current_best = match session.config.direction {
-        MetricDirection::Lower => sample_values
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min),
+        MetricDirection::Lower => sample_values.iter().copied().fold(f64::INFINITY, f64::min),
         MetricDirection::Higher => sample_values
             .iter()
             .copied()
@@ -168,7 +165,9 @@ pub fn export_dashboard(cwd: &Path) -> Result<std::path::PathBuf, String> {
 
     // Load JSONL log entries — upstream-format (run entries).
     let log = crate::autoresearch::log::JsonlLog::new(session.jsonl_path());
-    let runs = log.read_runs().map_err(|e| format!("cannot read log: {e}"))?;
+    let runs = log
+        .read_runs()
+        .map_err(|e| format!("cannot read log: {e}"))?;
 
     // Build run rows: (description, metric, kept).
     let mut run_rows: Vec<(String, f64, bool)> = Vec::new();
@@ -184,10 +183,7 @@ pub fn export_dashboard(cwd: &Path) -> Result<std::path::PathBuf, String> {
     let baseline = sample_values.first().copied().unwrap_or(0.0);
 
     let current_best = match session.config.direction {
-        MetricDirection::Lower => sample_values
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min),
+        MetricDirection::Lower => sample_values.iter().copied().fold(f64::INFINITY, f64::min),
         MetricDirection::Higher => sample_values
             .iter()
             .copied()

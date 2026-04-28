@@ -28,7 +28,9 @@ async fn exchange_code_returns_provider_error_on_non_2xx_response() {
     let ep = fake_endpoints(format!("{}/oauth/token", server.uri()));
     let pkce = Pkce::from_bytes(&[3u8; 32]);
     let client = reqwest::Client::new();
-    let err = exchange_code(&client, &ep, &pkce, "the-code").await.unwrap_err();
+    let err = exchange_code(&client, &ep, &pkce, "the-code")
+        .await
+        .unwrap_err();
     let s = err.to_string();
     assert!(s.contains("401") || s.contains("provider"), "got: {s}");
 }
@@ -45,7 +47,9 @@ async fn exchange_code_propagates_unparseable_body_as_error() {
     let ep = fake_endpoints(format!("{}/oauth/token", server.uri()));
     let pkce = Pkce::from_bytes(&[1u8; 32]);
     let client = reqwest::Client::new();
-    let err = exchange_code(&client, &ep, &pkce, "code").await.unwrap_err();
+    let err = exchange_code(&client, &ep, &pkce, "code")
+        .await
+        .unwrap_err();
     let _ = err; // any AiError variant counts; we just want the path executed
 }
 
@@ -110,7 +114,11 @@ async fn listen_for_callback_captures_code_and_state_on_match() {
         actual_bind
     );
     // Fire-and-forget — the listener returns once it gets one connection.
-    let _ = client.get(&url).timeout(Duration::from_millis(500)).send().await;
+    let _ = client
+        .get(&url)
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await;
 
     let res = listener.await.expect("join");
     let (code, state) = res.expect("listen ok");
@@ -131,12 +139,13 @@ async fn listen_for_callback_errors_on_state_mismatch() {
     });
     tokio::time::sleep(Duration::from_millis(80)).await;
 
-    let url = format!(
-        "http://{}/callback?code=X&state=WRONG_STATE",
-        actual_bind
-    );
+    let url = format!("http://{}/callback?code=X&state=WRONG_STATE", actual_bind);
     let client = reqwest::Client::new();
-    let _ = client.get(&url).timeout(Duration::from_millis(500)).send().await;
+    let _ = client
+        .get(&url)
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await;
 
     let r = listener.await.expect("join");
     assert!(r.is_err());

@@ -96,9 +96,7 @@ impl From<&pi_agent_core::settings::LspSettings> for LspConfig {
                             format_options: FormattingOptions {
                                 tab_size: v.format_options.tab_size,
                                 insert_spaces: v.format_options.insert_spaces,
-                                trim_trailing_whitespace: v
-                                    .format_options
-                                    .trim_trailing_whitespace,
+                                trim_trailing_whitespace: v.format_options.trim_trailing_whitespace,
                                 insert_final_newline: v.format_options.insert_final_newline,
                                 trim_final_newlines: v.format_options.trim_final_newlines,
                             },
@@ -246,7 +244,10 @@ mod tests {
         assert!(!c.diagnostics_on_write);
         let rust = c.languages.get("rust").expect("rust override survives");
         assert_eq!(rust.enabled, Some(true));
-        assert_eq!(rust.command.as_deref(), Some(&["ra-multiplex".to_string()][..]));
+        assert_eq!(
+            rust.command.as_deref(),
+            Some(&["ra-multiplex".to_string()][..])
+        );
     }
 
     #[test]

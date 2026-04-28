@@ -7,8 +7,10 @@ fn background_slash_is_registered_as_builtin() {
     let r = SlashRegistry::new();
     let cmd = r.get("background").expect("/background registered");
     assert_eq!(cmd.name, "background");
-    assert!(cmd.description.to_lowercase().contains("background")
-        || cmd.description.to_lowercase().contains("detach"));
+    assert!(
+        cmd.description.to_lowercase().contains("background")
+            || cmd.description.to_lowercase().contains("detach")
+    );
 }
 
 #[test]

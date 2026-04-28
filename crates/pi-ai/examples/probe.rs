@@ -1,9 +1,9 @@
 use futures::StreamExt;
+use pi_ai::registry::ModelInfo;
 use pi_ai::{
     AnthropicProvider, AuthMethod, GenerateRequest, Message, ProviderConfig, ProviderKind,
     ThinkingLevel,
 };
-use pi_ai::registry::{ModelInfo};
 
 #[tokio::main]
 async fn main() {
@@ -45,7 +45,11 @@ async fn main() {
     };
     eprintln!("[probe] doing direct reqwest test");
     let client = reqwest::Client::new();
-    match client.get("https://api.anthropic.com/v1/health").send().await {
+    match client
+        .get("https://api.anthropic.com/v1/health")
+        .send()
+        .await
+    {
         Ok(r) => eprintln!("[probe] reqwest GET ok: {}", r.status()),
         Err(e) => {
             eprintln!("[probe] reqwest GET error: {e:?}");

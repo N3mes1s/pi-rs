@@ -19,9 +19,7 @@ fn require_rust_analyzer() -> Option<std::path::PathBuf> {
     match which::which("rust-analyzer") {
         Ok(p) => Some(p),
         Err(_) => {
-            eprintln!(
-                "rust-analyzer not on PATH; skipping LspWriteTool real-LSP integration test"
-            );
+            eprintln!("rust-analyzer not on PATH; skipping LspWriteTool real-LSP integration test");
             None
         }
     }
@@ -112,10 +110,11 @@ async fn lsp_write_tool_real_rust_analyzer_format_on_write() {
                 last_display = d.clone();
                 let on_disk = std::fs::read_to_string(&lib_path).unwrap_or_default();
                 last_disk = on_disk.clone();
-                let formatted_flag =
-                    d.get("formatted").and_then(|v| v.as_bool()).unwrap_or(false);
-                let rustfmt_shaped = on_disk
-                    .contains("pub fn add(a: u32, b: u32) -> u32 {")
+                let formatted_flag = d
+                    .get("formatted")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let rustfmt_shaped = on_disk.contains("pub fn add(a: u32, b: u32) -> u32 {")
                     || on_disk.contains("fn add(a: u32, b: u32) -> u32 {");
                 if formatted_flag && rustfmt_shaped {
                     formatted_ok = true;

@@ -61,7 +61,9 @@ impl Tool for EditTool {
             return Ok(ToolResult {
                 tool_use_id: call_id.into(),
                 model_output: format!("ERROR: old_string not found in {}", resolved.display()),
-                display: Some(json!({"kind": "edit-error", "path": resolved.display().to_string()})),
+                display: Some(
+                    json!({"kind": "edit-error", "path": resolved.display().to_string()}),
+                ),
                 is_error: true,
             });
         }

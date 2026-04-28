@@ -118,10 +118,9 @@ async fn nested_task_call_blocked_by_spawns_allowlist() {
 
     // Build a ParentHandle whose `current_agent` is A — i.e. we're
     // *inside* the A subagent when the inner `task` call fires.
-    let agent_a = AgentDefinition::parse(
-        "---\nname: a\ndescription: a\nspawns: [only-this]\n---\nbody\n",
-    )
-    .unwrap();
+    let agent_a =
+        AgentDefinition::parse("---\nname: a\ndescription: a\nspawns: [only-this]\n---\nbody\n")
+            .unwrap();
     let handle = ParentHandle {
         parent_cfg: Arc::new(cfg),
         parent_session,

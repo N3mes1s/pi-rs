@@ -31,9 +31,7 @@ use pi_ai::{ToolResult, ToolSpec};
 use pi_tools::{Tool, ToolContext, ToolError};
 use serde_json::{json, Value};
 
-use crate::autoresearch::log::{
-    BestDirection, ConfigEntry, JsonlLog, RunEntry, RunStatus,
-};
+use crate::autoresearch::log::{BestDirection, ConfigEntry, JsonlLog, RunEntry, RunStatus};
 
 const DEFAULT_RUN_TIMEOUT_S: u64 = 600;
 const DEFAULT_CHECKS_TIMEOUT_S: u64 = 300;
@@ -48,7 +46,11 @@ fn resolve_working_dir(ctx: &ToolContext, input: &Value) -> PathBuf {
     match s {
         Some(p) => {
             let pb = PathBuf::from(p);
-            if pb.is_absolute() { pb } else { ctx.cwd.join(pb) }
+            if pb.is_absolute() {
+                pb
+            } else {
+                ctx.cwd.join(pb)
+            }
         }
         None => ctx.cwd.clone(),
     }
@@ -87,7 +89,9 @@ fn parse_metric_lines(stdout: &str) -> (Vec<(String, f64)>, BTreeMap<String, f64
     let denied = ["__proto__", "constructor", "prototype"];
     for line in stdout.lines() {
         let trimmed = line.trim_end();
-        let Some(rest) = trimmed.strip_prefix("METRIC ") else { continue };
+        let Some(rest) = trimmed.strip_prefix("METRIC ") else {
+            continue;
+        };
         let mut parts = rest.splitn(2, '=');
         let name = match parts.next() {
             Some(n) => n.trim(),
@@ -429,13 +433,12 @@ impl Tool for LogExperimentTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "log_experiment".into(),
-            description:
-                "Record an experiment outcome. Appends a `{run:N,…}` line to \
+            description: "Record an experiment outcome. Appends a `{run:N,…}` line to \
                  autoresearch.jsonl. status='keep' triggers `git add -A && git commit -m \
                  description`; the others trigger `git reset --hard commit`. ASI is the \
                  free-form note dict that survives revert (the only memory of a discarded run \
                  the next agent will see)."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -528,8 +531,7 @@ impl Tool for LogExperimentTool {
             }
             RunStatus::Discard | RunStatus::Crash | RunStatus::ChecksFailed => {
                 if !commit.is_empty() {
-                    let ok =
-                        git_reset_hard(&working_dir, &commit).map_err(ToolError::Io)?;
+                    let ok = git_reset_hard(&working_dir, &commit).map_err(ToolError::Io)?;
                     git_msg = if ok {
                         format!("git reset --hard {commit}")
                     } else {

@@ -88,7 +88,9 @@ fn assistant_with_text_and_tool_use_produces_one_message_with_both() {
     let m = Message {
         role: Role::Assistant,
         content: vec![
-            ContentBlock::Text { text: "looking up...".into() },
+            ContentBlock::Text {
+                text: "looking up...".into(),
+            },
             ContentBlock::ToolUse {
                 id: "c2".into(),
                 name: "search".into(),
@@ -100,8 +102,5 @@ fn assistant_with_text_and_tool_use_produces_one_message_with_both() {
     assert_eq!(out.len(), 1);
     assert_eq!(out[0]["role"], json!("assistant"));
     assert_eq!(out[0]["content"], json!("looking up..."));
-    assert_eq!(
-        out[0]["tool_calls"][0]["function"]["name"],
-        json!("search")
-    );
+    assert_eq!(out[0]["tool_calls"][0]["function"]["name"], json!("search"));
 }

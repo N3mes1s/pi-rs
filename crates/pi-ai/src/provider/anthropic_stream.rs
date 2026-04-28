@@ -30,10 +30,8 @@ pub(super) fn handle_anthropic_event(
     match etype {
         "message_start" => {
             if let Some(u) = data.get("message").and_then(|m| m.get("usage")) {
-                usage_running.input_tokens = u
-                    .get("input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                usage_running.input_tokens =
+                    u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                 usage_running.cache_read_tok = u
                     .get("cache_read_input_tokens")
                     .and_then(|v| v.as_u64())

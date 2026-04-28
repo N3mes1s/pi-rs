@@ -171,8 +171,10 @@ pub async fn google(
                 .get("supportedGenerationMethods")
                 .and_then(|v| v.as_array())
                 .map(|a| {
-                    a.iter()
-                        .any(|s| s.as_str() == Some("generateContent") || s.as_str() == Some("streamGenerateContent"))
+                    a.iter().any(|s| {
+                        s.as_str() == Some("generateContent")
+                            || s.as_str() == Some("streamGenerateContent")
+                    })
                 })
                 .unwrap_or(true);
             if !supports_gen {

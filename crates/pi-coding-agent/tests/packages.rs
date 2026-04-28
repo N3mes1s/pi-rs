@@ -109,6 +109,13 @@ fn package_dirs_does_not_duplicate_conventional_dir_when_manifest_lists_it() {
     );
     let pkgs = discover(root.path());
     let dirs = package_dirs(&pkgs[0]);
-    let count = dirs.extensions.iter().filter(|p| p.ends_with("extensions")).count();
-    assert_eq!(count, 1, "conventional dir must not duplicate manifest entry");
+    let count = dirs
+        .extensions
+        .iter()
+        .filter(|p| p.ends_with("extensions"))
+        .count();
+    assert_eq!(
+        count, 1,
+        "conventional dir must not duplicate manifest entry"
+    );
 }

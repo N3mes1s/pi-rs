@@ -33,7 +33,6 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
         expand_at_files(&startup.cli.at_files(), &prompt_text)
     };
 
-
     let printer = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev.kind {
@@ -48,7 +47,11 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
                     }
                 }
                 AgentEventKind::AssistantToolCall { call } => {
-                    eprintln!("\n[tool {}] {}", call.name, serde_json::to_string(&call.input).unwrap_or_default());
+                    eprintln!(
+                        "\n[tool {}] {}",
+                        call.name,
+                        serde_json::to_string(&call.input).unwrap_or_default()
+                    );
                 }
                 AgentEventKind::Error { message } => {
                     eprintln!("\n[error] {message}");

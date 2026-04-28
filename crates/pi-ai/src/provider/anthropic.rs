@@ -56,9 +56,7 @@ pub fn content_blocks_to_anthropic(blocks: &[ContentBlock]) -> Value {
     let mut out = Vec::new();
     for b in blocks {
         match b {
-            ContentBlock::Text { text } => {
-                out.push(json!({"type": "text", "text": text}))
-            }
+            ContentBlock::Text { text } => out.push(json!({"type": "text", "text": text})),
             ContentBlock::Thinking { text, signature } => out.push(json!({
                 "type": "thinking",
                 "thinking": text,
@@ -70,7 +68,11 @@ pub fn content_blocks_to_anthropic(blocks: &[ContentBlock]) -> Value {
                 "name": name,
                 "input": input,
             })),
-            ContentBlock::ToolResult { tool_use_id, content, is_error } => out.push(json!({
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => out.push(json!({
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
                 "content": content,
@@ -178,7 +180,12 @@ impl Provider for AnthropicProvider {
 
         let model_owned = model.clone();
         let s = stream::unfold(
-            (event_stream, tool_inputs.clone(), false, UsageAcc::default()),
+            (
+                event_stream,
+                tool_inputs.clone(),
+                false,
+                UsageAcc::default(),
+            ),
             move |(mut es, mut acc, mut done, mut usage_running)| {
                 let model_owned = model_owned.clone();
                 async move {

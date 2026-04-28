@@ -78,7 +78,7 @@ fn discover_walks_single_extension_root_with_manifest_at_root() {
             commands: vec![],
             timeout_ms: Some(5_000),
             keybindings: vec![],
-                hooks: vec![],
+            hooks: vec![],
             replaces_builtin: vec![],
             startup_executable: None,
         },
@@ -108,7 +108,7 @@ async fn extension_tool_converts_json_output_to_tool_result() {
         commands: vec![],
         timeout_ms: Some(5_000),
         keybindings: vec![],
-                hooks: vec![],
+        hooks: vec![],
         replaces_builtin: vec![],
         startup_executable: None,
     };

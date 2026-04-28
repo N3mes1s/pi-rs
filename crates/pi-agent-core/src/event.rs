@@ -6,21 +6,47 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEventKind {
-    SessionStarted { id: String, cwd: String, model: String, provider: String },
-    UserMessage { message: Message },
+    SessionStarted {
+        id: String,
+        cwd: String,
+        model: String,
+        provider: String,
+    },
+    UserMessage {
+        message: Message,
+    },
     AssistantStart,
-    AssistantTextDelta { text: String },
-    AssistantThinkingDelta { text: String },
-    AssistantToolCall { call: ToolCall },
-    ToolResult { result: ToolResult },
-    AssistantMessage { message: Message },
-    Usage { usage: Usage },
+    AssistantTextDelta {
+        text: String,
+    },
+    AssistantThinkingDelta {
+        text: String,
+    },
+    AssistantToolCall {
+        call: ToolCall,
+    },
+    ToolResult {
+        result: ToolResult,
+    },
+    AssistantMessage {
+        message: Message,
+    },
+    Usage {
+        usage: Usage,
+    },
     TurnComplete,
-    Error { message: String },
+    Error {
+        message: String,
+    },
     Aborted,
     /// Compaction was triggered (manual or automatic).
-    CompactionStart { instructions: Option<String> },
-    CompactionComplete { summary: String, freed_tokens: u64 },
+    CompactionStart {
+        instructions: Option<String>,
+    },
+    CompactionComplete {
+        summary: String,
+        freed_tokens: u64,
+    },
     /// One notification from a `monitor` tool (RFD 0017). `lines` is one
     /// or more stdout lines joined with `\n`, batched within the
     /// `Settings::monitor::batch_window_ms` window.

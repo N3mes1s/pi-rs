@@ -32,7 +32,11 @@ fn read_policy(dir: &std::path::Path) -> serde_json::Value {
 fn list_in_fresh_agent_dir_prints_safe_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let out = pi(dir.path()).args(["--policy", "list"]).output().unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("policy file:"));
     assert!(stdout.contains("default_decision: Ask"));
@@ -48,7 +52,11 @@ fn add_appends_pattern_to_command_allow_regex() {
         .args(["--policy", "add bash:cargo .*"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v = read_policy(dir.path());
     let bash_rule = v["rules"]
         .as_array()
@@ -67,7 +75,11 @@ fn deny_appends_pattern_to_command_deny_regex() {
         .args(["--policy", "deny bash:rm -rf /"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v = read_policy(dir.path());
     let bash_rule = v["rules"]
         .as_array()
@@ -88,7 +100,11 @@ fn allow_sets_always_approve_true() {
         .args(["--policy", "allow custom_tool:*"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v = read_policy(dir.path());
     let rule = v["rules"]
         .as_array()
@@ -110,7 +126,11 @@ fn remove_reverses_an_add() {
         .args(["--policy", "remove bash:cargo .*"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v = read_policy(dir.path());
     let bash_rule = v["rules"]
         .as_array()

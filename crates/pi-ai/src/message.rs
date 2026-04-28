@@ -31,8 +31,15 @@ impl Default for ThinkingLevel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AttachmentKind {
-    Image { mime: String, base64: String },
-    File { mime: String, base64: String, name: String },
+    Image {
+        mime: String,
+        base64: String,
+    },
+    File {
+        mime: String,
+        base64: String,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +54,10 @@ pub enum ContentBlock {
     Text { text: String },
     /// Reasoning trace from the model. Anthropic exposes these natively;
     /// OpenAI variants get serialised back into <thinking></thinking>.
-    Thinking { text: String, signature: Option<String> },
+    Thinking {
+        text: String,
+        signature: Option<String>,
+    },
     /// A tool call requested by the model.
     ToolUse {
         id: String,
@@ -102,7 +112,7 @@ impl Message {
                 _ => None,
             })
             .collect::<Vec<_>>()
-                .join("")
+            .join("")
     }
 }
 

@@ -18,25 +18,42 @@ async fn read_write_edit_roundtrip() {
     let find = reg.get("find").unwrap();
 
     let r = write
-        .invoke(&ctx, "1", json!({"path": "hello.txt", "content": "alpha\nbeta\ngamma\n"}))
+        .invoke(
+            &ctx,
+            "1",
+            json!({"path": "hello.txt", "content": "alpha\nbeta\ngamma\n"}),
+        )
         .await
         .unwrap();
     assert!(!r.is_error);
 
-    let r = read.invoke(&ctx, "2", json!({"path": "hello.txt"})).await.unwrap();
+    let r = read
+        .invoke(&ctx, "2", json!({"path": "hello.txt"}))
+        .await
+        .unwrap();
     assert!(r.model_output.contains("alpha"));
     assert!(r.model_output.contains("gamma"));
 
     let r = edit
-        .invoke(&ctx, "3", json!({"path": "hello.txt", "old_string": "beta", "new_string": "BETA"}))
+        .invoke(
+            &ctx,
+            "3",
+            json!({"path": "hello.txt", "old_string": "beta", "new_string": "BETA"}),
+        )
         .await
         .unwrap();
     assert!(!r.is_error);
 
-    let r = read.invoke(&ctx, "4", json!({"path": "hello.txt"})).await.unwrap();
+    let r = read
+        .invoke(&ctx, "4", json!({"path": "hello.txt"}))
+        .await
+        .unwrap();
     assert!(r.model_output.contains("BETA"));
 
-    let r = bash.invoke(&ctx, "5", json!({"command": "echo from-bash"})).await.unwrap();
+    let r = bash
+        .invoke(&ctx, "5", json!({"command": "echo from-bash"}))
+        .await
+        .unwrap();
     assert!(r.model_output.contains("from-bash"));
     assert!(r.model_output.contains("[exit 0]"));
 
@@ -72,7 +89,11 @@ async fn edit_rejects_non_unique() {
     let r = reg
         .get("edit")
         .unwrap()
-        .invoke(&ctx, "2", json!({"path": "x", "old_string": "foo", "new_string": "bar"}))
+        .invoke(
+            &ctx,
+            "2",
+            json!({"path": "x", "old_string": "foo", "new_string": "bar"}),
+        )
         .await
         .unwrap();
     assert!(r.is_error);

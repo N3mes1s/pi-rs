@@ -8,8 +8,8 @@
 use futures::StreamExt;
 use pi_ai::auth::AuthMethod;
 use pi_ai::message::{ContentBlock, Message, Role, ThinkingLevel};
-use pi_ai::provider::{AnthropicProvider, GenerateRequest, Provider, ProviderKind};
 use pi_ai::provider::anthropic::content_blocks_to_anthropic;
+use pi_ai::provider::{AnthropicProvider, GenerateRequest, Provider, ProviderKind};
 use pi_ai::registry::{ModelInfo, ProviderConfig};
 use pi_ai::stream::StreamEventKind;
 use pi_ai::{AiError, FinishReason, ToolSpec};
@@ -113,8 +113,8 @@ async fn anthropic_oauth_token_accepted() {
 #[test]
 fn anthropic_with_client_builder() {
     let client = reqwest::Client::new();
-    let provider =
-        AnthropicProvider::new(cfg("http://localhost".into()), AuthMethod::None).with_client(client);
+    let provider = AnthropicProvider::new(cfg("http://localhost".into()), AuthMethod::None)
+        .with_client(client);
     assert_eq!(provider.config.name, "anthropic");
 }
 
@@ -142,7 +142,8 @@ async fn anthropic_system_message_forwarded() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let mut r = req();
     r.system = Some("You are helpful.".into());
 
@@ -172,7 +173,8 @@ async fn anthropic_temperature_and_max_tokens_forwarded() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let mut r = req();
     r.temperature = Some(0.5);
     r.max_output_tokens = Some(512);
@@ -202,7 +204,8 @@ async fn anthropic_tools_forwarded() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let mut r = req();
     r.tools = vec![ToolSpec {
         name: "bash".into(),
@@ -235,7 +238,8 @@ async fn anthropic_thinking_level_low_forwarded() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let mut r = req();
     r.thinking = ThinkingLevel::Low;
 
@@ -264,7 +268,8 @@ async fn anthropic_thinking_level_medium_forwarded() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let mut r = req();
     r.thinking = ThinkingLevel::Medium;
 
@@ -293,7 +298,8 @@ async fn anthropic_thinking_level_high_forwarded() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let mut r = req();
     r.thinking = ThinkingLevel::High;
 
@@ -324,7 +330,8 @@ async fn anthropic_thinking_delta_emitted() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut saw_thinking = false;
     while let Some(ev) = stream.next().await {
@@ -361,7 +368,8 @@ async fn anthropic_usage_from_message_delta() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let resp = provider.generate(req(), &model()).await.expect("ok");
     assert_eq!(resp.usage.output_tokens, 77);
 }
@@ -390,12 +398,18 @@ async fn anthropic_stop_reason_max_tokens_gives_length() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut saw_length = false;
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
-            if matches!(e.kind, StreamEventKind::Finish { reason: FinishReason::Length }) {
+            if matches!(
+                e.kind,
+                StreamEventKind::Finish {
+                    reason: FinishReason::Length
+                }
+            ) {
                 saw_length = true;
             }
         }
@@ -427,12 +441,18 @@ async fn anthropic_stop_reason_refusal() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut saw_refusal = false;
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
-            if matches!(e.kind, StreamEventKind::Finish { reason: FinishReason::Refusal }) {
+            if matches!(
+                e.kind,
+                StreamEventKind::Finish {
+                    reason: FinishReason::Refusal
+                }
+            ) {
                 saw_refusal = true;
             }
         }
@@ -464,17 +484,26 @@ async fn anthropic_stop_reason_other() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut saw_other = false;
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
-            if matches!(e.kind, StreamEventKind::Finish { reason: FinishReason::Other }) {
+            if matches!(
+                e.kind,
+                StreamEventKind::Finish {
+                    reason: FinishReason::Other
+                }
+            ) {
                 saw_other = true;
             }
         }
     }
-    assert!(saw_other, "expected Other finish reason for unknown stop_reason");
+    assert!(
+        saw_other,
+        "expected Other finish reason for unknown stop_reason"
+    );
 }
 
 // ── content_block_start for text (non-tool) → no tool accumulation ────────────
@@ -503,7 +532,8 @@ async fn anthropic_text_content_block_start_is_ignored() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let resp = provider.generate(req(), &model()).await.expect("ok");
     assert_eq!(resp.message.text(), "hello");
     assert!(resp.tool_calls.is_empty());
@@ -513,7 +543,9 @@ async fn anthropic_text_content_block_start_is_ignored() {
 
 #[test]
 fn content_blocks_to_anthropic_text() {
-    let blocks = vec![ContentBlock::Text { text: "hello".into() }];
+    let blocks = vec![ContentBlock::Text {
+        text: "hello".into(),
+    }];
     let val = content_blocks_to_anthropic(&blocks);
     let arr = val.as_array().unwrap();
     assert_eq!(arr[0]["type"], "text");
@@ -617,12 +649,10 @@ async fn anthropic_system_role_message_filtered() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
     let mut r = req();
-    r.messages = vec![
-        Message::system_text("system"),
-        Message::user_text("user"),
-    ];
+    r.messages = vec![Message::system_text("system"), Message::user_text("user")];
 
     let resp = provider.generate(r, &model()).await.expect("ok");
     assert_eq!(resp.message.text(), "filtered");

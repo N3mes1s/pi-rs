@@ -94,7 +94,9 @@ async fn gpt54_posts_to_v1_responses() {
 
     let provider = OpenAiProvider::new(
         provider_config(server.uri()),
-        AuthMethod::ApiKey { value: "dummy".into() },
+        AuthMethod::ApiKey {
+            value: "dummy".into(),
+        },
     );
 
     let _ = provider
@@ -122,7 +124,9 @@ async fn gpt4o_posts_to_v1_chat_completions() {
 
     let provider = OpenAiProvider::new(
         provider_config(server.uri()),
-        AuthMethod::ApiKey { value: "dummy".into() },
+        AuthMethod::ApiKey {
+            value: "dummy".into(),
+        },
     );
 
     let _ = provider

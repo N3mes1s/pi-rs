@@ -123,10 +123,8 @@ fn build_parent_cfg(factory: Arc<dyn ProviderFactory>) -> RuntimeConfig {
 }
 
 fn agent_def() -> AgentDefinition {
-    AgentDefinition::parse(
-        "---\nname: stub\ndescription: stub agent\n---\nyou are a stub.\n",
-    )
-    .unwrap()
+    AgentDefinition::parse("---\nname: stub\ndescription: stub agent\n---\nyou are a stub.\n")
+        .unwrap()
 }
 
 #[tokio::test]

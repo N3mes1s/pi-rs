@@ -24,7 +24,11 @@ fn run_list_returns_ok_on_empty_packages_dir() {
     std::env::set_var("PI_PACKAGE_DIR", &pkg);
 
     let r = cmd::run_list();
-    assert!(r.is_ok(), "run_list should succeed on empty pkg dir: {:?}", r);
+    assert!(
+        r.is_ok(),
+        "run_list should succeed on empty pkg dir: {:?}",
+        r
+    );
 
     std::env::remove_var("PI_CODING_AGENT_DIR");
     std::env::remove_var("PI_PACKAGE_DIR");

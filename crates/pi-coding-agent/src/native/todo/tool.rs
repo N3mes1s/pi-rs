@@ -28,14 +28,13 @@ impl Tool for TodoTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "todo".into(),
-            description:
-                "Manage a phased todo list persisted at <cwd>/.pi/todo.json. \
+            description: "Manage a phased todo list persisted at <cwd>/.pi/todo.json. \
                  Set `op` to one of: `replace` (set the entire list), \
                  `add_phase` (append a phase), `add_task` (append a task to a phase), \
                  `update` (change a task's status: pending|in_progress|completed|abandoned), \
                  `remove_task` (delete a task by id). Exactly one task is allowed to be \
                  in_progress at any time — the tool re-normalises automatically."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -134,18 +133,14 @@ impl Tool for TodoTool {
                 let state = parse_state(input.get("state"))
                     .ok_or_else(|| ToolError::InvalidInput("missing or bad `state`".into()))?;
                 if !todo.update(id, state) {
-                    return Err(ToolError::InvalidInput(format!(
-                        "no task with id '{id}'"
-                    )));
+                    return Err(ToolError::InvalidInput(format!("no task with id '{id}'")));
                 }
                 format!("todo: task '{id}' → {state:?}")
             }
             "remove_task" => {
                 let id = require_str(&input, "id")?;
                 if !todo.remove_task(id) {
-                    return Err(ToolError::InvalidInput(format!(
-                        "no task with id '{id}'"
-                    )));
+                    return Err(ToolError::InvalidInput(format!("no task with id '{id}'")));
                 }
                 format!("todo: task '{id}' removed")
             }

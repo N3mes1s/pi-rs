@@ -7,12 +7,10 @@ use std::path::{Path, PathBuf};
 /// Native skills that ship with pi-rs. Each is a `(folder_name, SKILL.md
 /// contents)` pair; on first use they are materialised to a stable temp
 /// directory so the existing on-disk skill loader works unchanged.
-const BUILTIN_SKILLS: &[(&str, &str)] = &[
-    (
-        "autoresearch-create",
-        include_str!("../skills/autoresearch-create/SKILL.md"),
-    ),
-];
+const BUILTIN_SKILLS: &[(&str, &str)] = &[(
+    "autoresearch-create",
+    include_str!("../skills/autoresearch-create/SKILL.md"),
+)];
 
 /// Materialise the built-in skills under `$PI_BUILTIN_SKILLS_DIR` (env
 /// override) or `<TMP>/pi-rs-builtin-skills/`. Returns the directory path
@@ -58,12 +56,8 @@ pub fn format_skills_for_prompt(skills: &[&Skill]) -> String {
         return String::new();
     }
     let mut s = String::new();
-    s.push_str(
-        "\n\nThe following skills provide specialized instructions for specific tasks.\n",
-    );
-    s.push_str(
-        "Use the read tool to load a skill's file when the task matches its description.\n",
-    );
+    s.push_str("\n\nThe following skills provide specialized instructions for specific tasks.\n");
+    s.push_str("Use the read tool to load a skill's file when the task matches its description.\n");
     s.push_str(
         "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n",
     );

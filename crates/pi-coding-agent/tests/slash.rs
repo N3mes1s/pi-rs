@@ -29,7 +29,10 @@ fn slash_registry_new_contains_builtins() {
     let reg = SlashRegistry::new();
     let names = reg.names();
     for needed in ["login", "logout", "model", "compact", "help", "quit"] {
-        assert!(names.contains(&needed.to_string()), "missing builtin {needed}");
+        assert!(
+            names.contains(&needed.to_string()),
+            "missing builtin {needed}"
+        );
     }
     let help = reg.get("help").expect("help builtin");
     assert!(matches!(help.kind, SlashKind::Builtin));

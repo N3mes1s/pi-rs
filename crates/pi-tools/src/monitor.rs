@@ -114,7 +114,12 @@ impl MonitorTool {
 
     /// PIDs of currently-active monitors (for diagnostics/tests).
     pub fn active_pids(&self) -> Vec<u32> {
-        self.handles.lock().unwrap().values().map(|h| h.pid).collect()
+        self.handles
+            .lock()
+            .unwrap()
+            .values()
+            .map(|h| h.pid)
+            .collect()
     }
 
     /// Stop every active monitor. Used on session drop.
@@ -159,8 +164,7 @@ impl Tool for MonitorTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "monitor".into(),
-            description:
-                "Run a long-lived background command whose stdout streams \
+            description: "Run a long-lived background command whose stdout streams \
                  back as one notification per line (batched within ~200 ms). \
                  Use for tail -f, dev servers, poll loops over CI / PR state, \
                  anywhere you'd want `bash` if it didn't block. Pipe through \
@@ -171,7 +175,7 @@ impl Tool for MonitorTool {
                  widen filters to cover failure signals (silence on a crash looks \
                  like silence on success); prefer `until <cond>; do sleep 2; done` \
                  when you only need a one-shot wait. ops: start | stop | list."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -241,7 +245,8 @@ impl MonitorTool {
             .get("timeout_ms")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.config.default_timeout.as_millis() as u64);
-        let timeout = Duration::from_millis(raw_timeout.min(self.config.max_timeout.as_millis() as u64));
+        let timeout =
+            Duration::from_millis(raw_timeout.min(self.config.max_timeout.as_millis() as u64));
 
         let cwd = match input.get("cwd").and_then(|v| v.as_str()) {
             Some(p) => resolve_path(ctx, p),
@@ -300,17 +305,8 @@ impl MonitorTool {
         let desc_clone = description.clone();
 
         tokio::spawn(reader_task(
-            id_clone,
-            desc_clone,
-            child,
-            stdout,
-            stderr,
-            cancel_rx,
-            sender,
-            handles,
-            cfg,
-            persistent,
-            timeout,
+            id_clone, desc_clone, child, stdout, stderr, cancel_rx, sender, handles, cfg,
+            persistent, timeout,
         ));
 
         Ok(ToolResult {
@@ -447,7 +443,11 @@ async fn reader_task(
     loop {
         let sleep_dur = if let Some(d) = window_deadline {
             let now = tokio::time::Instant::now();
-            if d > now { d - now } else { Duration::from_millis(0) }
+            if d > now {
+                d - now
+            } else {
+                Duration::from_millis(0)
+            }
         } else {
             Duration::from_secs(3600)
         };
@@ -546,12 +546,7 @@ async fn reader_task(
     });
 }
 
-fn flush_pending(
-    pending: &mut Vec<String>,
-    id: &str,
-    description: &str,
-    sender: &MonitorSender,
-) {
+fn flush_pending(pending: &mut Vec<String>, id: &str, description: &str, sender: &MonitorSender) {
     if pending.is_empty() {
         return;
     }

@@ -16,7 +16,9 @@ pub(crate) fn build_session(
     let cfg = startup.runtime_config.clone();
     let (_runtime, mut session) = create_agent_session(cfg, Some(tx))?;
 
-    if startup.cli.continue_recent || startup.cli.resume || startup.cli.session.is_some()
+    if startup.cli.continue_recent
+        || startup.cli.resume
+        || startup.cli.session.is_some()
         || startup.cli.fork.is_some()
     {
         let mgr = startup.runtime_config.session_manager.clone();

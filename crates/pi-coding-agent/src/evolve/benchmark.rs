@@ -211,11 +211,12 @@ pub fn summarize(results: &[RolloutResult]) -> BenchmarkSummary {
     let mean_tokens_out = results.iter().map(|r| r.tokens_out as f32).sum::<f32>() / nf;
     let mut tok_in: Vec<u64> = results.iter().map(|r| r.tokens_in).collect();
     tok_in.sort_unstable();
-    let p95_idx = ((n as f32 * 0.95).ceil() as usize).saturating_sub(1).min(n - 1);
+    let p95_idx = ((n as f32 * 0.95).ceil() as usize)
+        .saturating_sub(1)
+        .min(n - 1);
     let p95_tokens_in = tok_in[p95_idx];
     let total_cost_usd = results.iter().map(|r| r.cost_usd).sum();
-    let mean_duration_ms =
-        results.iter().map(|r| r.duration_ms as f32).sum::<f32>() / nf;
+    let mean_duration_ms = results.iter().map(|r| r.duration_ms as f32).sum::<f32>() / nf;
     BenchmarkSummary {
         n_cases: n,
         pass_rate,
@@ -294,9 +295,10 @@ impl Replay for SubprocessReplay {
             .tempdir()
             .map_err(BenchmarkError::Io)?;
 
-        let cwd = self.cwd.clone().unwrap_or_else(|| {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        });
+        let cwd = self
+            .cwd
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         let started = std::time::Instant::now();
         let mut cmd = tokio::process::Command::new(&self.pi_binary);
@@ -352,7 +354,11 @@ impl Replay for SubprocessReplay {
             Some(o) => {
                 let score = o.score.unwrap_or(if o.success { 0.7 } else { 0.3 });
                 let notes = o.notes.unwrap_or_else(|| {
-                    if o.success { "outcome: success".into() } else { "outcome: failure".into() }
+                    if o.success {
+                        "outcome: success".into()
+                    } else {
+                        "outcome: failure".into()
+                    }
                 });
                 (o.success, score, notes)
             }
@@ -366,11 +372,7 @@ impl Replay for SubprocessReplay {
                         stderr_buf.chars().take(200).collect::<String>()
                     )
                 };
-                (
-                    exit_success,
-                    if exit_success { 0.7 } else { 0.3 },
-                    notes,
-                )
+                (exit_success, if exit_success { 0.7 } else { 0.3 }, notes)
             }
         };
 
@@ -378,11 +380,7 @@ impl Replay for SubprocessReplay {
         // chars/4 approximation only if the child wrote nothing (e.g.
         // it crashed before the first model turn).
         let (tokens_in, tokens_out, cost_usd) = if mined.had_usage {
-            (
-                mined.tokens_in,
-                mined.tokens_out,
-                mined.cost_usd as f32,
-            )
+            (mined.tokens_in, mined.tokens_out, mined.cost_usd as f32)
         } else {
             let approx_in = (case.user_prompt.chars().count() / 4) as u64
                 + (agents_md_text.chars().count() / 4) as u64;
@@ -500,9 +498,7 @@ fn walk_jsonl(root: &Path) -> Vec<PathBuf> {
             }
             if meta.is_dir() {
                 stack.push(p);
-            } else if meta.is_file()
-                && p.extension().and_then(|s| s.to_str()) == Some("jsonl")
-            {
+            } else if meta.is_file() && p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
                 out.push(p);
             }
         }
@@ -570,9 +566,18 @@ mod tests {
             tmp.path(),
             "_home_user_proj",
             &[
-                entry(1, json!({ "kind": "meta", "cwd": "/x", "provider": "p", "model": "m", "title": null })),
-                entry(2, json!({ "kind": "usage", "usage": Usage { input_tokens: 100, output_tokens: 30, cost_usd: 0.0025, ..Default::default() }})),
-                entry(3, json!({ "kind": "usage", "usage": Usage { input_tokens: 50, output_tokens: 15, cost_usd: 0.0010, ..Default::default() }})),
+                entry(
+                    1,
+                    json!({ "kind": "meta", "cwd": "/x", "provider": "p", "model": "m", "title": null }),
+                ),
+                entry(
+                    2,
+                    json!({ "kind": "usage", "usage": Usage { input_tokens: 100, output_tokens: 30, cost_usd: 0.0025, ..Default::default() }}),
+                ),
+                entry(
+                    3,
+                    json!({ "kind": "usage", "usage": Usage { input_tokens: 50, output_tokens: 15, cost_usd: 0.0010, ..Default::default() }}),
+                ),
             ],
         );
         let mined = mine_session_dir(tmp.path()).expect("had a jsonl");
@@ -590,9 +595,18 @@ mod tests {
             tmp.path(),
             "slug",
             &[
-                entry(10, json!({ "kind": "outcome", "success": false, "source": "heuristic", "score": 0.2, "notes": "older" })),
-                entry(20, json!({ "kind": "outcome", "success": true, "source": "llm_judge", "score": 0.91, "notes": "newer" })),
-                entry(15, json!({ "kind": "outcome", "success": false, "source": "heuristic", "score": 0.4, "notes": "middle" })),
+                entry(
+                    10,
+                    json!({ "kind": "outcome", "success": false, "source": "heuristic", "score": 0.2, "notes": "older" }),
+                ),
+                entry(
+                    20,
+                    json!({ "kind": "outcome", "success": true, "source": "llm_judge", "score": 0.91, "notes": "newer" }),
+                ),
+                entry(
+                    15,
+                    json!({ "kind": "outcome", "success": false, "source": "heuristic", "score": 0.4, "notes": "middle" }),
+                ),
             ],
         );
         let o = mine_session_dir(tmp.path())
@@ -610,12 +624,19 @@ mod tests {
         let subdir = tmp.path().join("slug");
         std::fs::create_dir_all(&subdir).unwrap();
         let path = subdir.join("s.jsonl");
-        let usage = entry(2, json!({ "kind": "usage", "usage": Usage { input_tokens: 7, output_tokens: 0, ..Default::default() }}));
+        let usage = entry(
+            2,
+            json!({ "kind": "usage", "usage": Usage { input_tokens: 7, output_tokens: 0, ..Default::default() }}),
+        );
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "{{this is not valid json").unwrap();
         writeln!(f, "").unwrap();
         writeln!(f, "{}", usage).unwrap();
-        writeln!(f, "{{\"id\":\"x\",\"parent_id\":null,\"timestamp\":3,\"kind\":\"unknown_variant\"}}").unwrap();
+        writeln!(
+            f,
+            "{{\"id\":\"x\",\"parent_id\":null,\"timestamp\":3,\"kind\":\"unknown_variant\"}}"
+        )
+        .unwrap();
         let mined = mine_session_dir(tmp.path()).expect("dir");
         assert_eq!(mined.tokens_in, 7);
     }
@@ -679,7 +700,10 @@ mod tests {
             json!({ "kind": "usage", "usage": Usage { input_tokens: 1, output_tokens: 2, ..Default::default() }}),
         );
         let _: SessionEntry = serde_json::from_value(v).unwrap();
-        let v = entry(7, json!({ "kind": "outcome", "success": true, "source": "heuristic", "score": 0.5, "notes": null }));
+        let v = entry(
+            7,
+            json!({ "kind": "outcome", "success": true, "source": "heuristic", "score": 0.5, "notes": null }),
+        );
         let _: SessionEntry = serde_json::from_value(v).unwrap();
     }
 }

@@ -60,8 +60,8 @@ pub trait Provider: Send + Sync {
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut usage = Usage::default();
         let mut finish = FinishReason::Stop;
-        use futures::StreamExt;
         use crate::stream::StreamEventKind as K;
+        use futures::StreamExt;
         while let Some(ev) = stream.next().await {
             match ev?.kind {
                 K::TextDelta { text: t } => text.push_str(&t),

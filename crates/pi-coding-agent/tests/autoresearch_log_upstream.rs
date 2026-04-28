@@ -2,9 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use pi_coding_agent::autoresearch::{
-    BestDirection, ConfigEntry, JsonlLog, RunEntry, RunStatus,
-};
+use pi_coding_agent::autoresearch::{BestDirection, ConfigEntry, JsonlLog, RunEntry, RunStatus};
 
 fn tmp_log() -> (tempfile::TempDir, JsonlLog) {
     let dir = tempfile::tempdir().unwrap();
@@ -135,7 +133,8 @@ fn run_status_parse_handles_all_four_variants() {
 #[test]
 fn parse_metric_handles_int_float_and_µ_in_name() {
     use pi_coding_agent::autoresearch::tools::parse_metric;
-    let stdout = "warmup\nMETRIC startup_µs=1620\nMETRIC size_kib=5015.5\nMETRIC nope.bad=oops\nbye";
+    let stdout =
+        "warmup\nMETRIC startup_µs=1620\nMETRIC size_kib=5015.5\nMETRIC nope.bad=oops\nbye";
     assert_eq!(parse_metric(stdout, "startup_µs"), Some(1620.0));
     assert_eq!(parse_metric(stdout, "size_kib"), Some(5015.5));
     assert_eq!(parse_metric(stdout, "nope.bad"), None);

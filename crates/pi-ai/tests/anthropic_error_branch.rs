@@ -61,12 +61,8 @@ async fn anthropic_5xx_yields_provider_error() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey {
-            value: "k".into(),
-        },
-    );
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let res = provider.stream(req(), &model()).await;
     let err = res.err().expect("expected error");
@@ -103,12 +99,8 @@ async fn anthropic_skips_malformed_line_and_finishes() {
         .mount(&server)
         .await;
 
-    let provider = AnthropicProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey {
-            value: "k".into(),
-        },
-    );
+    let provider =
+        AnthropicProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut kinds = Vec::new();
@@ -117,7 +109,9 @@ async fn anthropic_skips_malformed_line_and_finishes() {
     }
     // Must contain MessageStart and a Finish at the end.
     assert!(
-        kinds.iter().any(|k| matches!(k, StreamEventKind::MessageStart)),
+        kinds
+            .iter()
+            .any(|k| matches!(k, StreamEventKind::MessageStart)),
         "expected MessageStart, got: {kinds:?}"
     );
     assert!(

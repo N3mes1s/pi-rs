@@ -40,11 +40,12 @@ impl Tool for ReadTool {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing `path`".into()))?;
-        let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
-        let limit = input
-            .get("limit")
+        let offset = input
+            .get("offset")
             .and_then(|v| v.as_u64())
-            .unwrap_or(2000) as usize;
+            .unwrap_or(1)
+            .max(1) as usize;
+        let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
         let resolved = resolve_path(ctx, path);
 
         // Image attachments are returned base64 in display so the agent loop

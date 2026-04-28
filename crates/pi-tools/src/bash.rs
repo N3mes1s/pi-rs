@@ -39,7 +39,10 @@ impl Tool for BashTool {
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing `command`".into()))?;
-        let timeout_ms = input.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(120_000);
+        let timeout_ms = input
+            .get("timeout_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(120_000);
         let cwd = match input.get("cwd").and_then(|v| v.as_str()) {
             Some(p) => resolve_path(ctx, p),
             None => ctx.cwd.clone(),

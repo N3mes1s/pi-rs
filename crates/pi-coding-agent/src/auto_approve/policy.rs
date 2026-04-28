@@ -183,8 +183,12 @@ impl Policy {
             .map(|r| (r.tool.clone(), r.clone()))
             .collect();
         for r in &mut self.rules {
-            let Some(parent_name) = r.inherit_from.clone() else { continue };
-            let Some(parent) = snapshot.get(&parent_name) else { continue };
+            let Some(parent_name) = r.inherit_from.clone() else {
+                continue;
+            };
+            let Some(parent) = snapshot.get(&parent_name) else {
+                continue;
+            };
             if r.command_allow_regex.is_empty() {
                 r.command_allow_regex = parent.command_allow_regex.clone();
             }
@@ -224,10 +228,7 @@ impl Policy {
             }
             // 2) bash command regex
             if !rule.command_deny_regex.is_empty() || !rule.command_allow_regex.is_empty() {
-                let cmd = input
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
                 for re in &rule.command_deny_regex {
                     if let Ok(r) = Regex::new(re) {
                         if r.is_match(cmd) {
@@ -251,10 +252,7 @@ impl Policy {
             }
             // 3) write/edit path globs
             if !rule.path_deny_globs.is_empty() || !rule.path_allow_globs.is_empty() {
-                let path = input
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 for g in &rule.path_deny_globs {
                     if let Ok(p) = glob::Pattern::new(g) {
                         if p.matches(path) {

@@ -33,12 +33,11 @@ impl Tool for TaskTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "task".into(),
-            description:
-                "Delegate one or more units of work to a named subagent. Each task runs \
+            description: "Delegate one or more units of work to a named subagent. Each task runs \
                  in a fresh runtime with isolated context, optionally a different model, \
                  and a (possibly restricted) tool set. Returns a single result block per \
                  task — the subagent's own transcript stays out of your context."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "required": ["agent", "tasks"],
@@ -109,9 +108,7 @@ impl Tool for TaskTool {
             let assignment = t
                 .get("assignment")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    ToolError::InvalidInput(format!("tasks[{i}].assignment missing"))
-                })?
+                .ok_or_else(|| ToolError::InvalidInput(format!("tasks[{i}].assignment missing")))?
                 .to_string();
             let description = t
                 .get("description")
@@ -161,14 +158,8 @@ impl Tool for TaskTool {
 
         // 5. Run.
         let max_conc = handle.parent_cfg.settings.task.max_concurrency.max(1);
-        let result = executor::run_batch(
-            &handle,
-            &agent,
-            shared_context.as_deref(),
-            tasks,
-            max_conc,
-        )
-        .await;
+        let result =
+            executor::run_batch(&handle, &agent, shared_context.as_deref(), tasks, max_conc).await;
 
         // 6. Package.
         let model_output = result

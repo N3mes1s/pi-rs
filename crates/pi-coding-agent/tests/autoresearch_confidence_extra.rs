@@ -8,10 +8,7 @@
 //! - exactly 3 samples is sufficient (boundary)
 //! - large improvement / small MAD → very large multiplier
 
-use pi_coding_agent::autoresearch::{
-    compute_confidence, ConfidenceBand,
-    session::MetricDirection,
-};
+use pi_coding_agent::autoresearch::{compute_confidence, session::MetricDirection, ConfidenceBand};
 
 // ── All-equal samples: MAD=0, no improvement → Red ───────────────────────────
 
@@ -32,7 +29,11 @@ fn all_equal_samples_with_improvement_gives_green_infinity() {
     let samples = [50.0, 50.0, 50.0];
     let s = compute_confidence(&samples, 100.0, MetricDirection::Lower);
     assert_eq!(s.band, ConfidenceBand::Green);
-    assert!(s.multiplier.is_infinite(), "expected ∞ multiplier; got {}", s.multiplier);
+    assert!(
+        s.multiplier.is_infinite(),
+        "expected ∞ multiplier; got {}",
+        s.multiplier
+    );
 }
 
 // ── All-equal samples Higher: MAD=0, improvement → Green (∞) ─────────────────
@@ -63,7 +64,11 @@ fn higher_direction_all_decreasing_gives_red() {
 fn exactly_three_samples_not_insufficient() {
     let samples = [1.0, 2.0, 3.0];
     let s = compute_confidence(&samples, 10.0, MetricDirection::Lower);
-    assert_ne!(s.band, ConfidenceBand::Insufficient, "3 samples should be sufficient");
+    assert_ne!(
+        s.band,
+        ConfidenceBand::Insufficient,
+        "3 samples should be sufficient"
+    );
 }
 
 // ── Exactly 2 samples is insufficient ────────────────────────────────────────
@@ -86,7 +91,11 @@ fn even_six_samples_median() {
     let samples = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     let s = compute_confidence(&samples, 10.0, MetricDirection::Lower);
     assert_eq!(s.band, ConfidenceBand::Green);
-    assert!((s.multiplier - 6.0).abs() < 1e-9, "expected 6.0, got {}", s.multiplier);
+    assert!(
+        (s.multiplier - 6.0).abs() < 1e-9,
+        "expected 6.0, got {}",
+        s.multiplier
+    );
 }
 
 // ── Large improvement / small MAD → high multiplier ──────────────────────────
@@ -99,7 +108,11 @@ fn large_improvement_small_mad_very_high_multiplier() {
     let samples = [99.9, 100.0, 100.1];
     let s = compute_confidence(&samples, 1000.0, MetricDirection::Lower);
     assert_eq!(s.band, ConfidenceBand::Green);
-    assert!(s.multiplier > 100.0, "expected very high multiplier; got {}", s.multiplier);
+    assert!(
+        s.multiplier > 100.0,
+        "expected very high multiplier; got {}",
+        s.multiplier
+    );
 }
 
 // ── Higher direction: improvement is max(samples) − baseline ─────────────────
@@ -114,7 +127,11 @@ fn higher_direction_improvement_is_max_minus_baseline() {
     let samples = [5.0, 10.0, 15.0];
     let s = compute_confidence(&samples, 0.0, MetricDirection::Higher);
     assert_eq!(s.band, ConfidenceBand::Green);
-    assert!((s.multiplier - 3.0).abs() < 1e-9, "expected 3.0, got {}", s.multiplier);
+    assert!(
+        (s.multiplier - 3.0).abs() < 1e-9,
+        "expected 3.0, got {}",
+        s.multiplier
+    );
 }
 
 // ── Odd-length median: 5 samples ─────────────────────────────────────────────
@@ -128,7 +145,11 @@ fn odd_five_samples_median() {
     let samples = [2.0, 4.0, 6.0, 8.0, 10.0];
     let s = compute_confidence(&samples, 20.0, MetricDirection::Lower);
     assert_eq!(s.band, ConfidenceBand::Green);
-    assert!((s.multiplier - 9.0).abs() < 1e-9, "expected 9.0, got {}", s.multiplier);
+    assert!(
+        (s.multiplier - 9.0).abs() < 1e-9,
+        "expected 9.0, got {}",
+        s.multiplier
+    );
 }
 
 // ── multiplier clamped to 0 when improvement is negative ─────────────────────

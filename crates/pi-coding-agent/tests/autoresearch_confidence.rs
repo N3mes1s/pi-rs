@@ -1,9 +1,6 @@
 //! Tests for `autoresearch::confidence`.
 
-use pi_coding_agent::autoresearch::{
-    compute_confidence, ConfidenceBand,
-    session::MetricDirection,
-};
+use pi_coding_agent::autoresearch::{compute_confidence, session::MetricDirection, ConfidenceBand};
 
 // ── Insufficient (< 3 samples) ────────────────────────────────────────────────
 
@@ -45,9 +42,18 @@ fn sufficient_with_three_samples() {
 fn mad_on_known_sample_lower() {
     let samples = [1.0, 2.0, 3.0, 4.0, 5.0];
     let s = compute_confidence(&samples, 10.0, MetricDirection::Lower);
-    assert_eq!(s.band, ConfidenceBand::Green, "multiplier = {}", s.multiplier);
+    assert_eq!(
+        s.band,
+        ConfidenceBand::Green,
+        "multiplier = {}",
+        s.multiplier
+    );
     // MAD = 1, improvement = 9 → multiplier = 9.0
-    assert!((s.multiplier - 9.0).abs() < 1e-9, "expected 9.0, got {}", s.multiplier);
+    assert!(
+        (s.multiplier - 9.0).abs() < 1e-9,
+        "expected 9.0, got {}",
+        s.multiplier
+    );
 }
 
 /// Same samples with direction = Higher.
@@ -59,7 +65,11 @@ fn mad_on_known_sample_higher() {
     let samples = [1.0, 2.0, 3.0, 4.0, 5.0];
     let s = compute_confidence(&samples, 1.0, MetricDirection::Higher);
     assert_eq!(s.band, ConfidenceBand::Green);
-    assert!((s.multiplier - 4.0).abs() < 1e-9, "expected 4.0, got {}", s.multiplier);
+    assert!(
+        (s.multiplier - 4.0).abs() < 1e-9,
+        "expected 4.0, got {}",
+        s.multiplier
+    );
 }
 
 // ── Band thresholds ───────────────────────────────────────────────────────────
@@ -95,7 +105,12 @@ fn band_yellow_between_1_and_2() {
     // MAD = 10 (median=20, deviations=[10,0,10])
     let s = compute_confidence(&samples, 25.0, MetricDirection::Lower);
     // improvement = 25 - 10 = 15, mult = 15/10 = 1.5 → Yellow
-    assert_eq!(s.band, ConfidenceBand::Yellow, "multiplier = {}", s.multiplier);
+    assert_eq!(
+        s.band,
+        ConfidenceBand::Yellow,
+        "multiplier = {}",
+        s.multiplier
+    );
     assert!((s.multiplier - 1.5).abs() < 1e-9);
 }
 
@@ -153,5 +168,9 @@ fn even_sample_count_median() {
     let samples = [1.0, 2.0, 3.0, 4.0];
     let s = compute_confidence(&samples, 10.0, MetricDirection::Lower);
     assert_eq!(s.band, ConfidenceBand::Green);
-    assert!((s.multiplier - 9.0).abs() < 1e-9, "multiplier = {}", s.multiplier);
+    assert!(
+        (s.multiplier - 9.0).abs() < 1e-9,
+        "multiplier = {}",
+        s.multiplier
+    );
 }

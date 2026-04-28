@@ -129,7 +129,8 @@ impl AgentDefinition {
     /// open with `---\n` and contain a closing `---` line; everything
     /// after the closing delimiter becomes [`system_prompt`].
     pub fn parse(text: &str) -> Result<Self, DefinitionParseError> {
-        let (front, body) = split_frontmatter(text).ok_or(DefinitionParseError::MissingFrontmatter)?;
+        let (front, body) =
+            split_frontmatter(text).ok_or(DefinitionParseError::MissingFrontmatter)?;
         let mut def: AgentDefinition = serde_yaml::from_str(front)?;
         def.system_prompt = body.trim().to_string();
         Ok(def)

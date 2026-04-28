@@ -68,16 +68,18 @@ pub fn format_tree_entry(entry: &pi_agent_core::SessionEntry) -> String {
             let short = short_text(&call.name, 60);
             return format!("tool_call: {}  {}", call.name, short);
         }
-        SessionEntryKind::ToolResult { result } => {
-            ("tool_result", result.model_output.clone())
-        }
+        SessionEntryKind::ToolResult { result } => ("tool_result", result.model_output.clone()),
         SessionEntryKind::Compaction { summary, .. } => ("compaction", summary.clone()),
         SessionEntryKind::Meta { .. } => ("meta", String::new()),
         SessionEntryKind::SystemPrompt { text } => ("system", text.clone()),
         SessionEntryKind::Usage { .. } => ("usage", String::new()),
         SessionEntryKind::ContextLoad { source, .. } => ("context_load", source.clone()),
         SessionEntryKind::Outcome { success, notes, .. } => (
-            if *success { "outcome:win" } else { "outcome:loss" },
+            if *success {
+                "outcome:win"
+            } else {
+                "outcome:loss"
+            },
             notes.clone().unwrap_or_default(),
         ),
         SessionEntryKind::EvolveMarker { generation, .. } => {
@@ -136,12 +138,7 @@ impl<T: Clone> Picker<T> {
 
     pub fn ranked(&self) -> Vec<(i64, &PickItem<T>)> {
         if self.query.is_empty() {
-            return self
-                .items
-                .iter()
-                .map(|i| (0, i))
-                .take(self.limit)
-                .collect();
+            return self.items.iter().map(|i| (0, i)).take(self.limit).collect();
         }
         let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
         let pat = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);

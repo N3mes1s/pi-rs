@@ -258,7 +258,8 @@ pub fn discover(roots: &[PathBuf]) -> Vec<LoadedExtension> {
                     }
                 }
             }
-        } else if r.is_file() && r.file_name().and_then(|n| n.to_str()) == Some("pi-extension.json") {
+        } else if r.is_file() && r.file_name().and_then(|n| n.to_str()) == Some("pi-extension.json")
+        {
             if let Some(parent) = r.parent() {
                 if let Some(ext) = load_one(parent) {
                     out.push(ext);
@@ -327,10 +328,11 @@ impl HookDispatcher {
                         ext.root.join(p)
                     }
                 };
-                per_event
-                    .entry(hook.event.clone())
-                    .or_default()
-                    .push((ext.root.clone(), exe_path, timeout));
+                per_event.entry(hook.event.clone()).or_default().push((
+                    ext.root.clone(),
+                    exe_path,
+                    timeout,
+                ));
             }
         }
 
@@ -349,7 +351,9 @@ impl HookDispatcher {
         let line = match serde_json::to_string(payload) {
             Ok(l) => l,
             Err(e) => {
-                tracing::warn!("hook_dispatcher: failed to serialize payload for event `{event}`: {e}");
+                tracing::warn!(
+                    "hook_dispatcher: failed to serialize payload for event `{event}`: {e}"
+                );
                 return;
             }
         };
@@ -474,9 +478,7 @@ pub async fn run_startup_hooks(exts: &[LoadedExtension]) {
         match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
-                tracing::warn!(
-                    "startup_hook: extension `{ext_name}` hook wait error: {e}"
-                );
+                tracing::warn!("startup_hook: extension `{ext_name}` hook wait error: {e}");
             }
             Err(_) => {
                 tracing::warn!(
@@ -489,19 +491,15 @@ pub async fn run_startup_hooks(exts: &[LoadedExtension]) {
 }
 
 /// Run an extension command (slash-command style). Returns stdout.
-pub async fn run_command(
-    ext: &LoadedExtension,
-    name: &str,
-    args: &str,
-) -> std::io::Result<String> {
+pub async fn run_command(ext: &LoadedExtension, name: &str, args: &str) -> std::io::Result<String> {
     let exe = ext.executable_path();
     let mut cmd = tokio::process::Command::new(&exe);
-    cmd.arg("command").arg(name).arg(args).current_dir(&ext.root);
+    cmd.arg("command")
+        .arg(name)
+        .arg(args)
+        .current_dir(&ext.root);
     let timeout = ext.timeout();
-    let child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "extension timeout"))??;

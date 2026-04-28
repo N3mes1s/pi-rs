@@ -36,13 +36,8 @@ async fn ask_is_registered_in_interactive_mode() {
 #[tokio::test]
 async fn ask_is_absent_in_print_mode() {
     let _td = isolated_env();
-    let cli = Cli::try_parse_from([
-        "pi",
-        "--print",
-        "--no-context-files",
-        "--no-extensions",
-    ])
-    .expect("parse print cli");
+    let cli = Cli::try_parse_from(["pi", "--print", "--no-context-files", "--no-extensions"])
+        .expect("parse print cli");
     let startup = assemble(cli).await.expect("assemble");
     let names = startup.runtime_config.tools.names();
     assert!(

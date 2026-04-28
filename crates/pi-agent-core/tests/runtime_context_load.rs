@@ -102,11 +102,15 @@ async fn context_load_emitted_once_before_first_user_entry() {
     let canned = vec![
         vec![
             ev(StreamEventKind::TextDelta { text: "ok1".into() }),
-            ev(StreamEventKind::Finish { reason: FinishReason::Stop }),
+            ev(StreamEventKind::Finish {
+                reason: FinishReason::Stop,
+            }),
         ],
         vec![
             ev(StreamEventKind::TextDelta { text: "ok2".into() }),
-            ev(StreamEventKind::Finish { reason: FinishReason::Stop }),
+            ev(StreamEventKind::Finish {
+                reason: FinishReason::Stop,
+            }),
         ],
     ];
     let cfg = build_cfg(

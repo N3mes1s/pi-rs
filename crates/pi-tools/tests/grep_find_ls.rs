@@ -23,7 +23,11 @@ async fn grep_glob_filter_matches_only_one_of_two_files() {
         .await
         .unwrap();
     write
-        .invoke(&c, "2", json!({"path": "b.md", "content": "needle here too"}))
+        .invoke(
+            &c,
+            "2",
+            json!({"path": "b.md", "content": "needle here too"}),
+        )
         .await
         .unwrap();
 

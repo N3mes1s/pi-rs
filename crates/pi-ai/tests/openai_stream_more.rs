@@ -100,9 +100,7 @@ async fn openai_usage_without_completion_tokens_details_defaults_reasoning_to_ze
     let server = MockServer::start().await;
 
     let mut body = String::new();
-    body.push_str(
-        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n",
-    );
+    body.push_str("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n");
     body.push_str(
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
     );

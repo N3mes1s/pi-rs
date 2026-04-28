@@ -115,7 +115,9 @@ impl Keymap {
 
     pub fn merge_overrides(&mut self, overrides: &BTreeMap<String, String>) {
         for (action_name, chord) in overrides {
-            if let Ok(action) = serde_json::from_value::<Action>(serde_json::Value::String(action_name.clone())) {
+            if let Ok(action) =
+                serde_json::from_value::<Action>(serde_json::Value::String(action_name.clone()))
+            {
                 if let Some(c) = parse_chord(chord) {
                     // remove any prior binding to this action.
                     self.bindings.retain(|_, a| *a != action);
@@ -145,7 +147,11 @@ impl Keymap {
 
 pub fn parse_chord(s: &str) -> Option<Chord> {
     let mut modifiers: u8 = 0;
-    let parts: Vec<&str> = s.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = s
+        .split('+')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect();
     if parts.is_empty() {
         return None;
     }

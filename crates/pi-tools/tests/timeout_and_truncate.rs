@@ -11,11 +11,7 @@ async fn bash_times_out_cleanly() {
     let reg = ToolRegistry::with_defaults();
     let bash = reg.get("bash").unwrap();
     let r = bash
-        .invoke(
-            &ctx,
-            "1",
-            json!({"command": "sleep 5", "timeout_ms": 100}),
-        )
+        .invoke(&ctx, "1", json!({"command": "sleep 5", "timeout_ms": 100}))
         .await
         .unwrap();
     assert!(r.is_error, "expected timeout to be reported as error");
@@ -90,7 +86,9 @@ async fn read_returns_image_attachment_as_base64() {
     assert_eq!(d.get("mime").and_then(|v| v.as_str()), Some("image/png"));
     let b64 = d.get("base64").and_then(|v| v.as_str()).unwrap();
     use base64::Engine;
-    let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .unwrap();
     assert_eq!(decoded, payload);
 
     // jpg/jpeg should map to image/jpeg

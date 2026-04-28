@@ -51,9 +51,7 @@ fn sse_body_full_usage() -> String {
     s.push_str(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}\n\n",
     );
-    s.push_str(
-        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-    );
+    s.push_str("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n");
     s.push_str(
         "data: {\"choices\":[],\"usage\":{\
 \"prompt_tokens\":1234,\

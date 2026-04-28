@@ -164,7 +164,16 @@ async fn log_experiment_appends_run_entry() {
         .status()
         .unwrap();
     std::process::Command::new("git")
-        .args(["-c", "user.email=t@e", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"])
+        .args([
+            "-c",
+            "user.email=t@e",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ])
         .current_dir(&cwd)
         .status()
         .unwrap();

@@ -11,8 +11,8 @@ use pi_agent_core::{
 };
 use pi_ai::provider::EventStream;
 use pi_ai::{
-    AuthMethod, AuthStorage, FinishReason, GenerateRequest, ModelInfo, ModelRegistry,
-    Provider, ProviderConfig, ProviderKind, Result as AiResult, StreamEvent, StreamEventKind,
+    AuthMethod, AuthStorage, FinishReason, GenerateRequest, ModelInfo, ModelRegistry, Provider,
+    ProviderConfig, ProviderKind, Result as AiResult, StreamEvent, StreamEventKind,
 };
 use pi_tools::{Tool, ToolContext, ToolError, ToolRegistry};
 use serde_json::json;
@@ -85,12 +85,7 @@ impl ProviderFactory for MockFactory {
 
 fn build_config(provider: MockProvider, tools: ToolRegistry) -> RuntimeConfig {
     let auth = AuthStorage::in_memory();
-    auth.set(
-        "anthropic",
-        AuthMethod::ApiKey {
-            value: "k".into(),
-        },
-    );
+    auth.set("anthropic", AuthMethod::ApiKey { value: "k".into() });
     let mut settings = Settings::default();
     settings.provider = "anthropic".into();
     settings.model = "sonnet".into();
@@ -294,9 +289,7 @@ async fn runtime_compact_with_llm_prepends_recap() {
     for i in 0..7 {
         let _ = i;
         turns.push(vec![
-            ev(StreamEventKind::TextDelta {
-                text: "ok".into(),
-            }),
+            ev(StreamEventKind::TextDelta { text: "ok".into() }),
             ev(StreamEventKind::Finish {
                 reason: FinishReason::Stop,
             }),
@@ -407,10 +400,7 @@ async fn runtime_abort_emits_aborted_event() {
     let started = Arc::new(tokio::sync::Notify::new());
     let proceed = Arc::new(tokio::sync::Notify::new());
     let auth = AuthStorage::in_memory();
-    auth.set(
-        "anthropic",
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    auth.set("anthropic", AuthMethod::ApiKey { value: "k".into() });
     let mut settings = Settings::default();
     settings.provider = "anthropic".into();
     settings.model = "sonnet".into();
@@ -490,14 +480,26 @@ async fn stream_interceptor_aborts_and_reinjects_then_completes() {
     // appended) emits a clean reply with no trigger, completing.
     let provider = MockProvider::new(vec![
         vec![
-            ev(StreamEventKind::TextDelta { text: "let me ".into() }),
-            ev(StreamEventKind::TextDelta { text: "PLAN ".into() }),
-            ev(StreamEventKind::TextDelta { text: "the change".into() }),
-            ev(StreamEventKind::Finish { reason: FinishReason::Stop }),
+            ev(StreamEventKind::TextDelta {
+                text: "let me ".into(),
+            }),
+            ev(StreamEventKind::TextDelta {
+                text: "PLAN ".into(),
+            }),
+            ev(StreamEventKind::TextDelta {
+                text: "the change".into(),
+            }),
+            ev(StreamEventKind::Finish {
+                reason: FinishReason::Stop,
+            }),
         ],
         vec![
-            ev(StreamEventKind::TextDelta { text: "ok, here's the plan: do X".into() }),
-            ev(StreamEventKind::Finish { reason: FinishReason::Stop }),
+            ev(StreamEventKind::TextDelta {
+                text: "ok, here's the plan: do X".into(),
+            }),
+            ev(StreamEventKind::Finish {
+                reason: FinishReason::Stop,
+            }),
         ],
     ]);
     let mut cfg = build_config(provider, ToolRegistry::new());
@@ -541,6 +543,12 @@ async fn stream_interceptor_aborts_and_reinjects_then_completes() {
         }
     }
     assert!(saw_abort, "expected Aborted from interceptor");
-    assert!(saw_reminder_user, "expected synthetic user message carrying reminder");
-    assert!(saw_assistant_after, "expected fresh assistant turn after inject");
+    assert!(
+        saw_reminder_user,
+        "expected synthetic user message carrying reminder"
+    );
+    assert!(
+        saw_assistant_after,
+        "expected fresh assistant turn after inject"
+    );
 }

@@ -224,7 +224,11 @@ pub async fn refresh(
 
 /// True if a stored OAuth method has expired (with 60s grace).
 pub fn is_expired(method: &AuthMethod) -> bool {
-    if let AuthMethod::OAuth { expires_at: Some(t), .. } = method {
+    if let AuthMethod::OAuth {
+        expires_at: Some(t),
+        ..
+    } = method
+    {
         return chrono::Utc::now().timestamp() >= *t - 60;
     }
     false
@@ -250,7 +254,9 @@ pub async fn listen_for_callback(
     let mut state = String::new();
     for kv in qs.split('&') {
         if let Some((k, v)) = kv.split_once('=') {
-            let dv = percent_encoding::percent_decode_str(v).decode_utf8_lossy().to_string();
+            let dv = percent_encoding::percent_decode_str(v)
+                .decode_utf8_lossy()
+                .to_string();
             match k {
                 "code" => code = dv,
                 "state" => state = dv,

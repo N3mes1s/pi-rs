@@ -34,7 +34,10 @@ async fn monitor_explicit_stop() {
         )
         .await
         .unwrap();
-    let id = r.display.unwrap()["monitor"]["id"].as_str().unwrap().to_string();
+    let id = r.display.unwrap()["monitor"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Push a couple of lines through the file.
     use std::io::Write;

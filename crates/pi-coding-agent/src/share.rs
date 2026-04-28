@@ -145,7 +145,8 @@ pub fn render_session_html(
             }
             SessionEntryKind::ToolCall { call } => {
                 let name = html_escape(&call.name);
-                let input = serde_json::to_string_pretty(&call.input).unwrap_or_else(|_| "{}".into());
+                let input =
+                    serde_json::to_string_pretty(&call.input).unwrap_or_else(|_| "{}".into());
                 let input_escaped = html_escape(input.trim_end());
                 body.push_str(&format!(
                     "<div class=\"block role-tool_call\">\
@@ -220,9 +221,7 @@ pub fn run_gh_gist(body: &str) -> Result<String, String> {
     use std::process::{Command, Stdio};
 
     if which::which("gh").is_err() {
-        return Err(
-            "/share requires the `gh` CLI; install it from https://cli.github.com".into(),
-        );
+        return Err("/share requires the `gh` CLI; install it from https://cli.github.com".into());
     }
     let mut child = Command::new("bash")
         .arg("-c")
@@ -237,7 +236,9 @@ pub fn run_gh_gist(body: &str) -> Result<String, String> {
             .write_all(body.as_bytes())
             .map_err(|e| format!("write gh stdin: {e}"))?;
     }
-    let out = child.wait_with_output().map_err(|e| format!("wait gh: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("wait gh: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "gh: {}",

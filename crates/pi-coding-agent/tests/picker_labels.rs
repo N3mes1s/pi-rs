@@ -67,7 +67,10 @@ fn session_label_full_case() {
     // short_id is first 8 chars
     assert!(label.starts_with("abcdef12"), "label = {label:?}");
     // provider/model present
-    assert!(label.contains("anthropic/claude-3-5-sonnet"), "label = {label:?}");
+    assert!(
+        label.contains("anthropic/claude-3-5-sonnet"),
+        "label = {label:?}"
+    );
     // title present
     assert!(label.contains("My conversation"), "label = {label:?}");
 }
@@ -160,7 +163,10 @@ fn tree_entry_assistant_kind() {
     let entry = assistant_entry("sure, here is the answer");
     let label = format_tree_entry(&entry);
     assert!(label.starts_with("assistant  "), "label = {label:?}");
-    assert!(label.contains("sure, here is the answer"), "label = {label:?}");
+    assert!(
+        label.contains("sure, here is the answer"),
+        "label = {label:?}"
+    );
 }
 
 #[test]
@@ -203,7 +209,10 @@ fn tree_entry_compaction_kind() {
     );
     let label = format_tree_entry(&entry);
     assert!(label.starts_with("compaction  "), "label = {label:?}");
-    assert!(label.contains("long conversation compacted"), "label = {label:?}");
+    assert!(
+        label.contains("long conversation compacted"),
+        "label = {label:?}"
+    );
 }
 
 #[test]
@@ -232,7 +241,10 @@ fn tree_entry_system_kind() {
     );
     let label = format_tree_entry(&entry);
     assert!(label.starts_with("system  "), "label = {label:?}");
-    assert!(label.contains("you are a helpful assistant"), "label = {label:?}");
+    assert!(
+        label.contains("you are a helpful assistant"),
+        "label = {label:?}"
+    );
 }
 
 #[test]
@@ -245,11 +257,7 @@ fn tree_entry_long_message_truncated_to_60_chars() {
     let prefix = "user  ";
     assert!(label.starts_with(prefix), "label = {label:?}");
     let text_part = &label[prefix.len()..];
-    assert_eq!(
-        text_part.chars().count(),
-        60,
-        "text part = {text_part:?}"
-    );
+    assert_eq!(text_part.chars().count(), 60, "text part = {text_part:?}");
 }
 
 #[test]

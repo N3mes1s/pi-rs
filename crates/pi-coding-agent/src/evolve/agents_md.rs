@@ -80,7 +80,12 @@ impl AgentsMd {
 
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(
-            self.preamble.len() + self.sections.iter().map(|s| s.heading.len() + s.body.len()).sum::<usize>(),
+            self.preamble.len()
+                + self
+                    .sections
+                    .iter()
+                    .map(|s| s.heading.len() + s.body.len())
+                    .sum::<usize>(),
         );
         out.push_str(&self.preamble);
         for s in &self.sections {
@@ -92,10 +97,7 @@ impl AgentsMd {
 
     /// Iterator over (index, section) pairs eligible for mutation.
     pub fn mutable_sections(&self) -> impl Iterator<Item = (usize, &Section)> {
-        self.sections
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.mutable)
+        self.sections.iter().enumerate().filter(|(_, s)| s.mutable)
     }
 
     /// Replace section `idx`'s body. Heading is left untouched. Mutable

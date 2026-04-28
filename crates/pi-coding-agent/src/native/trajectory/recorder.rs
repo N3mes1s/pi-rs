@@ -25,8 +25,8 @@
 use pi_agent_core::{RuntimeConfig, SessionEntryKind, SessionManager, Settings};
 use pi_ai::{AuthStorage, ModelRegistry};
 
-use super::judge::{features_only_outcome, Judge, JudgeConfig};
 use super::features::extract;
+use super::judge::{features_only_outcome, Judge, JudgeConfig};
 
 /// Build a [`Judge`] from settings + registry + auth, picking the
 /// `roles.smol` model when set (else the default smol). Returns `None`
@@ -71,14 +71,10 @@ pub async fn finalize_session(
     }
 
     // Idempotency: respect existing Outcome.
-    if let Some(existing) = branch
-        .iter()
-        .rev()
-        .find_map(|e| match &e.kind {
-            SessionEntryKind::Outcome { .. } => Some(e.kind.clone()),
-            _ => None,
-        })
-    {
+    if let Some(existing) = branch.iter().rev().find_map(|e| match &e.kind {
+        SessionEntryKind::Outcome { .. } => Some(e.kind.clone()),
+        _ => None,
+    }) {
         return Some(existing);
     }
 

@@ -57,9 +57,7 @@ pub fn encode_repo(repo_root: &Path) -> String {
 }
 
 pub fn worktree_dir(repo_root: &Path, task_id: &str) -> PathBuf {
-    worktrees_root()
-        .join(encode_repo(repo_root))
-        .join(task_id)
+    worktrees_root().join(encode_repo(repo_root)).join(task_id)
 }
 
 pub async fn ensure(repo_root: &Path, task_id: &str) -> Result<PathBuf, WorktreeError> {

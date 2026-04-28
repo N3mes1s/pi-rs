@@ -10,7 +10,10 @@ pub fn run_install(spec: &str) -> anyhow::Result<()> {
     let pkg = packages::install(spec, &dest)?;
     println!(
         "installed {} ({}) -> {}",
-        pkg.name.is_empty().then(|| spec.to_string()).unwrap_or(pkg.name.clone()),
+        pkg.name
+            .is_empty()
+            .then(|| spec.to_string())
+            .unwrap_or(pkg.name.clone()),
         pkg.version,
         pkg.path.display()
     );
@@ -86,12 +89,14 @@ pub async fn run_internal_evolve_tick() -> anyhow::Result<()> {
     // Tick log file.
     let _ = evolve_dir(&cwd); // ensure dir exists
     let log_path = cwd.join(".pi").join("evolve").join("tick.log");
-    let mut log_line = format!("[{}] tick start\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"));
+    let mut log_line = format!(
+        "[{}] tick start\n",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
+    );
 
     // Pi binary path: prefer current_exe so the subprocess stays
     // consistent across self-replacing installs.
-    let pi_binary = std::env::current_exe()
-        .unwrap_or_else(|_| std::path::PathBuf::from("pi"));
+    let pi_binary = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("pi"));
     let replay = SubprocessReplay {
         pi_binary,
         timeout: Duration::from_secs(180),
@@ -221,7 +226,9 @@ pub fn run_evolve(verb: &str) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        other => anyhow::bail!("unknown --evolve verb: {other} (expected: status, off, on, dry-run)"),
+        other => {
+            anyhow::bail!("unknown --evolve verb: {other} (expected: status, off, on, dry-run)")
+        }
     }
 }
 
@@ -271,8 +278,14 @@ fn run_evolve_dry_run(cwd: &std::path::Path) -> anyhow::Result<()> {
     println!("  cases_loaded:     {}", cases.len());
     println!("  ticks_run:        {}", state.ticks_run);
     println!("  spent_today:      ${:.4}", cost.today_spend());
-    println!("  daily_cost_cap:   ${:.4}", settings.evolve.daily_cost_cap_usd);
-    println!("  generations/tick: {}", settings.evolve.generations_per_tick);
+    println!(
+        "  daily_cost_cap:   ${:.4}",
+        settings.evolve.daily_cost_cap_usd
+    );
+    println!(
+        "  generations/tick: {}",
+        settings.evolve.generations_per_tick
+    );
     println!("  min_samples:      {}", settings.evolve.min_samples);
     println!(
         "  disabled_locally: {}",
@@ -440,9 +453,9 @@ pub fn run_share(target: &str) -> anyhow::Result<()> {
     let (provider, model) = entries
         .iter()
         .find_map(|e| match &e.kind {
-            SessionEntryKind::Meta { provider, model, .. } => {
-                Some((provider.clone(), model.clone()))
-            }
+            SessionEntryKind::Meta {
+                provider, model, ..
+            } => Some((provider.clone(), model.clone())),
             _ => None,
         })
         .unwrap_or_else(|| ("unknown".into(), "unknown".into()));
@@ -462,7 +475,6 @@ pub fn run_share(target: &str) -> anyhow::Result<()> {
     println!("{}", out_path.display());
     Ok(())
 }
-
 
 /// `pi --refresh-models` — query every provider with credentials for its
 /// live model catalogue, merge into `<agent_dir>/discovered-models.json`,
@@ -498,7 +510,11 @@ pub async fn run_refresh_models() -> anyhow::Result<()> {
             Err(e) => println!("  ✗ {} → {}", r.provider, e),
         }
     }
-    println!("total: {} models across {} providers", total, cache.providers.len());
+    println!(
+        "total: {} models across {} providers",
+        total,
+        cache.providers.len()
+    );
     Ok(())
 }
 
@@ -548,9 +564,9 @@ pub fn run_policy(spec: &str) -> anyhow::Result<()> {
     }
 
     // All non-list verbs need a `<tool>:<value>` payload.
-    let (tool, value) = rest
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("--policy {verb}: expected `<tool>:<value>`, got `{rest}`"))?;
+    let (tool, value) = rest.split_once(':').ok_or_else(|| {
+        anyhow::anyhow!("--policy {verb}: expected `<tool>:<value>`, got `{rest}`")
+    })?;
     let tool = tool.trim();
     let value = value.trim();
     if tool.is_empty() {

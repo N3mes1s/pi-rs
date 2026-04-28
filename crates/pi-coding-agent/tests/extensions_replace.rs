@@ -67,7 +67,10 @@ fn apply_replacements_swaps_builtin_bash_for_extension_tool() {
     let mut reg = ToolRegistry::with_defaults();
 
     // Sanity: builtin is present before replacement.
-    assert!(reg.get("bash").is_some(), "precondition: builtin bash absent");
+    assert!(
+        reg.get("bash").is_some(),
+        "precondition: builtin bash absent"
+    );
 
     let ext = fake_bash_replacement_ext();
     let exts = vec![ext];
@@ -93,11 +96,7 @@ fn apply_replacements_swaps_builtin_bash_for_extension_tool() {
         .expect("extension bash must be registered after apply_replacements");
 
     // Confirm it is the extension tool by checking the spec description.
-    assert_eq!(
-        tool.spec().name,
-        "bash",
-        "tool name must be 'bash'"
-    );
+    assert_eq!(tool.spec().name, "bash", "tool name must be 'bash'");
     assert!(
         tool.spec().description.contains("Custom bash replacement"),
         "expected extension description; got: {:?}",
@@ -106,7 +105,12 @@ fn apply_replacements_swaps_builtin_bash_for_extension_tool() {
 
     // Exactly one tool named 'bash' — no duplicates.
     let bash_count = reg.names().iter().filter(|n| n.as_str() == "bash").count();
-    assert_eq!(bash_count, 1, "expected exactly one 'bash' tool; names: {:?}", reg.names());
+    assert_eq!(
+        bash_count,
+        1,
+        "expected exactly one 'bash' tool; names: {:?}",
+        reg.names()
+    );
 }
 
 /// `apply_replacements` with an extension that declares no `replaces_builtin`

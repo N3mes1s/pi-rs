@@ -34,7 +34,11 @@ fn run_update_on_empty_packages_dir_succeeds() {
     std::env::set_var("PI_PACKAGE_DIR", &pkg);
 
     let r = cmd::run_update();
-    assert!(r.is_ok(), "run_update should be a no-op on empty dir: {:?}", r);
+    assert!(
+        r.is_ok(),
+        "run_update should be a no-op on empty dir: {:?}",
+        r
+    );
 
     std::env::remove_var("PI_CODING_AGENT_DIR");
     std::env::remove_var("PI_PACKAGE_DIR");
@@ -73,9 +77,7 @@ fn run_install_git_spec_pointing_at_missing_url_errors() {
     // "git clone failed" branch) or git is absent and we hit the spawn
     // error branch — both arms live in the same `git` arm of install().
     // We only assert the call returned Err.
-    let r = cmd::run_install(
-        "https://pi-rs.invalid.localhost.example.test/never/exists.git",
-    );
+    let r = cmd::run_install("https://pi-rs.invalid.localhost.example.test/never/exists.git");
     assert!(r.is_err(), "missing remote must error, got {r:?}");
 
     std::env::remove_var("PI_CODING_AGENT_DIR");

@@ -19,7 +19,10 @@ fn empty_frame_emits_no_visible_text() {
         .filter(|c| !c.is_control() && *c != '\u{1b}' && *c != '[')
         .collect();
     // Strip remaining "?2026hl" style chars left over from CSI sequences.
-    let trimmed: String = text.chars().filter(|c| !"?0123456789hlABCDEFGHJKMS".contains(*c)).collect();
+    let trimmed: String = text
+        .chars()
+        .filter(|c| !"?0123456789hlABCDEFGHJKMS".contains(*c))
+        .collect();
     assert!(
         trimmed.trim().is_empty(),
         "expected no printable content, got: {trimmed:?}"
@@ -40,7 +43,10 @@ fn render_writes_hello() {
         r.render(&frame).unwrap();
     }
     let s = String::from_utf8_lossy(&buf);
-    assert!(s.contains("hello"), "expected output to contain 'hello', got: {s:?}");
+    assert!(
+        s.contains("hello"),
+        "expected output to contain 'hello', got: {s:?}"
+    );
 }
 
 #[test]
@@ -60,8 +66,12 @@ fn render_then_render_diff_only_redraws_changed_lines() {
         let mut r = DiffRenderer::new(&mut buf);
         let f1 = Frame {
             lines: vec![
-                Line { spans: vec![Span::plain("line-a")] },
-                Line { spans: vec![Span::plain("line-b")] },
+                Line {
+                    spans: vec![Span::plain("line-a")],
+                },
+                Line {
+                    spans: vec![Span::plain("line-b")],
+                },
             ],
         };
         r.render(&f1).unwrap();

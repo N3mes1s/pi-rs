@@ -89,19 +89,29 @@ async fn bedrock_unknown_stop_reason_gives_other() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut saw_other = false;
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
-            if matches!(e.kind, StreamEventKind::Finish { reason: FinishReason::Other }) {
+            if matches!(
+                e.kind,
+                StreamEventKind::Finish {
+                    reason: FinishReason::Other
+                }
+            ) {
                 saw_other = true;
             }
         }
     }
-    assert!(saw_other, "expected Other finish reason for unknown stop_reason");
+    assert!(
+        saw_other,
+        "expected Other finish reason for unknown stop_reason"
+    );
 }
 
 // ── refusal stop reason ───────────────────────────────────────────────────────
@@ -130,14 +140,21 @@ async fn bedrock_refusal_stop_reason() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut saw_refusal = false;
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
-            if matches!(e.kind, StreamEventKind::Finish { reason: FinishReason::Refusal }) {
+            if matches!(
+                e.kind,
+                StreamEventKind::Finish {
+                    reason: FinishReason::Refusal
+                }
+            ) {
                 saw_refusal = true;
             }
         }
@@ -174,7 +191,9 @@ async fn bedrock_content_block_stop_without_tool_noop() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let resp = provider.generate(req(), &model()).await.expect("ok");
@@ -212,7 +231,9 @@ async fn bedrock_message_delta_only_usage_no_finish() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let resp = provider.generate(req(), &model()).await.expect("ok");
@@ -246,14 +267,21 @@ async fn bedrock_max_tokens_stop_reason() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut saw_length = false;
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
-            if matches!(e.kind, StreamEventKind::Finish { reason: FinishReason::Length }) {
+            if matches!(
+                e.kind,
+                StreamEventKind::Finish {
+                    reason: FinishReason::Length
+                }
+            ) {
                 saw_length = true;
             }
         }
@@ -290,7 +318,9 @@ async fn bedrock_tool_call_empty_buf_gives_empty_object() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let resp = provider.generate(req(), &model()).await.expect("ok");
@@ -329,7 +359,9 @@ async fn bedrock_input_json_delta_without_acc_entry_noop() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let resp = provider.generate(req(), &model()).await.expect("ok");

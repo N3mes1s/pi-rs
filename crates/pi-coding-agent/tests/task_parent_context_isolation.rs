@@ -121,10 +121,7 @@ async fn parent_messages_unchanged_after_subagent_run() {
         parent_session: parent_session.clone(),
         current_agent: None,
     };
-    let agent = AgentDefinition::parse(
-        "---\nname: a\ndescription: a\n---\nyou are a.\n",
-    )
-    .unwrap();
+    let agent = AgentDefinition::parse("---\nname: a\ndescription: a\n---\nyou are a.\n").unwrap();
     let _ = executor::run_batch(
         &handle,
         &agent,

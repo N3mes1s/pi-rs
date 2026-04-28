@@ -125,7 +125,11 @@ fn git_branch(cwd: &Path) -> Option<String> {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").current_dir(cwd).args(args).output().ok()?;
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -139,6 +143,9 @@ pub fn format_git(status: &GitStatus) -> String {
     if dirty == 0 {
         format!("git: {}", status.branch)
     } else {
-        format!("git: {} ●{}+{}", status.branch, status.staged, status.modified)
+        format!(
+            "git: {} ●{}+{}",
+            status.branch, status.staged, status.modified
+        )
     }
 }

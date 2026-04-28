@@ -73,16 +73,19 @@ async fn azure_unknown_finish_reason_gives_other() {
         .mount(&server)
         .await;
 
-    let provider = AzureOpenAiProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    let provider =
+        AzureOpenAiProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut saw_other = false;
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
-            if matches!(e.kind, StreamEventKind::Finish { reason: FinishReason::Other }) {
+            if matches!(
+                e.kind,
+                StreamEventKind::Finish {
+                    reason: FinishReason::Other
+                }
+            ) {
                 saw_other = true;
             }
         }
@@ -114,10 +117,8 @@ async fn azure_tool_input_delta_emitted() {
         .mount(&server)
         .await;
 
-    let provider = AzureOpenAiProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    let provider =
+        AzureOpenAiProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut saw_input_delta = false;
@@ -148,10 +149,8 @@ async fn azure_multi_message_request() {
         .mount(&server)
         .await;
 
-    let provider = AzureOpenAiProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    let provider =
+        AzureOpenAiProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut r = req();
     r.messages = vec![
@@ -185,10 +184,8 @@ async fn azure_empty_text_delta_skipped() {
         .mount(&server)
         .await;
 
-    let provider = AzureOpenAiProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    let provider =
+        AzureOpenAiProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let resp = provider.generate(req(), &model()).await.expect("ok");
     assert_eq!(resp.message.text(), "hi");
@@ -211,25 +208,23 @@ async fn azure_message_with_tool_use_block() {
         .mount(&server)
         .await;
 
-    let provider = AzureOpenAiProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    let provider =
+        AzureOpenAiProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut r = req();
-    r.messages = vec![
-        Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::Text { text: "use the tool".into() },
-                ContentBlock::ToolResult {
-                    tool_use_id: "id1".into(),
-                    content: "result".into(),
-                    is_error: false,
-                },
-            ],
-        },
-    ];
+    r.messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::Text {
+                text: "use the tool".into(),
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "id1".into(),
+                content: "result".into(),
+                is_error: false,
+            },
+        ],
+    }];
 
     let resp = provider.generate(r, &model()).await.expect("ok");
     assert_eq!(resp.message.text(), "done");

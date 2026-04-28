@@ -51,7 +51,11 @@ fn colorspec_round_trips_through_serde_named() {
 
 #[test]
 fn colorspec_round_trips_through_serde_rgb() {
-    let c = ColorSpec::Rgb { r: 10, g: 20, b: 30 };
+    let c = ColorSpec::Rgb {
+        r: 10,
+        g: 20,
+        b: 30,
+    };
     let s = serde_json::to_string(&c).unwrap();
     let back: ColorSpec = serde_json::from_str(&s).unwrap();
     match back {

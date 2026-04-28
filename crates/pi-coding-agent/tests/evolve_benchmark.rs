@@ -12,12 +12,7 @@ use pi_coding_agent::evolve::{
 };
 use std::path::Path;
 
-fn write_session(
-    base: &Path,
-    cwd_slug: &str,
-    session_id: &str,
-    entries: Vec<SessionEntryKind>,
-) {
+fn write_session(base: &Path, cwd_slug: &str, session_id: &str, entries: Vec<SessionEntryKind>) {
     let dir = base.join(cwd_slug);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{session_id}.jsonl"));
@@ -25,7 +20,11 @@ fn write_session(
     for (i, k) in entries.into_iter().enumerate() {
         let entry = SessionEntry {
             id: format!("e{i}"),
-            parent_id: if i == 0 { None } else { Some(format!("e{}", i - 1)) },
+            parent_id: if i == 0 {
+                None
+            } else {
+                Some(format!("e{}", i - 1))
+            },
             timestamp: 1000 + i as i64,
             kind: k,
         };
@@ -189,8 +188,7 @@ fn load_cases_caps_at_max() {
 fn load_cases_compatible_with_session_manager_slug() {
     let base = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
-    let mgr = SessionManager::on_disk(base.path().to_path_buf(), cwd.path().to_path_buf())
-        .unwrap();
+    let mgr = SessionManager::on_disk(base.path().to_path_buf(), cwd.path().to_path_buf()).unwrap();
     let meta = mgr.create("anthropic", "sonnet").unwrap();
     mgr.append(
         &meta.id,
@@ -211,7 +209,11 @@ fn load_cases_compatible_with_session_manager_slug() {
     .unwrap();
 
     // Mirror SessionManager::cwd_slug.
-    let slug = cwd.path().display().to_string().replace(['/', '\\', ':'], "_");
+    let slug = cwd
+        .path()
+        .display()
+        .to_string()
+        .replace(['/', '\\', ':'], "_");
     let cases = load_cases(base.path(), &slug, 10).unwrap();
     assert_eq!(cases.len(), 1);
     assert_eq!(cases[0].user_prompt, "benchmark me");
@@ -256,11 +258,7 @@ fn case(id: &str, prompt: &str) -> BenchmarkCase {
 
 #[tokio::test]
 async fn run_all_returns_one_result_per_case() {
-    let cases = vec![
-        case("a", "alpha"),
-        case("b", "beta"),
-        case("c", "gamma"),
-    ];
+    let cases = vec![case("a", "alpha"), case("b", "beta"), case("c", "gamma")];
     let replay = MockReplay {
         score_for: std::sync::Arc::new(|_| 0.7),
     };

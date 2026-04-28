@@ -24,7 +24,11 @@ fn context_load_round_trips_through_json() {
     assert!(json.contains("\"kind\":\"context_load\""));
     let back: SessionEntry = serde_json::from_str(&json).unwrap();
     match back.kind {
-        SessionEntryKind::ContextLoad { source, bytes, tokens } => {
+        SessionEntryKind::ContextLoad {
+            source,
+            bytes,
+            tokens,
+        } => {
             assert_eq!(source, "AGENTS.md");
             assert_eq!(bytes, 4321);
             assert_eq!(tokens, Some(1080));
@@ -50,7 +54,12 @@ fn outcome_round_trips_with_each_source() {
         let json = serde_json::to_string(&entry).unwrap();
         let back: SessionEntry = serde_json::from_str(&json).unwrap();
         match back.kind {
-            SessionEntryKind::Outcome { source, score, success, .. } => {
+            SessionEntryKind::Outcome {
+                source,
+                score,
+                success,
+                ..
+            } => {
                 assert_eq!(source, src);
                 assert_eq!(score, Some(0.87));
                 assert!(success);
@@ -79,7 +88,11 @@ fn evolve_marker_round_trips() {
     assert!(json.contains("\"kind\":\"evolve_marker\""));
     let back: SessionEntry = serde_json::from_str(&json).unwrap();
     match back.kind {
-        SessionEntryKind::EvolveMarker { agents_md_hash, generation, lineage } => {
+        SessionEntryKind::EvolveMarker {
+            agents_md_hash,
+            generation,
+            lineage,
+        } => {
             assert_eq!(agents_md_hash, "deadbeef");
             assert_eq!(generation, 7);
             assert_eq!(lineage, vec!["aaa", "bbb"]);
@@ -92,8 +105,7 @@ fn evolve_marker_round_trips() {
 fn new_variants_persist_to_jsonl_and_reload() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
-    let mgr =
-        SessionManager::on_disk(dir.path().to_path_buf(), cwd.path().to_path_buf()).unwrap();
+    let mgr = SessionManager::on_disk(dir.path().to_path_buf(), cwd.path().to_path_buf()).unwrap();
     let meta = mgr.create("anthropic", "sonnet").unwrap();
 
     mgr.append(
@@ -126,8 +138,7 @@ fn new_variants_persist_to_jsonl_and_reload() {
     .unwrap();
 
     // Reload from disk into a fresh manager and verify the kinds survived.
-    let mgr2 =
-        SessionManager::on_disk(dir.path().to_path_buf(), cwd.path().to_path_buf()).unwrap();
+    let mgr2 = SessionManager::on_disk(dir.path().to_path_buf(), cwd.path().to_path_buf()).unwrap();
     let reopened = mgr2.open_existing(&meta.id).unwrap();
     let branch = mgr2.current_branch(&reopened.id);
     let kinds: Vec<&str> = branch
@@ -140,5 +151,8 @@ fn new_variants_persist_to_jsonl_and_reload() {
             _ => "other",
         })
         .collect();
-    assert_eq!(kinds, vec!["meta", "context_load", "evolve_marker", "outcome"]);
+    assert_eq!(
+        kinds,
+        vec!["meta", "context_load", "evolve_marker", "outcome"]
+    );
 }

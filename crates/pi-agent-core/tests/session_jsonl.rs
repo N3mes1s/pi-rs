@@ -9,12 +9,19 @@ fn session_appends_jsonl_with_branching() {
     let meta = mgr.create("anthropic", "sonnet").unwrap();
 
     let user = mgr
-        .append(&meta.id, SessionEntryKind::User { message: Message::user_text("hi") })
+        .append(
+            &meta.id,
+            SessionEntryKind::User {
+                message: Message::user_text("hi"),
+            },
+        )
         .unwrap();
     let assistant = mgr
         .append(
             &meta.id,
-            SessionEntryKind::Assistant { message: Message::assistant_text("hello") },
+            SessionEntryKind::Assistant {
+                message: Message::assistant_text("hello"),
+            },
         )
         .unwrap();
     assert_eq!(assistant.parent_id.as_deref(), Some(user.id.as_str()));
@@ -24,7 +31,9 @@ fn session_appends_jsonl_with_branching() {
     let assistant2 = mgr
         .append(
             &meta.id,
-            SessionEntryKind::Assistant { message: Message::assistant_text("hola") },
+            SessionEntryKind::Assistant {
+                message: Message::assistant_text("hola"),
+            },
         )
         .unwrap();
     assert_eq!(assistant2.parent_id.as_deref(), Some(user.id.as_str()));

@@ -14,9 +14,9 @@
 //! every mutating op. The file is created on first use.
 
 pub mod model;
-pub mod tool;
 pub mod store;
+pub mod tool;
 
-pub use model::{TaskState, Task, Phase, Todo};
+pub use model::{Phase, Task, TaskState, Todo};
 pub use store::{load, save};
 pub use tool::TodoTool;

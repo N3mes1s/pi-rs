@@ -23,20 +23,14 @@ const MAX_OUTPUT_BYTES: usize = 8 * 1024; // 8 KiB cap on hook stdout
 /// Writes `run_state` as JSON to the hook's stdin, captures stdout (≤ 8 KiB),
 /// appends a `Hook { hook: "before", output }` entry to the JSONL log, and
 /// returns the captured output.
-pub async fn run_before(
-    session: &Session,
-    run_state: &serde_json::Value,
-) -> Option<String> {
+pub async fn run_before(session: &Session, run_state: &serde_json::Value) -> Option<String> {
     run_hook(session, "before", run_state).await
 }
 
 /// Run `<root>/autoresearch.hooks/after.sh` (if it exists).
 ///
 /// Same semantics as [`run_before`] but for the `after` hook.
-pub async fn run_after(
-    session: &Session,
-    run_state: &serde_json::Value,
-) -> Option<String> {
+pub async fn run_after(session: &Session, run_state: &serde_json::Value) -> Option<String> {
     run_hook(session, "after", run_state).await
 }
 

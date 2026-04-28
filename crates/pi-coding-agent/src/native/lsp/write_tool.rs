@@ -115,8 +115,7 @@ impl Tool for LspWriteTool {
                             if let Some(formatted) = apply_text_edits(&original, edits) {
                                 if tokio::fs::write(&path, &formatted).await.is_ok() {
                                     display.insert("formatted".into(), json!(true));
-                                    display
-                                        .insert("bytes".into(), json!(formatted.len()));
+                                    display.insert("bytes".into(), json!(formatted.len()));
                                 }
                             }
                         }
@@ -253,7 +252,11 @@ pub(crate) fn apply_text_edits(text: &str, edits: &[Value]) -> Option<String> {
         if start > end {
             return None;
         }
-        resolved.push(Resolved { start, end, new_text });
+        resolved.push(Resolved {
+            start,
+            end,
+            new_text,
+        });
     }
 
     // Sort descending by start (ties: descending by end too — doesn't

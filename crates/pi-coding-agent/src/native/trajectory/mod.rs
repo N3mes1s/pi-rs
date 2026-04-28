@@ -28,7 +28,7 @@ pub mod recorder;
 
 pub use features::{extract, TrajectoryFeatures};
 pub use judge::{
-    build_user_message, features_only_outcome, judge_session, parse_verdict, Judge,
-    JudgeConfig, JudgeError, JudgeVerdict,
+    build_user_message, features_only_outcome, judge_session, parse_verdict, Judge, JudgeConfig,
+    JudgeError, JudgeVerdict,
 };
 pub use recorder::{build_judge_from_settings, finalize_for_runtime, finalize_session};

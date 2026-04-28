@@ -219,7 +219,11 @@ impl SessionManager {
                 entries: vec![entry.clone()],
             },
             last_id: Some(last),
-            file: if path.as_os_str().is_empty() { None } else { Some(path) },
+            file: if path.as_os_str().is_empty() {
+                None
+            } else {
+                Some(path)
+            },
         };
         if let Some(file) = &open.file {
             self.append_to_file(file, &entry)?;
@@ -231,13 +235,18 @@ impl SessionManager {
     }
 
     pub fn open_existing(&self, id_or_path: &str) -> std::io::Result<SessionMeta> {
-        let path = if id_or_path.contains(std::path::MAIN_SEPARATOR) || id_or_path.ends_with(".jsonl") {
-            PathBuf::from(id_or_path)
-        } else if let Some(base) = &self.base_dir {
-            base.join(self.cwd_slug()).join(format!("{id_or_path}.jsonl"))
-        } else {
-            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no base dir"));
-        };
+        let path =
+            if id_or_path.contains(std::path::MAIN_SEPARATOR) || id_or_path.ends_with(".jsonl") {
+                PathBuf::from(id_or_path)
+            } else if let Some(base) = &self.base_dir {
+                base.join(self.cwd_slug())
+                    .join(format!("{id_or_path}.jsonl"))
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no base dir",
+                ));
+            };
         let txt = std::fs::read_to_string(&path)?;
         let mut entries: Vec<SessionEntry> = Vec::new();
         for line in txt.lines() {
@@ -257,10 +266,20 @@ impl SessionManager {
             } => Some((cwd.clone(), provider.clone(), model.clone(), title.clone())),
             _ => None,
         });
-        let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
         let last = entries.last().map(|e| e.id.clone());
-        let (cwd, provider, model, title) = meta_kind
-            .unwrap_or_else(|| (self.cwd.display().to_string(), "anthropic".into(), "sonnet".into(), None));
+        let (cwd, provider, model, title) = meta_kind.unwrap_or_else(|| {
+            (
+                self.cwd.display().to_string(),
+                "anthropic".into(),
+                "sonnet".into(),
+                None,
+            )
+        });
         let meta = SessionMeta {
             id: id.clone(),
             path: path.clone(),
@@ -301,7 +320,11 @@ impl SessionManager {
 
     fn peek(&self, path: &Path) -> std::io::Result<SessionMeta> {
         let txt = std::fs::read_to_string(path)?;
-        let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
         let mut created_at = 0;
         let mut updated_at = 0;
         let mut cwd = String::new();
@@ -344,7 +367,11 @@ impl SessionManager {
         self.list().into_iter().next()
     }
 
-    pub fn append(&self, session_id: &str, kind: SessionEntryKind) -> std::io::Result<SessionEntry> {
+    pub fn append(
+        &self,
+        session_id: &str,
+        kind: SessionEntryKind,
+    ) -> std::io::Result<SessionEntry> {
         let mut state = self.state.lock().map_err(io_lock)?;
         let open = state
             .open
@@ -405,7 +432,10 @@ impl SessionManager {
             .get_mut(session_id)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "session not open"))?;
         if !open.tree.entries.iter().any(|e| e.id == from_entry) {
-            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "fork target not found"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "fork target not found",
+            ));
         }
         open.last_id = Some(from_entry.into());
         Ok(())

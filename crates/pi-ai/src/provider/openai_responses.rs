@@ -277,7 +277,15 @@ struct ToolItem {
 
 /// State carried through the SSE event router across stream-yields.
 struct RouterState {
-    es: Box<dyn futures::Stream<Item = std::result::Result<eventsource_stream::Event, eventsource_stream::EventStreamError<reqwest::Error>>> + Send + Unpin>,
+    es: Box<
+        dyn futures::Stream<
+                Item = std::result::Result<
+                    eventsource_stream::Event,
+                    eventsource_stream::EventStreamError<reqwest::Error>,
+                >,
+            > + Send
+            + Unpin,
+    >,
     tools: std::collections::HashMap<String, ToolItem>,
     usage: UsageAcc,
     model: ModelInfo,
@@ -338,10 +346,7 @@ pub async fn stream_responses(
         // Emit a deferred Finish that follows the Usage event.
         if let Some(reason) = st.pending_finish.take() {
             st.done = true;
-            return Some((
-                Ok(StreamEvent::new(StreamEventKind::Finish { reason })),
-                st,
-            ));
+            return Some((Ok(StreamEvent::new(StreamEventKind::Finish { reason })), st));
         }
         loop {
             let next = st.es.next().await;
@@ -413,10 +418,7 @@ pub async fn stream_responses(
                             ));
                         }
                         "message" => {
-                            return Some((
-                                Ok(StreamEvent::new(StreamEventKind::MessageStart)),
-                                st,
-                            ));
+                            return Some((Ok(StreamEvent::new(StreamEventKind::MessageStart)), st));
                         }
                         // reasoning items have no pi-rs "start" event;
                         // ThinkingDelta is what surfaces.
@@ -545,10 +547,8 @@ pub async fn stream_responses(
                     if let Some(u) = response.get("usage") {
                         st.usage.input_tokens =
                             u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                        st.usage.output_tokens = u
-                            .get("output_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
+                        st.usage.output_tokens =
+                            u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                         // cached_tokens lives under input_tokens_details
                         // (or input_tokens.cached_tokens on some
                         // builds); accept either.
@@ -577,10 +577,7 @@ pub async fn stream_responses(
                     let reason = map_status(status);
                     let usage = st.usage.into_usage(&st.model);
                     st.pending_finish = Some(reason);
-                    return Some((
-                        Ok(StreamEvent::new(StreamEventKind::Usage { usage })),
-                        st,
-                    ));
+                    return Some((Ok(StreamEvent::new(StreamEventKind::Usage { usage })), st));
                 }
 
                 // 9. provider-side failure or generic SSE error frame.
@@ -599,10 +596,7 @@ pub async fn stream_responses(
                         .unwrap_or("response.failed")
                         .to_string();
                     st.done = true;
-                    return Some((
-                        Ok(StreamEvent::new(StreamEventKind::Error { message })),
-                        st,
-                    ));
+                    return Some((Ok(StreamEvent::new(StreamEventKind::Error { message })), st));
                 }
 
                 // The remaining 5 event types

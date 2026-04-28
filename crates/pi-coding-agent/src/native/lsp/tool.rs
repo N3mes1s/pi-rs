@@ -59,8 +59,7 @@ impl Tool for LspTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "lsp".into(),
-            description:
-                "Query a language server (rust-analyzer, pyright, gopls, …) over its \
+            description: "Query a language server (rust-analyzer, pyright, gopls, …) over its \
                  standard JSON-RPC stdio interface. Set `op` to one of: `diagnostics`, \
                  `definition`, `type_definition`, `implementation`, `references`, \
                  `hover`, `symbols`, `rename`, `code_actions`, `status`, `reload`. \
@@ -68,7 +67,7 @@ impl Tool for LspTool {
                  Returns the raw LSP reply as JSON; `is_error: true` if the server \
                  isn't running, the language is disabled in config, or the request \
                  failed."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -156,9 +155,7 @@ impl Tool for LspTool {
                             .get("new_name")
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| {
-                                ToolError::InvalidInput(
-                                    "rename: `new_name` required".into(),
-                                )
+                                ToolError::InvalidInput("rename: `new_name` required".into())
                             })?
                             .to_string();
                         engine.rename(&path, line, col, &new_name).await
@@ -431,18 +428,15 @@ mod tests {
     /// rust-language command override, then invoke it with `input`.
     /// Used by the four wiring tests above.
     async fn invoke_with_fake_server(input: Value) -> ToolResult {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fake_lsp_server.py");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake_lsp_server.py");
         let mut cfg = LspConfig::default();
         cfg.enabled = true;
         cfg.languages.insert(
             "rust".into(),
             super::super::config::LanguageConfig {
                 enabled: Some(true),
-                command: Some(vec![
-                    "python3".into(),
-                    path.to_string_lossy().into_owned(),
-                ]),
+                command: Some(vec!["python3".into(), path.to_string_lossy().into_owned()]),
                 format_options: Default::default(),
             },
         );

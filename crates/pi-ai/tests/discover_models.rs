@@ -2,8 +2,7 @@
 
 use pi_ai::auth::AuthMethod;
 use pi_ai::provider::{
-    AnthropicProvider, GoogleProvider, OpenAiCompatProvider, OpenAiProvider, Provider,
-    ProviderKind,
+    AnthropicProvider, GoogleProvider, OpenAiCompatProvider, OpenAiProvider, Provider, ProviderKind,
 };
 use pi_ai::registry::{ModelRegistry, ProviderConfig};
 use pi_ai::{discovered_cache_path, DiscoveredCache};
@@ -39,12 +38,16 @@ async fn openai_discover_returns_data_array_models() {
 
     let provider = OpenAiProvider::new(
         cfg("openai", ProviderKind::OpenAi, server.uri()),
-        AuthMethod::ApiKey { value: "sk-test".into() },
+        AuthMethod::ApiKey {
+            value: "sk-test".into(),
+        },
     );
     let models = provider.discover_models().await.expect("discover ok");
     assert_eq!(models.len(), 3);
     assert!(models.iter().any(|m| m.id == "gpt-4o"));
-    assert!(models.iter().any(|m| m.id == "gpt-5o" && m.context_window == 200000));
+    assert!(models
+        .iter()
+        .any(|m| m.id == "gpt-5o" && m.context_window == 200000));
     let o1 = models.iter().find(|m| m.id == "o1-pro").unwrap();
     assert_eq!(o1.context_window, 8192); // default fallback
     assert_eq!(o1.max_output_tokens, 4096);
@@ -66,7 +69,9 @@ async fn openai_compat_uses_same_endpoint() {
         .await;
     let provider = OpenAiCompatProvider::new(
         cfg("fireworks", ProviderKind::OpenAiCompat, server.uri()),
-        AuthMethod::ApiKey { value: "fw-test".into() },
+        AuthMethod::ApiKey {
+            value: "fw-test".into(),
+        },
     );
     let models = provider.discover_models().await.unwrap();
     assert_eq!(models.len(), 1);
@@ -80,7 +85,10 @@ async fn anthropic_discover_uses_x_api_key_header() {
     Mock::given(method("GET"))
         .and(path("/v1/models"))
         .and(wiremock::matchers::header("x-api-key", "sk-ant-test"))
-        .and(wiremock::matchers::header("anthropic-version", "2023-06-01"))
+        .and(wiremock::matchers::header(
+            "anthropic-version",
+            "2023-06-01",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "data": [
                 {"id": "claude-opus-4-7", "type": "model", "display_name": "Claude Opus 4.7"},
@@ -91,7 +99,9 @@ async fn anthropic_discover_uses_x_api_key_header() {
         .await;
     let provider = AnthropicProvider::new(
         cfg("anthropic", ProviderKind::Anthropic, server.uri()),
-        AuthMethod::ApiKey { value: "sk-ant-test".into() },
+        AuthMethod::ApiKey {
+            value: "sk-ant-test".into(),
+        },
     );
     let models = provider.discover_models().await.unwrap();
     assert_eq!(models.len(), 2);
@@ -124,7 +134,9 @@ async fn google_strips_models_prefix_and_filters_non_generators() {
         .await;
     let provider = GoogleProvider::new(
         cfg("google", ProviderKind::Google, server.uri()),
-        AuthMethod::ApiKey { value: "g-test".into() },
+        AuthMethod::ApiKey {
+            value: "g-test".into(),
+        },
     );
     let models = provider.discover_models().await.unwrap();
     assert_eq!(models.len(), 1, "embedding-only models filtered out");
@@ -152,7 +164,11 @@ async fn discover_5xx_returns_provider_error() {
 #[tokio::test]
 async fn discover_with_no_auth_returns_missing_auth_error() {
     let provider = OpenAiProvider::new(
-        cfg("openai", ProviderKind::OpenAi, "https://nope.invalid".into()),
+        cfg(
+            "openai",
+            ProviderKind::OpenAi,
+            "https://nope.invalid".into(),
+        ),
         AuthMethod::None,
     );
     let err = provider.discover_models().await.unwrap_err();
@@ -161,8 +177,8 @@ async fn discover_with_no_auth_returns_missing_auth_error() {
 
 #[test]
 fn registry_merge_discovered_appends_new_only_keeps_static_on_conflict() {
-    use pi_ai::AuthStorage;
     use pi_ai::registry::ModelInfo;
+    use pi_ai::AuthStorage;
 
     let mut reg = ModelRegistry::new(AuthStorage::in_memory());
     // 'opus' is in the static catalogue. Try to merge a discovered entry
@@ -200,7 +216,11 @@ fn registry_merge_discovered_appends_new_only_keeps_static_on_conflict() {
     let before_count = reg.total_models();
     reg.merge_discovered(vec![conflict, novel.clone()]);
     let after_count = reg.total_models();
-    assert_eq!(after_count, before_count + 1, "only the novel id is appended");
+    assert_eq!(
+        after_count,
+        before_count + 1,
+        "only the novel id is appended"
+    );
     let (_p, m) = reg.resolve("anthropic/claude-opus-4-7").unwrap();
     assert_eq!(m.input_cost_per_mtok, 5.0, "static cost preserved");
     let (_p, m) = reg.resolve("anthropic/claude-future-7-0").unwrap();
@@ -228,9 +248,9 @@ fn discovered_cache_round_trip_to_disk() {
             supports_vision: false,
             input_cost_per_mtok: 0.0,
             output_cost_per_mtok: 0.0,
-        cache_read_cost_per_mtok: None,
-        cache_write_cost_per_mtok: None,
-        api_kind: Default::default(),
+            cache_read_cost_per_mtok: None,
+            cache_write_cost_per_mtok: None,
+            api_kind: Default::default(),
         }],
     );
     cache.save(&path).unwrap();

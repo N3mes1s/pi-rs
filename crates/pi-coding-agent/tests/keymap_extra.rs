@@ -115,9 +115,6 @@ fn chord_from_event_for_home_end_pgup_pgdn_delete_insert() {
 
 #[test]
 fn chord_from_event_unhandled_keycode_falls_back_to_space_char() {
-    let c = chord_from_event(&KeyEvent::new(
-        KeyCode::Null,
-        KeyModifiers::NONE,
-    ));
+    let c = chord_from_event(&KeyEvent::new(KeyCode::Null, KeyModifiers::NONE));
     assert_eq!(c.code, ChordCode::Char(' '));
 }

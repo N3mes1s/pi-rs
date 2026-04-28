@@ -96,7 +96,10 @@ async fn azure_oauth_token_is_used() {
     );
 
     // Should succeed (OAuth token is forwarded as api-key header value).
-    let resp = provider.generate(req(), &model()).await.expect("generate ok");
+    let resp = provider
+        .generate(req(), &model())
+        .await
+        .expect("generate ok");
     assert_eq!(resp.message.text(), "Hi");
 }
 
@@ -128,10 +131,8 @@ async fn azure_system_message_forwarded() {
         .mount(&server)
         .await;
 
-    let provider = AzureOpenAiProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    let provider =
+        AzureOpenAiProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut r = req();
     r.system = Some("You are helpful.".into());
@@ -157,10 +158,8 @@ async fn azure_temperature_and_max_tokens_forwarded() {
         .mount(&server)
         .await;
 
-    let provider = AzureOpenAiProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    let provider =
+        AzureOpenAiProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut r = req();
     r.temperature = Some(0.7);
@@ -195,10 +194,8 @@ async fn azure_tool_call_stream_emits_tool_call_complete() {
         .mount(&server)
         .await;
 
-    let provider = AzureOpenAiProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    let provider =
+        AzureOpenAiProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut saw_tool_complete = false;
@@ -216,7 +213,10 @@ async fn azure_tool_call_stream_emits_tool_call_complete() {
             }
         }
     }
-    assert!(saw_tool_complete || saw_tool_input_delta, "expected ToolCallComplete or ToolInputDelta for bash tool");
+    assert!(
+        saw_tool_complete || saw_tool_input_delta,
+        "expected ToolCallComplete or ToolInputDelta for bash tool"
+    );
 }
 
 // ── content_filter finish reason → Refusal ────────────────────────────────────
@@ -236,16 +236,19 @@ async fn azure_content_filter_gives_refusal() {
         .mount(&server)
         .await;
 
-    let provider = AzureOpenAiProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    let provider =
+        AzureOpenAiProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut saw_refusal = false;
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
-            if matches!(e.kind, StreamEventKind::Finish { reason: FinishReason::Refusal }) {
+            if matches!(
+                e.kind,
+                StreamEventKind::Finish {
+                    reason: FinishReason::Refusal
+                }
+            ) {
                 saw_refusal = true;
             }
         }
@@ -270,16 +273,19 @@ async fn azure_length_finish_reason() {
         .mount(&server)
         .await;
 
-    let provider = AzureOpenAiProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    let provider =
+        AzureOpenAiProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut saw_length = false;
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
-            if matches!(e.kind, StreamEventKind::Finish { reason: FinishReason::Length }) {
+            if matches!(
+                e.kind,
+                StreamEventKind::Finish {
+                    reason: FinishReason::Length
+                }
+            ) {
                 saw_length = true;
             }
         }
@@ -309,10 +315,8 @@ async fn azure_reasoning_tokens_in_usage() {
         .mount(&server)
         .await;
 
-    let provider = AzureOpenAiProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    let provider =
+        AzureOpenAiProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let resp = provider.generate(req(), &model()).await.expect("ok");
     assert_eq!(resp.usage.reasoning_tokens, 7);
@@ -335,10 +339,8 @@ async fn azure_tools_forwarded_in_request() {
         .mount(&server)
         .await;
 
-    let provider = AzureOpenAiProvider::new(
-        cfg(server.uri()),
-        AuthMethod::ApiKey { value: "k".into() },
-    );
+    let provider =
+        AzureOpenAiProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut r = req();
     r.tools = vec![ToolSpec {

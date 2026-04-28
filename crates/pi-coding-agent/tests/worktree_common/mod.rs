@@ -14,7 +14,12 @@ pub fn require_git() -> bool {
 }
 
 pub fn git(repo: &Path, args: &[&str]) -> std::process::Output {
-    let out = Command::new("git").arg("-C").arg(repo).args(args).output().expect("git");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("git");
     if !out.status.success() {
         panic!(
             "git -C {} {:?} failed: {}\n{}",

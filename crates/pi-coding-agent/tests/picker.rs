@@ -2,10 +2,22 @@ use pi_coding_agent::picker::{PickItem, Picker};
 
 fn items() -> Vec<PickItem<&'static str>> {
     vec![
-        PickItem { label: "alpha".into(), value: "alpha" },
-        PickItem { label: "beta".into(), value: "beta" },
-        PickItem { label: "gamma".into(), value: "gamma" },
-        PickItem { label: "delta".into(), value: "delta" },
+        PickItem {
+            label: "alpha".into(),
+            value: "alpha",
+        },
+        PickItem {
+            label: "beta".into(),
+            value: "beta",
+        },
+        PickItem {
+            label: "gamma".into(),
+            value: "gamma",
+        },
+        PickItem {
+            label: "delta".into(),
+            value: "delta",
+        },
     ]
 }
 

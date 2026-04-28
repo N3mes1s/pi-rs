@@ -2,8 +2,8 @@
 
 use pi_coding_agent::evolve::{
     add_poison, append_generation, backup_and_apply, best_strict_improvement, is_poisoned,
-    pareto_frontier, poisoned_hashes, read_generations, should_rollback,
-    BenchmarkSummary, Candidate, GenerationLogEntry, PendingApply,
+    pareto_frontier, poisoned_hashes, read_generations, should_rollback, BenchmarkSummary,
+    Candidate, GenerationLogEntry, PendingApply,
 };
 // Disambiguate from the new `evolve::rollback` module (RFD 0013).
 use pi_coding_agent::evolve::apply::rollback;

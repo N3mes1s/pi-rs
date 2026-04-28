@@ -27,9 +27,16 @@ fn settings_path_equals_settings_paths_first() {
 #[test]
 fn skills_dirs_contains_project_level_entries() {
     let s = context::skills_dirs();
-    let has_agents = s.iter().any(|p| p.ends_with(".agents/skills") || p.to_string_lossy().contains(".agents"));
-    let has_pi = s.iter().any(|p| p.ends_with(".pi/skills") || p.to_string_lossy().contains(".pi"));
-    assert!(has_agents || has_pi, "skills_dirs should include at least one project-level dir; got: {s:?}");
+    let has_agents = s
+        .iter()
+        .any(|p| p.ends_with(".agents/skills") || p.to_string_lossy().contains(".agents"));
+    let has_pi = s
+        .iter()
+        .any(|p| p.ends_with(".pi/skills") || p.to_string_lossy().contains(".pi"));
+    assert!(
+        has_agents || has_pi,
+        "skills_dirs should include at least one project-level dir; got: {s:?}"
+    );
 }
 
 // ── prompts_dirs ──────────────────────────────────────────────────────────────
@@ -41,7 +48,10 @@ fn prompts_dirs_contains_two_entries() {
     std::env::set_var("PI_CODING_AGENT_DIR", tmp.path());
     let dirs = context::prompts_dirs();
     assert_eq!(dirs.len(), 2, "prompts_dirs should return exactly 2 paths");
-    assert!(dirs[0].starts_with(tmp.path()), "first prompts dir should be under agent_dir");
+    assert!(
+        dirs[0].starts_with(tmp.path()),
+        "first prompts dir should be under agent_dir"
+    );
     std::env::remove_var("PI_CODING_AGENT_DIR");
 }
 
@@ -54,7 +64,10 @@ fn themes_dirs_contains_two_entries() {
     std::env::set_var("PI_CODING_AGENT_DIR", tmp.path());
     let dirs = context::themes_dirs();
     assert_eq!(dirs.len(), 2, "themes_dirs should return exactly 2 paths");
-    assert!(dirs[0].starts_with(tmp.path()), "first themes dir should be under agent_dir");
+    assert!(
+        dirs[0].starts_with(tmp.path()),
+        "first themes dir should be under agent_dir"
+    );
     std::env::remove_var("PI_CODING_AGENT_DIR");
 }
 
@@ -66,7 +79,14 @@ fn system_prompt_paths_contains_two_entries() {
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("PI_CODING_AGENT_DIR", tmp.path());
     let paths = context::system_prompt_paths();
-    assert_eq!(paths.len(), 2, "system_prompt_paths should return exactly 2 paths");
-    assert!(paths[0].ends_with("SYSTEM.md"), "first system prompt path should end with SYSTEM.md");
+    assert_eq!(
+        paths.len(),
+        2,
+        "system_prompt_paths should return exactly 2 paths"
+    );
+    assert!(
+        paths[0].ends_with("SYSTEM.md"),
+        "first system prompt path should end with SYSTEM.md"
+    );
     std::env::remove_var("PI_CODING_AGENT_DIR");
 }

@@ -80,7 +80,10 @@ fn tools_list_parses_into_vec_of_names() {
 fn session_and_session_dir_coexist() {
     let cli = parse(&["--session", "abc123", "--session-dir", "/tmp/sessions"]);
     assert_eq!(cli.session.as_deref(), Some("abc123"));
-    assert_eq!(cli.session_dir.as_deref(), Some(std::path::Path::new("/tmp/sessions")));
+    assert_eq!(
+        cli.session_dir.as_deref(),
+        Some(std::path::Path::new("/tmp/sessions"))
+    );
 }
 
 #[test]

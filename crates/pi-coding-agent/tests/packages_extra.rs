@@ -67,10 +67,7 @@ fn install_with_https_scheme_versioned_targets_versioned_dest_dir() {
     // by parsing a versioned spec and observing the error from a guaranteed
     // failed clone. We just want to make sure the `@version` branch is hit.
     let tmp = tempfile::tempdir().unwrap();
-    let r = install(
-        "https://nonexistent-host.invalid/u/r@v1",
-        tmp.path(),
-    );
+    let r = install("https://nonexistent-host.invalid/u/r@v1", tmp.path());
     assert!(r.is_err());
 }
 

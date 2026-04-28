@@ -49,12 +49,8 @@ pub async fn finish(
     // `git add -A` then check whether anything is queued. Empty diff ⇒
     // shortcut.
     git::run(worktree, &["add", "-A"], "add -A").await?;
-    let cached_diff = git::run(
-        worktree,
-        &["diff", "--cached", "--binary"],
-        "diff --cached",
-    )
-    .await?;
+    let cached_diff =
+        git::run(worktree, &["diff", "--cached", "--binary"], "diff --cached").await?;
     if cached_diff.is_empty() {
         return Ok(ReconcileOutcome::Empty);
     }

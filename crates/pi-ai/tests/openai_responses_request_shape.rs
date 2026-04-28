@@ -10,8 +10,8 @@
 #![allow(dead_code)]
 
 use pi_ai::message::{Message, ThinkingLevel};
-use pi_ai::provider::GenerateRequest;
 use pi_ai::provider::openai_responses::build_request_body;
+use pi_ai::provider::GenerateRequest;
 use pi_ai::tool::ToolSpec;
 
 const GOLDEN: &str = include_str!("data/openai_responses/request_gpt54_basic.json");
@@ -42,15 +42,17 @@ fn fixture_request() -> GenerateRequest {
 #[test]
 fn request_body_matches_golden() {
     let body = build_request_body(&fixture_request());
-    let expected: serde_json::Value =
-        serde_json::from_str(GOLDEN).expect("golden parse ok");
+    let expected: serde_json::Value = serde_json::from_str(GOLDEN).expect("golden parse ok");
     assert_eq!(body, expected, "request body diverged from golden");
 }
 
 #[test]
 fn input_items_use_input_text_not_text() {
     let body = build_request_body(&fixture_request());
-    let input = body.get("input").and_then(|v| v.as_array()).expect("input array");
+    let input = body
+        .get("input")
+        .and_then(|v| v.as_array())
+        .expect("input array");
     assert_eq!(input.len(), 1);
     let user = &input[0];
     assert_eq!(user["role"], "user");
@@ -67,7 +69,10 @@ fn tool_is_flat_no_function_wrapper() {
     assert_eq!(tool["type"], "function");
     assert_eq!(tool["name"], "echo_tool");
     assert_eq!(tool["description"], "Echo a message back.");
-    assert!(tool.get("parameters").is_some(), "expected flat `parameters` field");
+    assert!(
+        tool.get("parameters").is_some(),
+        "expected flat `parameters` field"
+    );
     assert_eq!(tool["strict"], serde_json::Value::Bool(true));
     assert!(
         tool.get("function").is_none(),

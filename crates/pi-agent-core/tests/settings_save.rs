@@ -106,9 +106,7 @@ fn save_then_load_round_trips_format_options_block() {
     // RFD 0007: a settings.json containing a `format_options` block
     // round-trips byte-for-byte; the deserialised struct equals the
     // original.
-    use pi_agent_core::settings::{
-        FormattingOptions, LspLanguageSettings, LspSettings,
-    };
+    use pi_agent_core::settings::{FormattingOptions, LspLanguageSettings, LspSettings};
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("settings.json");
@@ -150,7 +148,12 @@ fn save_then_load_round_trips_format_options_block() {
 #[test]
 fn save_creates_missing_parent_directories() {
     let dir = tempfile::tempdir().unwrap();
-    let nested = dir.path().join("a").join("b").join("c").join("settings.json");
+    let nested = dir
+        .path()
+        .join("a")
+        .join("b")
+        .join("c")
+        .join("settings.json");
     assert!(!nested.parent().unwrap().exists());
 
     Settings::default().save(&nested).expect("save ok");

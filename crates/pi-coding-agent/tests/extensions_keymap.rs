@@ -1,9 +1,9 @@
 //! Tests for extension-registered keybindings (Step 5).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use pi_agent_core::settings::ThinkingSetting;
 use pi_coding_agent::keymap::{parse_chord, Keymap};
 use pi_coding_agent::modes::interactive::{handle_key, KeyOutcome, View};
-use pi_agent_core::settings::ThinkingSetting;
 
 fn ke(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
     KeyEvent::new(code, mods)
@@ -92,7 +92,10 @@ fn handle_key_returns_extension_command_for_bound_chord() {
 fn bind_extension_ignores_invalid_chord() {
     let mut km = Keymap::defaults();
     let ok = km.bind_extension("Ctrl+Bogus", 0, "deploy".into());
-    assert!(!ok, "bind_extension should return false for an invalid chord");
+    assert!(
+        !ok,
+        "bind_extension should return false for an invalid chord"
+    );
     // extension_bindings should remain empty.
     assert!(
         km.extension_bindings.is_empty(),

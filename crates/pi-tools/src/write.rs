@@ -11,7 +11,9 @@ impl Tool for WriteTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "write".into(),
-            description: "Write a file, creating parent directories if needed. Overwrites existing files.".into(),
+            description:
+                "Write a file, creating parent directories if needed. Overwrites existing files."
+                    .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

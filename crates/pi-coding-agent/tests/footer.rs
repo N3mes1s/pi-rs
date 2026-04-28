@@ -142,13 +142,7 @@ fn footer_powerline_includes_git_segment_when_status_provided() {
         staged: 1,
         modified: 0,
     };
-    let line = t.footer_powerline(
-        &theme(),
-        "m",
-        Path::new("/tmp"),
-        Some(&g),
-        None,
-    );
+    let line = t.footer_powerline(&theme(), "m", Path::new("/tmp"), Some(&g), None);
     let joined: String = line.spans.iter().map(|s| s.text.clone()).collect();
     assert!(joined.contains("git: trunk ●1+0"));
     // No context_window → no ctx segment.

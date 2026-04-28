@@ -19,7 +19,13 @@ async fn get(app: axum::Router, uri: &str) -> (StatusCode, Vec<u8>) {
         .await
         .unwrap();
     let status = resp.status();
-    let body = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     (status, body)
 }
 
@@ -59,7 +65,13 @@ async fn stats_payload_has_expected_shape() {
     let (status, body) = get(app, "/api/stats").await;
     assert_eq!(status, StatusCode::OK);
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    for k in ["overall", "by_model", "by_folder", "time_series", "approvals"] {
+    for k in [
+        "overall",
+        "by_model",
+        "by_folder",
+        "time_series",
+        "approvals",
+    ] {
         assert!(v.get(k).is_some(), "missing field: {k}");
     }
     let overall = &v["overall"];

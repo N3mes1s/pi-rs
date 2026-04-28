@@ -120,8 +120,7 @@ fn open_existing_reads_jsonl_back_into_a_meta() {
     .unwrap();
 
     // Re-open the same session by id from a fresh manager.
-    let mgr2 =
-        SessionManager::on_disk(dir.path().to_path_buf(), cwd.path().to_path_buf()).unwrap();
+    let mgr2 = SessionManager::on_disk(dir.path().to_path_buf(), cwd.path().to_path_buf()).unwrap();
     let meta2 = mgr2.open_existing(&meta.id).unwrap();
     assert_eq!(meta2.id, meta.id);
     assert_eq!(meta2.provider, "anthropic");
@@ -146,8 +145,7 @@ fn open_existing_via_explicit_jsonl_path() {
     .unwrap();
 
     let path = meta.path.clone();
-    let mgr2 =
-        SessionManager::on_disk(dir.path().to_path_buf(), cwd.path().to_path_buf()).unwrap();
+    let mgr2 = SessionManager::on_disk(dir.path().to_path_buf(), cwd.path().to_path_buf()).unwrap();
     let meta2 = mgr2.open_existing(&path.display().to_string()).unwrap();
     assert_eq!(meta2.id, meta.id);
 }

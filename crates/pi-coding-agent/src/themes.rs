@@ -20,18 +20,12 @@ pub const BUILTIN_THEMES: &[(&str, &str)] = &[
     ),
     ("dracula", include_str!("../themes/dracula.json")),
     ("nord", include_str!("../themes/nord.json")),
-    (
-        "gruvbox-dark",
-        include_str!("../themes/gruvbox-dark.json"),
-    ),
+    ("gruvbox-dark", include_str!("../themes/gruvbox-dark.json")),
     (
         "gruvbox-light",
         include_str!("../themes/gruvbox-light.json"),
     ),
-    (
-        "tokyo-night",
-        include_str!("../themes/tokyo-night.json"),
-    ),
+    ("tokyo-night", include_str!("../themes/tokyo-night.json")),
     ("poimandres", include_str!("../themes/poimandres.json")),
 ];
 

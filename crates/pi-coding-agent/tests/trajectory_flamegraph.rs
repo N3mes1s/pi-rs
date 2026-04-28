@@ -48,12 +48,42 @@ fn renders_user_assistant_pair() {
 #[test]
 fn splits_into_multiple_turns_on_each_user_message() {
     let branch = vec![
-        entry("u1", SessionEntryKind::User { message: Message::user_text("first") }),
-        entry("a1", SessionEntryKind::Assistant { message: Message::assistant_text("ok") }),
-        entry("u2", SessionEntryKind::User { message: Message::user_text("second") }),
-        entry("a2", SessionEntryKind::Assistant { message: Message::assistant_text("ok2") }),
-        entry("u3", SessionEntryKind::User { message: Message::user_text("third") }),
-        entry("a3", SessionEntryKind::Assistant { message: Message::assistant_text("ok3") }),
+        entry(
+            "u1",
+            SessionEntryKind::User {
+                message: Message::user_text("first"),
+            },
+        ),
+        entry(
+            "a1",
+            SessionEntryKind::Assistant {
+                message: Message::assistant_text("ok"),
+            },
+        ),
+        entry(
+            "u2",
+            SessionEntryKind::User {
+                message: Message::user_text("second"),
+            },
+        ),
+        entry(
+            "a2",
+            SessionEntryKind::Assistant {
+                message: Message::assistant_text("ok2"),
+            },
+        ),
+        entry(
+            "u3",
+            SessionEntryKind::User {
+                message: Message::user_text("third"),
+            },
+        ),
+        entry(
+            "a3",
+            SessionEntryKind::Assistant {
+                message: Message::assistant_text("ok3"),
+            },
+        ),
     ];
     let html = render("s1", &branch);
     assert!(html.contains("turn 1"));
@@ -65,7 +95,12 @@ fn splits_into_multiple_turns_on_each_user_message() {
 #[test]
 fn tool_calls_and_results_render_within_their_turn() {
     let branch = vec![
-        entry("u1", SessionEntryKind::User { message: Message::user_text("run ls") }),
+        entry(
+            "u1",
+            SessionEntryKind::User {
+                message: Message::user_text("run ls"),
+            },
+        ),
         entry(
             "tc",
             SessionEntryKind::ToolCall {
@@ -97,7 +132,12 @@ fn tool_calls_and_results_render_within_their_turn() {
 #[test]
 fn errored_tool_result_uses_error_class() {
     let branch = vec![
-        entry("u1", SessionEntryKind::User { message: Message::user_text("x") }),
+        entry(
+            "u1",
+            SessionEntryKind::User {
+                message: Message::user_text("x"),
+            },
+        ),
         entry(
             "tc",
             SessionEntryKind::ToolCall {
@@ -128,7 +168,12 @@ fn errored_tool_result_uses_error_class() {
 fn usage_entries_are_skipped_in_render_but_drive_total() {
     // Usage drives the denominator but is not its own block.
     let branch = vec![
-        entry("u1", SessionEntryKind::User { message: Message::user_text("hi") }),
+        entry(
+            "u1",
+            SessionEntryKind::User {
+                message: Message::user_text("hi"),
+            },
+        ),
         entry(
             "use",
             SessionEntryKind::Usage {
@@ -152,33 +197,32 @@ fn usage_entries_are_skipped_in_render_but_drive_total() {
 
 #[test]
 fn estimates_tokens_from_chars_when_no_usage() {
-    let branch = vec![
-        entry(
-            "u1",
-            SessionEntryKind::User {
-                // 40 chars: bytes/4 estimated 10 tokens; RFD-0014's
-                // real BPE tokenizer returns somewhere in [3, 14].
-                message: Message::user_text("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-            },
-        ),
-    ];
+    let branch = vec![entry(
+        "u1",
+        SessionEntryKind::User {
+            // 40 chars: bytes/4 estimated 10 tokens; RFD-0014's
+            // real BPE tokenizer returns somewhere in [3, 14].
+            message: Message::user_text("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        },
+    )];
     let html = render("s1", &branch);
     // Just sanity-check the render didn't panic and emitted a token
     // estimate. Exact count varies with the tokenizer encoding
     // (see RFD 0014).
-    assert!(html.contains("estimated tokens"), "html missing estimate: {html}");
+    assert!(
+        html.contains("estimated tokens"),
+        "html missing estimate: {html}"
+    );
 }
 
 #[test]
 fn html_escapes_dangerous_characters_in_labels() {
-    let branch = vec![
-        entry(
-            "u1",
-            SessionEntryKind::User {
-                message: Message::user_text("<script>alert('x')</script>"),
-            },
-        ),
-    ];
+    let branch = vec![entry(
+        "u1",
+        SessionEntryKind::User {
+            message: Message::user_text("<script>alert('x')</script>"),
+        },
+    )];
     let html = render("s1", &branch);
     assert!(!html.contains("<script>alert"));
     assert!(html.contains("&lt;script&gt;"));
@@ -187,7 +231,12 @@ fn html_escapes_dangerous_characters_in_labels() {
 #[test]
 fn outcome_and_evolve_marker_render_as_meta_blocks() {
     let branch = vec![
-        entry("u1", SessionEntryKind::User { message: Message::user_text("hi") }),
+        entry(
+            "u1",
+            SessionEntryKind::User {
+                message: Message::user_text("hi"),
+            },
+        ),
         entry(
             "em",
             SessionEntryKind::EvolveMarker {
@@ -215,9 +264,7 @@ fn outcome_and_evolve_marker_render_as_meta_blocks() {
 
 #[test]
 fn json_format_round_trip_produces_expected_block_kinds() {
-    use pi_coding_agent::native::trajectory::flamegraph::{
-        build_trajectory, render_json, Format,
-    };
+    use pi_coding_agent::native::trajectory::flamegraph::{build_trajectory, render_json, Format};
     use serde_json::Value;
 
     let branch = vec![
@@ -238,7 +285,12 @@ fn json_format_round_trip_produces_expected_block_kinds() {
                 tokens: Some(200),
             },
         ),
-        entry("u1", SessionEntryKind::User { message: Message::user_text("run ls") }),
+        entry(
+            "u1",
+            SessionEntryKind::User {
+                message: Message::user_text("run ls"),
+            },
+        ),
         entry(
             "a1",
             SessionEntryKind::Assistant {
@@ -454,5 +506,8 @@ fn assistant_text_without_following_usage_has_no_cost() {
         .iter()
         .find(|b| b["kind"] == "assistant_text")
         .unwrap();
-    assert!(block.get("cost_usd").is_none(), "cost_usd should be omitted");
+    assert!(
+        block.get("cost_usd").is_none(),
+        "cost_usd should be omitted"
+    );
 }

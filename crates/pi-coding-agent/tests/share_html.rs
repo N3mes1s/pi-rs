@@ -34,10 +34,7 @@ fn output_starts_with_doctype_and_contains_session_id() {
         "must start with <!doctype html>, got: {:?}",
         &html[..50.min(html.len())]
     );
-    assert!(
-        html.contains("abc-123-def"),
-        "must contain the session id"
-    );
+    assert!(html.contains("abc-123-def"), "must contain the session id");
 }
 
 #[test]
@@ -59,7 +56,10 @@ fn empty_session_produces_valid_document() {
     assert!(html.contains("<body>"));
     assert!(html.contains("</body>"));
     // No block divs should be present.
-    assert!(!html.contains("class=\"block"), "empty session must not have block divs");
+    assert!(
+        !html.contains("class=\"block"),
+        "empty session must not have block divs"
+    );
 }
 
 // ─── HTML escaping ────────────────────────────────────────────────────────────
@@ -82,14 +82,8 @@ fn user_message_with_script_tag_is_escaped() {
         },
     )];
     let html = render_session_html(&branch, "s1", "p", "m");
-    assert!(
-        html.contains("&lt;script&gt;"),
-        "must escape <script>"
-    );
-    assert!(
-        !html.contains("<script>"),
-        "must not contain raw <script>"
-    );
+    assert!(html.contains("&lt;script&gt;"), "must escape <script>");
+    assert!(!html.contains("<script>"), "must not contain raw <script>");
 }
 
 #[test]
@@ -118,7 +112,10 @@ fn user_block_has_role_user_class() {
     )];
     let html = render_session_html(&branch, "s", "p", "m");
     assert!(html.contains("role-user"), "must have role-user class");
-    assert!(html.contains("<header>user</header>"), "header must say 'user'");
+    assert!(
+        html.contains("<header>user</header>"),
+        "header must say 'user'"
+    );
 }
 
 #[test]
@@ -130,7 +127,10 @@ fn assistant_block_has_role_assistant_class() {
         },
     )];
     let html = render_session_html(&branch, "s", "p", "m");
-    assert!(html.contains("role-assistant"), "must have role-assistant class");
+    assert!(
+        html.contains("role-assistant"),
+        "must have role-assistant class"
+    );
     assert!(html.contains("<header>assistant</header>"));
 }
 
@@ -147,7 +147,10 @@ fn tool_call_block_has_role_tool_call_class_and_shows_tool_name() {
         },
     )];
     let html = render_session_html(&branch, "s", "p", "m");
-    assert!(html.contains("role-tool_call"), "must have role-tool_call class");
+    assert!(
+        html.contains("role-tool_call"),
+        "must have role-tool_call class"
+    );
     assert!(
         html.contains("tool_call: shell"),
         "header must show tool name"
@@ -168,7 +171,10 @@ fn tool_result_block_has_role_tool_result_class() {
         },
     )];
     let html = render_session_html(&branch, "s", "p", "m");
-    assert!(html.contains("role-tool_result"), "must have role-tool_result class");
+    assert!(
+        html.contains("role-tool_result"),
+        "must have role-tool_result class"
+    );
     assert!(html.contains("file.txt"));
 }
 
@@ -186,7 +192,10 @@ fn tool_result_error_adds_role_error_class() {
         },
     )];
     let html = render_session_html(&branch, "s", "p", "m");
-    assert!(html.contains("role-error"), "error result must have role-error class");
+    assert!(
+        html.contains("role-error"),
+        "error result must have role-error class"
+    );
 }
 
 #[test]
@@ -199,7 +208,10 @@ fn compaction_block_has_role_compaction_class() {
         },
     )];
     let html = render_session_html(&branch, "s", "p", "m");
-    assert!(html.contains("role-compaction"), "must have role-compaction class");
+    assert!(
+        html.contains("role-compaction"),
+        "must have role-compaction class"
+    );
     assert!(html.contains("older context summarised"));
 }
 
@@ -237,7 +249,10 @@ fn meta_and_usage_and_system_prompt_are_not_rendered() {
         ),
     ];
     let html = render_session_html(&branch, "s", "p", "m");
-    assert!(!html.contains("secret system prompt"), "system prompt must be hidden");
+    assert!(
+        !html.contains("secret system prompt"),
+        "system prompt must be hidden"
+    );
     assert!(html.contains("visible"), "user message must be present");
     // Only one block div should be in the output (the user message).
     let count = html.matches("class=\"block").count();
@@ -300,7 +315,10 @@ fn tool_call_input_with_angle_brackets_is_escaped() {
         },
     )];
     let html = render_session_html(&branch, "s", "p", "m");
-    assert!(html.contains("&lt;root&gt;"), "JSON value with < > must be escaped");
+    assert!(
+        html.contains("&lt;root&gt;"),
+        "JSON value with < > must be escaped"
+    );
 }
 
 // ─── session_id shorter than 8 chars ─────────────────────────────────────────

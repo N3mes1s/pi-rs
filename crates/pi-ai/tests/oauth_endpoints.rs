@@ -1,9 +1,7 @@
 //! Tests for the per-provider OAuth endpoint constructors and the
 //! `endpoints_for_provider` helper.
 
-use pi_ai::oauth::{
-    build_authorize_url, endpoints_for_provider, OAuthEndpoints, Pkce,
-};
+use pi_ai::oauth::{build_authorize_url, endpoints_for_provider, OAuthEndpoints, Pkce};
 
 // ── helper ────────────────────────────────────────────────────────────────────
 
@@ -48,14 +46,8 @@ fn openai_subscription_endpoints_values() {
 #[test]
 fn github_copilot_endpoints_values() {
     let ep = OAuthEndpoints::github_copilot();
-    assert_eq!(
-        ep.authorize_url,
-        "https://github.com/login/oauth/authorize"
-    );
-    assert_eq!(
-        ep.token_url,
-        "https://github.com/login/oauth/access_token"
-    );
+    assert_eq!(ep.authorize_url, "https://github.com/login/oauth/authorize");
+    assert_eq!(ep.token_url, "https://github.com/login/oauth/access_token");
     assert_eq!(ep.client_id, "Iv1.b507a08c87ecfe98");
     assert_eq!(ep.redirect_uri, "http://localhost:54545/callback");
     assert_eq!(ep.scope, "copilot read:user");
@@ -128,7 +120,10 @@ fn endpoints_for_provider_chatgpt_alias_returns_openai() {
 #[test]
 fn endpoints_for_provider_openai_alias() {
     let ep = endpoints_for_provider("openai").expect("openai");
-    assert_eq!(ep.client_id, OAuthEndpoints::openai_subscription().client_id);
+    assert_eq!(
+        ep.client_id,
+        OAuthEndpoints::openai_subscription().client_id
+    );
 }
 
 #[test]

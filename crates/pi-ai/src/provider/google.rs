@@ -65,7 +65,11 @@ pub fn message_to_google_parts(blocks: &[ContentBlock]) -> Vec<Value> {
             ContentBlock::ToolUse { name, input, .. } => parts.push(json!({
                 "functionCall": {"name": name, "args": input}
             })),
-            ContentBlock::ToolResult { tool_use_id, content, is_error } => parts.push(json!({
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => parts.push(json!({
                 "functionResponse": {
                     "name": tool_use_id,
                     "response": {"content": content, "is_error": is_error},
@@ -160,7 +164,12 @@ impl Provider for GoogleProvider {
         let event_stream = resp.bytes_stream().eventsource();
         let model_owned = model.clone();
         let s = stream::unfold(
-            (event_stream, UsageAcc::default(), None::<FinishReason>, model_owned),
+            (
+                event_stream,
+                UsageAcc::default(),
+                None::<FinishReason>,
+                model_owned,
+            ),
             move |(mut es, mut usage_running, mut pending_finish, model_owned)| async move {
                 // If we deferred a Finish from the previous chunk (after emitting
                 // Usage), surface it now.

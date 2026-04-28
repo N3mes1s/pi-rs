@@ -32,7 +32,9 @@ fn compactor_summary_includes_tool_use_and_tool_result_markers() {
         Message {
             role: Role::Assistant,
             content: vec![
-                ContentBlock::Text { text: "thinking out loud".into() },
+                ContentBlock::Text {
+                    text: "thinking out loud".into(),
+                },
                 ContentBlock::ToolUse {
                     id: "id".into(),
                     name: "read".into(),
@@ -78,7 +80,9 @@ fn compactor_with_system_and_tool_roles_labels_them() {
         },
         Message {
             role: Role::Tool,
-            content: vec![ContentBlock::Text { text: "tool".into() }],
+            content: vec![ContentBlock::Text {
+                text: "tool".into(),
+            }],
         },
         Message::user_text("trigger"),
     ];
@@ -99,13 +103,18 @@ fn compactor_skips_messages_with_only_empty_content_blocks() {
         // Text-bearing.
         Message {
             role: Role::User,
-            content: vec![ContentBlock::Text { text: "kept".into() }],
+            content: vec![ContentBlock::Text {
+                text: "kept".into(),
+            }],
         },
     ];
     let (_, summary) = c.compact(&msgs, None);
     assert!(summary.contains("kept"));
     let count = summary.matches("- user").count();
-    assert_eq!(count, 1, "empty-content message should not contribute a line: {summary}");
+    assert_eq!(
+        count, 1,
+        "empty-content message should not contribute a line: {summary}"
+    );
 }
 
 // --- LlmCompactor early return path --------------------------------
@@ -135,11 +144,7 @@ impl Provider for UnusedProvider {
             usage: Usage::default(),
         })
     }
-    async fn stream(
-        &self,
-        _req: GenerateRequest,
-        _model: &ModelInfo,
-    ) -> AiResult<EventStream> {
+    async fn stream(&self, _req: GenerateRequest, _model: &ModelInfo) -> AiResult<EventStream> {
         Ok(Box::pin(futures::stream::empty::<AiResult<StreamEvent>>()))
     }
 }
@@ -221,11 +226,7 @@ async fn llm_compactor_without_instructions_uses_default_recap_prompt() {
                 usage: Usage::default(),
             })
         }
-        async fn stream(
-            &self,
-            _req: GenerateRequest,
-            _model: &ModelInfo,
-        ) -> AiResult<EventStream> {
+        async fn stream(&self, _req: GenerateRequest, _model: &ModelInfo) -> AiResult<EventStream> {
             Ok(Box::pin(futures::stream::empty::<AiResult<StreamEvent>>()))
         }
     }

@@ -9,11 +9,11 @@
 //!  5. Typing `@` again after a previous completion opens a fresh picker.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use pi_agent_core::settings::ThinkingSetting;
+use pi_coding_agent::keymap::Keymap;
 use pi_coding_agent::modes::interactive::{
     build_at_candidates, handle_key, open_at_picker, KeyOutcome, View,
 };
-use pi_coding_agent::keymap::Keymap;
-use pi_agent_core::settings::ThinkingSetting;
 use std::path::PathBuf;
 
 // ─── helpers ────────────────────────────────────────────────────────────────

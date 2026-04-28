@@ -16,10 +16,7 @@ async fn parallel_ensure_two_distinct_paths() {
         p
     });
 
-    let (a, b) = tokio::join!(
-        wt::ensure(&repo, "task-a"),
-        wt::ensure(&repo, "task-b"),
-    );
+    let (a, b) = tokio::join!(wt::ensure(&repo, "task-a"), wt::ensure(&repo, "task-b"),);
     let a = a.expect("task-a ensure");
     let b = b.expect("task-b ensure");
 

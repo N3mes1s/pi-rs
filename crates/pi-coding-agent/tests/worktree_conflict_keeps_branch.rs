@@ -32,11 +32,20 @@ async fn parent_head_advanced_means_conflicted_branch() {
     // so even if cherry-pick *were* attempted it would conflict.
     std::fs::write(repo.join("conflict.txt"), "parent-version\n").unwrap();
     git(&repo, &["add", "conflict.txt"]);
-    git(&repo, &["commit", "-q", "-m", "parent advances", "--no-verify"]);
+    git(
+        &repo,
+        &["commit", "-q", "-m", "parent advances", "--no-verify"],
+    );
 
-    let outcome = wt::finish(&repo, &dir, &baseline, "task-conf", wt::ReconcileMode::Branch)
-        .await
-        .unwrap();
+    let outcome = wt::finish(
+        &repo,
+        &dir,
+        &baseline,
+        "task-conf",
+        wt::ReconcileMode::Branch,
+    )
+    .await
+    .unwrap();
 
     match outcome {
         wt::ReconcileOutcome::ConflictedBranch { branch } => {

@@ -21,7 +21,11 @@ use crate::settings::Settings;
 /// Tests can swap this out to inject mock providers without going over
 /// the network.
 pub trait ProviderFactory: Send + Sync {
-    fn build(&self, cfg: ProviderConfig, auth: AuthMethod) -> Result<Box<dyn Provider>, RuntimeError>;
+    fn build(
+        &self,
+        cfg: ProviderConfig,
+        auth: AuthMethod,
+    ) -> Result<Box<dyn Provider>, RuntimeError>;
 }
 
 /// Approval gate consulted before each tool invocation. The runtime
@@ -34,11 +38,7 @@ pub trait ProviderFactory: Send + Sync {
 /// `auto_approve::AutoApproveGate` plugs in here.
 #[async_trait::async_trait]
 pub trait ToolGate: Send + Sync {
-    async fn approve(
-        &self,
-        tool_name: &str,
-        input: &serde_json::Value,
-    ) -> ToolGateOutcome;
+    async fn approve(&self, tool_name: &str, input: &serde_json::Value) -> ToolGateOutcome;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +87,11 @@ pub trait StreamInterceptor: Send + Sync {
 pub struct DefaultProviderFactory;
 
 impl ProviderFactory for DefaultProviderFactory {
-    fn build(&self, cfg: ProviderConfig, auth: AuthMethod) -> Result<Box<dyn Provider>, RuntimeError> {
+    fn build(
+        &self,
+        cfg: ProviderConfig,
+        auth: AuthMethod,
+    ) -> Result<Box<dyn Provider>, RuntimeError> {
         Ok(match cfg.kind {
             ProviderKind::Anthropic => Box::new(AnthropicProvider::new(cfg, auth)),
             ProviderKind::OpenAi => Box::new(OpenAiProvider::new(cfg, auth)),
@@ -136,11 +140,7 @@ impl RuntimeConfig {
     /// Install a tool gate. `ask_is_approve = true` is appropriate when
     /// the host has interactive UI and will prompt the user; `false`
     /// (fail-closed) is the safe default for print/json/rpc modes.
-    pub fn with_tool_gate(
-        mut self,
-        gate: Arc<dyn ToolGate>,
-        ask_is_approve: bool,
-    ) -> Self {
+    pub fn with_tool_gate(mut self, gate: Arc<dyn ToolGate>, ask_is_approve: bool) -> Self {
         self.tool_gate = Some(gate);
         self.gate_ask_is_approve = ask_is_approve;
         self
@@ -354,7 +354,11 @@ impl AgentSession {
                 replaced_ids: vec![],
             },
         );
-        self.emit(AgentEventKind::CompactionComplete { summary, freed_tokens }).await;
+        self.emit(AgentEventKind::CompactionComplete {
+            summary,
+            freed_tokens,
+        })
+        .await;
     }
 
     async fn try_llm_compact(
@@ -420,11 +424,14 @@ impl AgentSession {
             g.aborted = false;
             g.messages.push(user_msg.clone());
         }
-        let _ = self
-            .cfg
-            .session_manager
-            .append(&self.id, SessionEntryKind::User { message: user_msg.clone() });
-        self.emit(AgentEventKind::UserMessage { message: user_msg }).await;
+        let _ = self.cfg.session_manager.append(
+            &self.id,
+            SessionEntryKind::User {
+                message: user_msg.clone(),
+            },
+        );
+        self.emit(AgentEventKind::UserMessage { message: user_msg })
+            .await;
         self.run_loop().await
     }
 
@@ -498,7 +505,10 @@ impl AgentSession {
                     // wait for a terminal event) block forever on the
                     // channel because no Aborted/TurnComplete ever fires.
                     let message = e.to_string();
-                    self.emit(AgentEventKind::Error { message: message.clone() }).await;
+                    self.emit(AgentEventKind::Error {
+                        message: message.clone(),
+                    })
+                    .await;
                     self.emit(AgentEventKind::Aborted).await;
                     return Err(RuntimeError::Provider(message));
                 }
@@ -523,7 +533,8 @@ impl AgentSession {
                 match ev.kind {
                     K::TextDelta { text } => {
                         assistant_text.push_str(&text);
-                        self.emit(AgentEventKind::AssistantTextDelta { text: text.clone() }).await;
+                        self.emit(AgentEventKind::AssistantTextDelta { text: text.clone() })
+                            .await;
                         if let Some(intercept) = &self.cfg.stream_interceptor {
                             match intercept.on_text_delta(&text).await {
                                 InterceptAction::Continue => {}
@@ -536,11 +547,17 @@ impl AgentSession {
                     }
                     K::ThinkingDelta { text } => {
                         assistant_thinking.push_str(&text);
-                        self.emit(AgentEventKind::AssistantThinkingDelta { text }).await;
+                        self.emit(AgentEventKind::AssistantThinkingDelta { text })
+                            .await;
                     }
                     K::ToolCallComplete { id, name, input } => {
-                        let call = ToolCall { id: id.clone(), name: name.clone(), input };
-                        self.emit(AgentEventKind::AssistantToolCall { call: call.clone() }).await;
+                        let call = ToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input,
+                        };
+                        self.emit(AgentEventKind::AssistantToolCall { call: call.clone() })
+                            .await;
                         tool_calls.push(call);
                     }
                     K::Usage { usage } => {
@@ -551,7 +568,10 @@ impl AgentSession {
                         finish = reason;
                     }
                     K::Error { message } => {
-                        self.emit(AgentEventKind::Error { message: message.clone() }).await;
+                        self.emit(AgentEventKind::Error {
+                            message: message.clone(),
+                        })
+                        .await;
                         return Err(RuntimeError::Provider(message));
                     }
                     _ => {}
@@ -572,9 +592,12 @@ impl AgentSession {
                 }
                 let _ = self.cfg.session_manager.append(
                     &self.id,
-                    SessionEntryKind::User { message: next.clone() },
+                    SessionEntryKind::User {
+                        message: next.clone(),
+                    },
                 );
-                self.emit(AgentEventKind::UserMessage { message: next }).await;
+                self.emit(AgentEventKind::UserMessage { message: next })
+                    .await;
                 continue;
             }
 
@@ -607,7 +630,9 @@ impl AgentSession {
             }
             let _ = self.cfg.session_manager.append(
                 &self.id,
-                SessionEntryKind::Assistant { message: assistant_msg.clone() },
+                SessionEntryKind::Assistant {
+                    message: assistant_msg.clone(),
+                },
             );
             // Persist the per-turn token / cost roll-up so trajectory
             // recorders + pi-stats ingest can attribute spend back to
@@ -624,10 +649,15 @@ impl AgentSession {
             {
                 let _ = self.cfg.session_manager.append(
                     &self.id,
-                    SessionEntryKind::Usage { usage: usage_total.clone() },
+                    SessionEntryKind::Usage {
+                        usage: usage_total.clone(),
+                    },
                 );
             }
-            self.emit(AgentEventKind::AssistantMessage { message: assistant_msg.clone() }).await;
+            self.emit(AgentEventKind::AssistantMessage {
+                message: assistant_msg.clone(),
+            })
+            .await;
             last_assistant = Some(assistant_msg);
 
             if tool_calls.is_empty() {
@@ -644,9 +674,12 @@ impl AgentSession {
                     }
                     let _ = self.cfg.session_manager.append(
                         &self.id,
-                        SessionEntryKind::User { message: next.clone() },
+                        SessionEntryKind::User {
+                            message: next.clone(),
+                        },
                     );
-                    self.emit(AgentEventKind::UserMessage { message: next }).await;
+                    self.emit(AgentEventKind::UserMessage { message: next })
+                        .await;
                     continue;
                 }
                 self.emit(AgentEventKind::TurnComplete).await;
@@ -674,9 +707,14 @@ impl AgentSession {
                         };
                         let _ = self.cfg.session_manager.append(
                             &self.id,
-                            SessionEntryKind::ToolResult { result: result.clone() },
+                            SessionEntryKind::ToolResult {
+                                result: result.clone(),
+                            },
                         );
-                        self.emit(AgentEventKind::ToolResult { result: result.clone() }).await;
+                        self.emit(AgentEventKind::ToolResult {
+                            result: result.clone(),
+                        })
+                        .await;
                         results_block.push(ContentBlock::ToolResult {
                             tool_use_id: call.id,
                             content: result.model_output,
@@ -711,9 +749,14 @@ impl AgentSession {
                         };
                         let _ = self.cfg.session_manager.append(
                             &self.id,
-                            SessionEntryKind::ToolResult { result: result.clone() },
+                            SessionEntryKind::ToolResult {
+                                result: result.clone(),
+                            },
                         );
-                        self.emit(AgentEventKind::ToolResult { result: result.clone() }).await;
+                        self.emit(AgentEventKind::ToolResult {
+                            result: result.clone(),
+                        })
+                        .await;
                         results_block.push(ContentBlock::ToolResult {
                             tool_use_id: call.id,
                             content: result.model_output,
@@ -726,9 +769,14 @@ impl AgentSession {
                     Ok(result) => {
                         let _ = self.cfg.session_manager.append(
                             &self.id,
-                            SessionEntryKind::ToolResult { result: result.clone() },
+                            SessionEntryKind::ToolResult {
+                                result: result.clone(),
+                            },
                         );
-                        self.emit(AgentEventKind::ToolResult { result: result.clone() }).await;
+                        self.emit(AgentEventKind::ToolResult {
+                            result: result.clone(),
+                        })
+                        .await;
                         results_block.push(ContentBlock::ToolResult {
                             tool_use_id: call.id,
                             content: result.model_output,
@@ -744,9 +792,14 @@ impl AgentSession {
                         };
                         let _ = self.cfg.session_manager.append(
                             &self.id,
-                            SessionEntryKind::ToolResult { result: result.clone() },
+                            SessionEntryKind::ToolResult {
+                                result: result.clone(),
+                            },
                         );
-                        self.emit(AgentEventKind::ToolResult { result: result.clone() }).await;
+                        self.emit(AgentEventKind::ToolResult {
+                            result: result.clone(),
+                        })
+                        .await;
                         results_block.push(ContentBlock::ToolResult {
                             tool_use_id: call.id,
                             content: result.model_output,
@@ -772,7 +825,8 @@ impl AgentSession {
         let remaining = model.context_window.saturating_sub(used as u32);
         let threshold = (model.context_window as f32 * self.cfg.settings.compact_threshold) as u32;
         if remaining < threshold && remaining > 0 {
-            self.emit(AgentEventKind::CompactionStart { instructions: None }).await;
+            self.emit(AgentEventKind::CompactionStart { instructions: None })
+                .await;
             self.compact(None).await;
         }
     }

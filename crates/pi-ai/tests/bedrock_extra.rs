@@ -106,7 +106,10 @@ async fn bedrock_oauth_token_is_used() {
         },
     );
 
-    let resp = provider.generate(req(), &model()).await.expect("generate ok");
+    let resp = provider
+        .generate(req(), &model())
+        .await
+        .expect("generate ok");
     assert_eq!(resp.message.text(), "Hello");
 }
 
@@ -117,7 +120,10 @@ fn bedrock_with_client_builder() {
     let client = reqwest::Client::new();
     let provider = BedrockAnthropicProvider::new(cfg("http://localhost".into()), AuthMethod::None)
         .with_client(client);
-    assert_eq!(provider.region, std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string()));
+    assert_eq!(
+        provider.region,
+        std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string())
+    );
 }
 
 // ── Thinking level Low/Medium/High forwarded ──────────────────────────────────
@@ -134,7 +140,11 @@ async fn bedrock_thinking_levels_are_forwarded() {
         "data: {\"type\":\"message_stop\"}\n\n",
     );
 
-    for level in [ThinkingLevel::Low, ThinkingLevel::Medium, ThinkingLevel::High] {
+    for level in [
+        ThinkingLevel::Low,
+        ThinkingLevel::Medium,
+        ThinkingLevel::High,
+    ] {
         Mock::given(method("POST"))
             .and(path(bedrock_path()))
             .respond_with(
@@ -147,7 +157,9 @@ async fn bedrock_thinking_levels_are_forwarded() {
 
         let provider = BedrockAnthropicProvider::new(
             cfg(server.uri()),
-            AuthMethod::ApiKey { value: "tok".into() },
+            AuthMethod::ApiKey {
+                value: "tok".into(),
+            },
         );
         let mut r = req();
         r.thinking = level;
@@ -183,7 +195,9 @@ async fn bedrock_system_message_forwarded() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
     let mut r = req();
     r.system = Some("System prompt".into());
@@ -224,7 +238,9 @@ async fn bedrock_tool_call_stream_emits_tool_call_complete() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let resp = provider.generate(req(), &model()).await.expect("ok");
@@ -259,7 +275,9 @@ async fn bedrock_thinking_delta_emitted() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
@@ -300,7 +318,9 @@ async fn bedrock_usage_from_message_delta() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let resp = provider.generate(req(), &model()).await.expect("ok");
@@ -335,7 +355,9 @@ async fn bedrock_text_content_block_start_is_ignored() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let resp = provider.generate(req(), &model()).await.expect("ok");
@@ -350,18 +372,38 @@ fn content_blocks_to_anthropic_all_block_types() {
     use pi_ai::provider::anthropic::content_blocks_to_anthropic;
 
     let blocks = vec![
-        ContentBlock::Text { text: "hello".into() },
-        ContentBlock::Thinking { text: "think".into(), signature: Some("sig".into()) },
-        ContentBlock::ToolUse { id: "id1".into(), name: "bash".into(), input: json!({"cmd": "ls"}) },
-        ContentBlock::ToolResult { tool_use_id: "id1".into(), content: "result".into(), is_error: false },
+        ContentBlock::Text {
+            text: "hello".into(),
+        },
+        ContentBlock::Thinking {
+            text: "think".into(),
+            signature: Some("sig".into()),
+        },
+        ContentBlock::ToolUse {
+            id: "id1".into(),
+            name: "bash".into(),
+            input: json!({"cmd": "ls"}),
+        },
+        ContentBlock::ToolResult {
+            tool_use_id: "id1".into(),
+            content: "result".into(),
+            is_error: false,
+        },
         ContentBlock::Attachment {
             attachment: Attachment {
-                kind: AttachmentKind::Image { mime: "image/png".into(), base64: "abc".into() },
+                kind: AttachmentKind::Image {
+                    mime: "image/png".into(),
+                    base64: "abc".into(),
+                },
             },
         },
         ContentBlock::Attachment {
             attachment: Attachment {
-                kind: AttachmentKind::File { mime: "application/pdf".into(), base64: "xyz".into(), name: "doc.pdf".into() },
+                kind: AttachmentKind::File {
+                    mime: "application/pdf".into(),
+                    base64: "xyz".into(),
+                    name: "doc.pdf".into(),
+                },
             },
         },
     ];
@@ -402,7 +444,9 @@ async fn bedrock_tools_forwarded() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let mut r = req();
@@ -439,7 +483,9 @@ async fn bedrock_max_tokens_forwarded() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let mut r = req();
@@ -488,7 +534,9 @@ async fn bedrock_system_role_messages_filtered() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let mut r = req();
@@ -551,7 +599,9 @@ async fn bedrock_usage_shape_matches_anthropic_byte_for_byte() {
 
     let provider = BedrockAnthropicProvider::new(
         cfg(server.uri()),
-        AuthMethod::ApiKey { value: "tok".into() },
+        AuthMethod::ApiKey {
+            value: "tok".into(),
+        },
     );
 
     let resp = provider.generate(req(), &opus).await.expect("ok");

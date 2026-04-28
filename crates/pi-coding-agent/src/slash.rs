@@ -90,10 +90,7 @@ impl SlashRegistry {
     /// `extension_index` matches the position in `Startup::extensions`.
     /// Existing names (builtins, templates) are **not** overwritten so that
     /// built-in commands always take precedence.
-    pub fn register_extension_commands(
-        &mut self,
-        items: &[(usize, &ExtensionCommandManifest)],
-    ) {
+    pub fn register_extension_commands(&mut self, items: &[(usize, &ExtensionCommandManifest)]) {
         for (ext_idx, cmd) in items {
             if self.inner.contains_key(&cmd.name) {
                 continue;

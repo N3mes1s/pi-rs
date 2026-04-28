@@ -125,8 +125,8 @@ pub fn append_history(history_path: &Path, entry: &HistoryEntry) -> io::Result<(
         .create(true)
         .append(true)
         .open(history_path)?;
-    let line = serde_json::to_string(entry)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let line =
+        serde_json::to_string(entry).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     f.write_all(line.as_bytes())?;
     f.write_all(b"\n")?;
     Ok(())
@@ -177,10 +177,7 @@ pub fn commit(
         io::Error::new(io::ErrorKind::InvalidInput, "AGENTS.md path has no parent")
     })?;
     fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(
-        ".AGENTS.md.evolve.tmp.{}",
-        std::process::id()
-    ));
+    let tmp = parent.join(format!(".AGENTS.md.evolve.tmp.{}", std::process::id()));
     // Step 1: stage new body next to the destination.
     {
         let mut f = fs::File::create(&tmp)?;
@@ -219,7 +216,9 @@ pub fn commit(
 /// Default location of the cross-cwd evolve history.jsonl
 /// (under `pi_coding_agent::context::agent_dir()`).
 pub fn default_history_path() -> PathBuf {
-    crate::context::agent_dir().join("evolve").join("history.jsonl")
+    crate::context::agent_dir()
+        .join("evolve")
+        .join("history.jsonl")
 }
 
 // ─── Pareto frontier ───────────────────────────────────────────────────
@@ -286,10 +285,7 @@ fn dominates(a: &Candidate, b: &Candidate) -> bool {
 /// 3. Must be on the Pareto frontier.
 /// 4. Among qualifiers, prefer the one with highest pass_rate; tie-break
 ///    on lower p95_tokens; tie-break on lower cost.
-pub fn best_strict_improvement(
-    candidates: &[Candidate],
-    baseline_idx: usize,
-) -> Option<usize> {
+pub fn best_strict_improvement(candidates: &[Candidate], baseline_idx: usize) -> Option<usize> {
     if candidates.is_empty() || baseline_idx >= candidates.len() {
         return None;
     }
@@ -317,8 +313,15 @@ pub fn best_strict_improvement(
             Some(bi) => {
                 let bsum = &candidates[bi].summary;
                 let csum = &c.summary;
-                let better = (csum.pass_rate, -(csum.p95_tokens_in as i64), -csum.total_cost_usd as i32)
-                    > (bsum.pass_rate, -(bsum.p95_tokens_in as i64), -bsum.total_cost_usd as i32);
+                let better = (
+                    csum.pass_rate,
+                    -(csum.p95_tokens_in as i64),
+                    -csum.total_cost_usd as i32,
+                ) > (
+                    bsum.pass_rate,
+                    -(bsum.p95_tokens_in as i64),
+                    -bsum.total_cost_usd as i32,
+                );
                 if better {
                     best = Some(i);
                 }
@@ -490,8 +493,8 @@ pub fn append_generation(cwd: &Path, entry: &GenerationLogEntry) -> io::Result<(
         .create(true)
         .append(true)
         .open(&path)?;
-    let line = serde_json::to_string(entry)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let line =
+        serde_json::to_string(entry).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     f.write_all(line.as_bytes())?;
     f.write_all(b"\n")?;
     Ok(())

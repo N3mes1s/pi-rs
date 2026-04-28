@@ -208,9 +208,12 @@ fn entry_as_block(entry: &SessionEntry) -> Option<Block> {
             None,
         ),
         SessionEntryKind::Meta { .. } => ("meta", "session start".into(), 0, None),
-        SessionEntryKind::SystemPrompt { text } => {
-            ("meta", short(text, 40), (est_tokens(text) * 0.5) as u64, None)
-        }
+        SessionEntryKind::SystemPrompt { text } => (
+            "meta",
+            short(text, 40),
+            (est_tokens(text) * 0.5) as u64,
+            None,
+        ),
         SessionEntryKind::ContextLoad {
             source,
             bytes,
@@ -430,7 +433,11 @@ fn render_block(entry: &SessionEntry, total_tokens: f64) -> Option<String> {
         SessionEntryKind::SystemPrompt { text } => {
             ("meta", short(text, 40), est_tokens(text) * 0.5)
         }
-        SessionEntryKind::ContextLoad { source, bytes, tokens } => {
+        SessionEntryKind::ContextLoad {
+            source,
+            bytes,
+            tokens,
+        } => {
             let t = tokens.map(|t| t as f64).unwrap_or(*bytes as f64 / 4.0);
             ("meta", format!("ctx: {source}"), t)
         }

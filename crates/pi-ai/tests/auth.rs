@@ -104,10 +104,7 @@ fn from_env_picks_up_known_keys() {
 #[test]
 fn in_memory_does_not_write_to_disk() {
     let storage = AuthStorage::in_memory();
-    storage.set(
-        "anthropic",
-        AuthMethod::None,
-    );
+    storage.set("anthropic", AuthMethod::None);
     assert!(matches!(storage.get("anthropic"), Some(AuthMethod::None)));
 }
 

@@ -82,7 +82,10 @@ fn spec_accessor_returns_correct_name_per_tool() {
         let t = r.get(name).unwrap();
         assert_eq!(t.spec().name, name);
         // every tool should at least describe itself in non-empty terms
-        assert!(!t.spec().description.is_empty(), "{name} has empty description");
+        assert!(
+            !t.spec().description.is_empty(),
+            "{name} has empty description"
+        );
     }
 }
 
@@ -99,7 +102,10 @@ async fn read_tool_does_not_truncate_when_file_fits_within_cap() {
     };
     let r = ToolRegistry::with_defaults();
     let read = r.get("read").unwrap();
-    let out = read.invoke(&c, "1", json!({"path": "tiny.txt"})).await.unwrap();
+    let out = read
+        .invoke(&c, "1", json!({"path": "tiny.txt"}))
+        .await
+        .unwrap();
     assert!(!out.model_output.contains("truncated"));
 }
 
@@ -131,14 +137,21 @@ async fn read_tool_truncates_just_above_cap_with_marker() {
 async fn read_tool_offset_skips_initial_lines_and_limit_caps_count() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("multi.txt");
-    let body: String = (1..=10).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+    let body: String = (1..=10)
+        .map(|i| format!("line{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     std::fs::write(&p, &body).unwrap();
     let c = ctx(dir.path());
     let r = ToolRegistry::with_defaults();
     let read = r.get("read").unwrap();
     // offset=4, limit=2 → only line4 and line5 should appear
     let out = read
-        .invoke(&c, "1", json!({"path": "multi.txt", "offset": 4, "limit": 2}))
+        .invoke(
+            &c,
+            "1",
+            json!({"path": "multi.txt", "offset": 4, "limit": 2}),
+        )
         .await
         .unwrap();
     assert!(out.model_output.contains("line4"));
@@ -191,9 +204,15 @@ async fn write_tool_missing_path_or_content_errors() {
     let c = ctx(dir.path());
     let r = ToolRegistry::with_defaults();
     let write = r.get("write").unwrap();
-    let e = write.invoke(&c, "1", json!({"content": "x"})).await.unwrap_err();
+    let e = write
+        .invoke(&c, "1", json!({"content": "x"}))
+        .await
+        .unwrap_err();
     assert!(e.to_string().contains("path"));
-    let e = write.invoke(&c, "1", json!({"path": "x"})).await.unwrap_err();
+    let e = write
+        .invoke(&c, "1", json!({"path": "x"}))
+        .await
+        .unwrap_err();
     assert!(e.to_string().contains("content"));
 }
 
@@ -293,11 +312,7 @@ async fn bash_tool_uses_explicit_cwd_param_when_provided() {
     let r = ToolRegistry::with_defaults();
     let bash = r.get("bash").unwrap();
     let out = bash
-        .invoke(
-            &c,
-            "1",
-            json!({"command": "ls", "cwd": "subdir"}),
-        )
+        .invoke(&c, "1", json!({"command": "ls", "cwd": "subdir"}))
         .await
         .unwrap();
     assert!(

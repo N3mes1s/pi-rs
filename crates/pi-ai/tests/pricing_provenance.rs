@@ -103,12 +103,14 @@ fn every_anthropic_row_declares_both_cache_rates() {
         assert!(
             row.cache_read_cost_per_mtok.is_some(),
             "{}/{} missing cache_read_cost_per_mtok",
-            row.provider, row.model
+            row.provider,
+            row.model
         );
         assert!(
             row.cache_write_cost_per_mtok.is_some(),
             "{}/{} missing cache_write_cost_per_mtok",
-            row.provider, row.model
+            row.provider,
+            row.model
         );
     }
 }

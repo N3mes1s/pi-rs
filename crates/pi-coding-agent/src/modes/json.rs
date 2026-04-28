@@ -27,7 +27,6 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
         }
     };
 
-
     let printer = tokio::spawn(async move {
         use std::io::Write;
         while let Some(ev) = rx.recv().await {
@@ -39,7 +38,8 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
             }
             if matches!(
                 ev.kind,
-                pi_agent_core::AgentEventKind::TurnComplete | pi_agent_core::AgentEventKind::Aborted
+                pi_agent_core::AgentEventKind::TurnComplete
+                    | pi_agent_core::AgentEventKind::Aborted
             ) {
                 break;
             }

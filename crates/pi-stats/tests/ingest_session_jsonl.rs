@@ -36,9 +36,7 @@ fn assistant_entry(id: &str, ts: i64) -> SessionEntry {
         kind: SessionEntryKind::Assistant {
             message: Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::Text {
-                    text: "hi".into(),
-                }],
+                content: vec![ContentBlock::Text { text: "hi".into() }],
             },
         },
     }

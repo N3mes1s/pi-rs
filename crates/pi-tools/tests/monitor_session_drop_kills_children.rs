@@ -52,5 +52,8 @@ async fn monitor_session_drop_kills_children() {
     while std::time::Instant::now() < deadline && pid_alive(pid) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(!pid_alive(pid), "child pid {pid} still alive after stop_all + drop");
+    assert!(
+        !pid_alive(pid),
+        "child pid {pid} still alive after stop_all + drop"
+    );
 }

@@ -94,9 +94,7 @@ async fn openai_streams_tool_call_with_split_arguments() {
 async fn openai_done_tail_flushes_finish_stop() {
     let server = MockServer::start().await;
     let mut body = String::new();
-    body.push_str(
-        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
-    );
+    body.push_str("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n");
     body.push_str("data: [DONE]\n\n");
 
     Mock::given(method("POST"))

@@ -49,7 +49,10 @@ pub fn router(state: AppState) -> Router {
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 
 async fn index() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], INDEX_HTML)
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        INDEX_HTML,
+    )
 }
 
 fn err(e: impl std::fmt::Display) -> Response {
@@ -130,15 +133,13 @@ async fn sync_now(State(s): State<AppState>) -> Response {
         Ok(report) => Json(json!({
             "files": report.files,
             "rows": report.rows,
-        })).into_response(),
+        }))
+        .into_response(),
         Err(e) => err(e),
     }
 }
 
-async fn request_detail(
-    State(s): State<AppState>,
-    AxPath(id): AxPath<i64>,
-) -> Response {
+async fn request_detail(State(s): State<AppState>, AxPath(id): AxPath<i64>) -> Response {
     let conn = s.conn.lock().unwrap();
     match aggregate::request_detail(&conn, id) {
         Ok(Some(r)) => Json(r).into_response(),

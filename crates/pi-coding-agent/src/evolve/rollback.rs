@@ -36,7 +36,11 @@ fn finite_mean(xs: &[f32]) -> f32 {
             n += 1;
         }
     }
-    if n == 0 { f32::NAN } else { (sum / n as f64) as f32 }
+    if n == 0 {
+        f32::NAN
+    } else {
+        (sum / n as f64) as f32
+    }
 }
 
 /// Latest `apply` row that has not yet been undone by a `rollback` row
@@ -84,10 +88,14 @@ pub fn tick(
     let observed = finite_mean(window);
     let pre = pending.pre_mean.unwrap_or(f32::NAN);
     if !observed.is_finite() || !pre.is_finite() {
-        return Ok(RollbackOutcome::Held { observed_mean: observed });
+        return Ok(RollbackOutcome::Held {
+            observed_mean: observed,
+        });
     }
     if observed >= pre - min_margin {
-        return Ok(RollbackOutcome::Held { observed_mean: observed });
+        return Ok(RollbackOutcome::Held {
+            observed_mean: observed,
+        });
     }
 
     // Restore previous body inline from the apply row.
@@ -106,11 +114,11 @@ pub fn tick(
         post_mean_estimate: pending.post_mean_estimate,
         margin: Some(min_margin),
         observed_mean: Some(observed),
-        trigger: Some(format!(
-            "rolling {min_new_outcomes}-session mean dropped"
-        )),
+        trigger: Some(format!("rolling {min_new_outcomes}-session mean dropped")),
         prev_body: None,
     };
     append_history(history_path, &entry)?;
-    Ok(RollbackOutcome::RolledBack { observed_mean: observed })
+    Ok(RollbackOutcome::RolledBack {
+        observed_mean: observed,
+    })
 }

@@ -27,8 +27,6 @@ pub mod tools;
 
 pub use confidence::{compute as compute_confidence, ConfidenceBand, ConfidenceScore};
 pub use dashboard::{render_inline, render_table, DashboardState};
-pub use log::{
-    jsonl_path, BestDirection, ConfigEntry, JsonlLog, RunEntry, RunStatus,
-};
+pub use log::{jsonl_path, BestDirection, ConfigEntry, JsonlLog, RunEntry, RunStatus};
 pub use session::{MetricDirection, Session, SessionConfig};
 pub use tools::{InitExperimentTool, LogExperimentTool, RunExperimentTool};

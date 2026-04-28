@@ -11,10 +11,7 @@ fn defaults_includes_submit_and_quit_bindings() {
         actions.contains(&Action::Submit),
         "defaults should bind Submit"
     );
-    assert!(
-        actions.contains(&Action::Quit),
-        "defaults should bind Quit"
-    );
+    assert!(actions.contains(&Action::Quit), "defaults should bind Quit");
 }
 
 #[test]

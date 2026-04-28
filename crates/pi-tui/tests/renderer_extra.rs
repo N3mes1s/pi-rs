@@ -56,10 +56,7 @@ fn render_emits_sgr_escape_sequences_for_coloured_spans() {
         let mut r = DiffRenderer::new(w.clone());
         let frame = Frame {
             lines: vec![Line {
-                spans: vec![
-                    Span::plain("plain "),
-                    Span::coloured("red", Color::Red),
-                ],
+                spans: vec![Span::plain("plain "), Span::coloured("red", Color::Red)],
             }],
         };
         r.render(&frame).unwrap();
@@ -116,11 +113,7 @@ fn shrinking_frame_clears_leftover_lines_from_previous_frame() {
     let w = SharedWriter::default();
     let mut r = DiffRenderer::new(w.clone());
     let big = Frame {
-        lines: vec![
-            Line::plain("one"),
-            Line::plain("two"),
-            Line::plain("three"),
-        ],
+        lines: vec![Line::plain("one"), Line::plain("two"), Line::plain("three")],
     };
     let small = Frame {
         lines: vec![Line::plain("one"), Line::plain("two")],

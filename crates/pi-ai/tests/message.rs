@@ -54,13 +54,17 @@ fn text_concatenates_only_text_blocks() {
                 text: "ignored".into(),
                 signature: None,
             },
-            ContentBlock::Text { text: "hello ".into() },
+            ContentBlock::Text {
+                text: "hello ".into(),
+            },
             ContentBlock::ToolUse {
                 id: "tu1".into(),
                 name: "fs_read".into(),
                 input: serde_json::json!({}),
             },
-            ContentBlock::Text { text: "world".into() },
+            ContentBlock::Text {
+                text: "world".into(),
+            },
             ContentBlock::ToolResult {
                 tool_use_id: "tu1".into(),
                 content: "should-not-appear".into(),

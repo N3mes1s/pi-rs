@@ -24,9 +24,7 @@ fn pkce_new_produces_43_byte_url_safe_verifier() {
     let p = Pkce::new();
     // 32 bytes base64-url-no-pad encodes to ceil(32 * 4/3) = 43 chars.
     assert_eq!(p.verifier.len(), 43);
-    let url_safe = |c: char| {
-        c.is_ascii_alphanumeric() || c == '-' || c == '_'
-    };
+    let url_safe = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
     assert!(p.verifier.chars().all(url_safe));
     assert!(p.challenge.chars().all(url_safe));
     assert_eq!(p.method, "S256");
@@ -123,7 +121,9 @@ async fn exchange_code_round_trip_against_mock() {
     let pkce = Pkce::from_bytes(&[2u8; 32]);
     let client = reqwest::Client::new();
 
-    let resp: TokenResponse = exchange_code(&client, &ep, &pkce, "the-code").await.unwrap();
+    let resp: TokenResponse = exchange_code(&client, &ep, &pkce, "the-code")
+        .await
+        .unwrap();
     assert_eq!(resp.access_token, "atoken");
     assert_eq!(resp.refresh_token.as_deref(), Some("rtoken"));
     assert_eq!(resp.expires_in, Some(3600));
@@ -133,7 +133,11 @@ async fn exchange_code_round_trip_against_mock() {
     let now = chrono::Utc::now().timestamp();
     let am = resp.into_auth_method();
     match am {
-        AuthMethod::OAuth { access_token, refresh_token, expires_at } => {
+        AuthMethod::OAuth {
+            access_token,
+            refresh_token,
+            expires_at,
+        } => {
             assert_eq!(access_token, "atoken");
             assert_eq!(refresh_token.as_deref(), Some("rtoken"));
             let exp = expires_at.unwrap();

@@ -17,7 +17,11 @@ impl Default for Compactor {
 }
 
 impl Compactor {
-    pub fn compact(&self, messages: &[Message], instructions: Option<&str>) -> (Vec<Message>, String) {
+    pub fn compact(
+        &self,
+        messages: &[Message],
+        instructions: Option<&str>,
+    ) -> (Vec<Message>, String) {
         // Identify the boundary: keep the last `keep_last_turns` user messages
         // and everything after them.
         let user_indices: Vec<usize> = messages
@@ -42,10 +46,7 @@ impl Compactor {
             out.push(Message {
                 role: Role::User,
                 content: vec![ContentBlock::Text {
-                    text: format!(
-                        "<context_recap>\n{}\n</context_recap>",
-                        summary
-                    ),
+                    text: format!("<context_recap>\n{}\n</context_recap>", summary),
                 }],
             });
         }
@@ -141,7 +142,11 @@ fn build_summary(messages: &[Message], instructions: Option<&str>) -> String {
                     text.push_str(&format!(" [tool:{name}]"));
                 }
                 ContentBlock::ToolResult { is_error, .. } => {
-                    text.push_str(if *is_error { " [tool_error]" } else { " [tool_ok]" });
+                    text.push_str(if *is_error {
+                        " [tool_error]"
+                    } else {
+                        " [tool_ok]"
+                    });
                 }
                 _ => {}
             }

@@ -100,12 +100,24 @@ impl Default for MonitorSettings {
     }
 }
 
-fn default_monitor_max_concurrent() -> usize { 8 }
-fn default_monitor_batch_window_ms() -> u64 { 200 }
-fn default_monitor_volume_cap_lines() -> usize { 100 }
-fn default_monitor_volume_cap_window_ms() -> u64 { 5_000 }
-fn default_monitor_timeout_ms() -> u64 { 300_000 }
-fn default_monitor_max_timeout_ms() -> u64 { 3_600_000 }
+fn default_monitor_max_concurrent() -> usize {
+    8
+}
+fn default_monitor_batch_window_ms() -> u64 {
+    200
+}
+fn default_monitor_volume_cap_lines() -> usize {
+    100
+}
+fn default_monitor_volume_cap_window_ms() -> u64 {
+    5_000
+}
+fn default_monitor_timeout_ms() -> u64 {
+    300_000
+}
+fn default_monitor_max_timeout_ms() -> u64 {
+    3_600_000
+}
 
 /// Configuration for the `task` tool / subagent system. Lives here so
 /// `Settings` is self-contained; consumed by

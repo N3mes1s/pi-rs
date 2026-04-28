@@ -61,7 +61,9 @@ impl Tool for LsTool {
         Ok(ToolResult {
             tool_use_id: call_id.into(),
             model_output,
-            display: Some(json!({"kind": "ls", "path": path.display().to_string(), "count": entries.len()})),
+            display: Some(
+                json!({"kind": "ls", "path": path.display().to_string(), "count": entries.len()}),
+            ),
             is_error: false,
         })
     }

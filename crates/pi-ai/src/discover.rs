@@ -38,9 +38,8 @@ impl DiscoveredCache {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(path, json)
     }
 
@@ -65,10 +64,7 @@ pub struct ProviderDiscovery {
 /// `auth`. Skips providers with `AuthMethod::None`. Returns one
 /// [`ProviderDiscovery`] per attempted provider so the CLI can report
 /// per-provider success / failure.
-pub async fn refresh_all(
-    registry: &ModelRegistry,
-    auth: &AuthStorage,
-) -> Vec<ProviderDiscovery> {
+pub async fn refresh_all(registry: &ModelRegistry, auth: &AuthStorage) -> Vec<ProviderDiscovery> {
     let mut out = Vec::new();
     for cfg in registry.providers().cloned().collect::<Vec<_>>() {
         let auth_method = match auth.get(&cfg.name) {
@@ -117,9 +113,7 @@ pub async fn refresh_and_save(
     };
     for r in &results {
         if let Ok(models) = &r.result {
-            cache
-                .providers
-                .insert(r.provider.clone(), models.clone());
+            cache.providers.insert(r.provider.clone(), models.clone());
         }
     }
     cache.save(path)?;

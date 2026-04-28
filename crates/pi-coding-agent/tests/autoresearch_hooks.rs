@@ -8,7 +8,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use pi_coding_agent::autoresearch::{
-    hooks::{run_before, run_after},
+    hooks::{run_after, run_before},
     session::{MetricDirection, Session, SessionConfig},
 };
 
@@ -106,10 +106,13 @@ async fn run_before_captures_stdout_and_writes_sentinel() {
     );
 
     // The sentinel file should contain the JSON state that was sent to stdin.
-    assert!(sentinel.exists(), "sentinel file should have been created by the hook");
+    assert!(
+        sentinel.exists(),
+        "sentinel file should have been created by the hook"
+    );
     let sentinel_contents = fs::read_to_string(&sentinel).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&sentinel_contents)
-        .expect("sentinel should contain valid JSON");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&sentinel_contents).expect("sentinel should contain valid JSON");
     assert_eq!(
         parsed["run"],
         json!(42),
@@ -160,7 +163,8 @@ async fn run_before_caps_output_at_8kb() {
 
     // Script that prints 20 000 bytes.
     let script_path = hooks_dir.join("before.sh");
-    let script = "#!/usr/bin/env bash\ndd if=/dev/zero bs=20000 count=1 2>/dev/null | tr '\\0' 'x'\n";
+    let script =
+        "#!/usr/bin/env bash\ndd if=/dev/zero bs=20000 count=1 2>/dev/null | tr '\\0' 'x'\n";
     fs::write(&script_path, script).unwrap();
     let mut perms = fs::metadata(&script_path).unwrap().permissions();
     perms.set_mode(0o755);

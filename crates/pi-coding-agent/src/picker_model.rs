@@ -152,12 +152,7 @@ pub fn collect_rows(registry: &ModelRegistry, roles: &ModelRoles, tab: ModelTab)
 /// Compute the role badges for a single model. We check each role
 /// slot's stored value for an exact match against `full_id` (preferred),
 /// the bare `model_id`, or the `alias`.
-fn badges_for(
-    roles: &ModelRoles,
-    full_id: &str,
-    model_id: &str,
-    alias: Option<&str>,
-) -> Vec<char> {
+fn badges_for(roles: &ModelRoles, full_id: &str, model_id: &str, alias: Option<&str>) -> Vec<char> {
     let mut out = Vec::new();
     let candidates: [&Option<String>; 5] = [
         &roles.default,
@@ -183,11 +178,7 @@ fn matches_any(v: &str, full_id: &str, model_id: &str, alias: Option<&str>) -> b
 /// Convenience: build a [`Picker`] populated from a `ModelTab`. The
 /// stored value is the full provider/model id so the existing
 /// `/model <value>` slash code path reuses without change.
-pub fn picker_for(
-    registry: &ModelRegistry,
-    roles: &ModelRoles,
-    tab: ModelTab,
-) -> Picker<String> {
+pub fn picker_for(registry: &ModelRegistry, roles: &ModelRoles, tab: ModelTab) -> Picker<String> {
     let rows = collect_rows(registry, roles, tab);
     let items: Vec<PickItem<String>> = rows
         .into_iter()
@@ -247,13 +238,9 @@ mod tests {
         let target = reg
             .providers()
             .flat_map(|p| {
-                p.models.iter().map(move |m| {
-                    (
-                        p.name.clone(),
-                        m.id.clone(),
-                        m.alias.clone(),
-                    )
-                })
+                p.models
+                    .iter()
+                    .map(move |m| (p.name.clone(), m.id.clone(), m.alias.clone()))
             })
             .find(|(_, _, alias)| alias.is_some())
             .expect("at least one canonical model in defaults");
@@ -324,7 +311,11 @@ mod tests {
         let ranked = p.ranked();
         // Value matches "provider/model".
         for (_, item) in ranked {
-            assert!(item.value.contains('/'), "value not full id: {}", item.value);
+            assert!(
+                item.value.contains('/'),
+                "value not full id: {}",
+                item.value
+            );
         }
     }
 }

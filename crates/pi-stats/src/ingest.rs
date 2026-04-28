@@ -34,8 +34,7 @@ pub fn sync_all(conn: &mut Connection, sessions_root: &Path) -> anyhow::Result<S
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| {
-            e.file_type().is_file()
-                && e.path().extension().map_or(false, |ext| ext == "jsonl")
+            e.file_type().is_file() && e.path().extension().map_or(false, |ext| ext == "jsonl")
         })
     {
         let path = entry.path();
@@ -104,14 +103,8 @@ fn ingest_one(conn: &Connection, path: &Path) -> anyhow::Result<u64> {
             }
             SessionEntryKind::Assistant { .. } => {
                 if let Some(meta) = &session_meta {
-                    let n = insert_message(
-                        conn,
-                        &path_key,
-                        &entry.id,
-                        meta,
-                        entry.timestamp,
-                        None,
-                    )?;
+                    let n =
+                        insert_message(conn, &path_key, &entry.id, meta, entry.timestamp, None)?;
                     inserted += n;
                     last_assistant = Some(entry.id.clone());
                 }
@@ -199,8 +192,15 @@ fn update_message_usage(
                 cost_usd=?7
           WHERE session_file=?8 AND entry_id=?9",
         params![
-            input, output, cache_read, cache_write, reasoning, total,
-            usage.cost_usd, session_file, entry_id,
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning,
+            total,
+            usage.cost_usd,
+            session_file,
+            entry_id,
         ],
     )?;
     Ok(())
@@ -246,7 +246,10 @@ fn write_offset(
 #[allow(dead_code)]
 fn reset_offset(conn: &Connection, path: &Path) -> rusqlite::Result<()> {
     let key = path_key(path);
-    conn.execute("DELETE FROM file_offsets WHERE session_file=?1", params![key])?;
+    conn.execute(
+        "DELETE FROM file_offsets WHERE session_file=?1",
+        params![key],
+    )?;
     Ok(())
 }
 

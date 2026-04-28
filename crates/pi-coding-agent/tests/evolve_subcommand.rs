@@ -20,7 +20,11 @@ fn evolve_off_creates_disabled_flag() {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(dir.path().join(".pi/evolve/disabled").exists());
     assert!(String::from_utf8_lossy(&out.stdout).contains("evolve: disabled"));
 }

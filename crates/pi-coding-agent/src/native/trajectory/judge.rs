@@ -20,10 +20,9 @@ use serde::{Deserialize, Serialize};
 
 use pi_agent_core::{OutcomeSource, SessionEntry, SessionEntryKind};
 use pi_ai::{
-    AnthropicProvider, AuthMethod, AuthStorage, AzureOpenAiProvider,
-    BedrockAnthropicProvider, GenerateRequest, GoogleProvider, Message, ModelInfo,
-    ModelRegistry, OpenAiCompatProvider, OpenAiProvider, Provider, ProviderConfig,
-    ProviderKind, ThinkingLevel,
+    AnthropicProvider, AuthMethod, AuthStorage, AzureOpenAiProvider, BedrockAnthropicProvider,
+    GenerateRequest, GoogleProvider, Message, ModelInfo, ModelRegistry, OpenAiCompatProvider,
+    OpenAiProvider, Provider, ProviderConfig, ProviderKind, ThinkingLevel,
 };
 
 use super::features::{extract, Termination, TrajectoryFeatures};
@@ -174,8 +173,7 @@ impl Judge {
 
         let provider = self.provider.clone();
         let model = self.model_info.clone();
-        let resp = match tokio::time::timeout(JUDGE_TIMEOUT, provider.generate(req, &model)).await
-        {
+        let resp = match tokio::time::timeout(JUDGE_TIMEOUT, provider.generate(req, &model)).await {
             Err(_) => return Err(JudgeError::Timeout),
             Ok(Err(e)) => return Err(JudgeError::Provider(e.to_string())),
             Ok(Ok(r)) => r,
@@ -195,7 +193,10 @@ pub async fn judge_session(
     judge: Option<&Judge>,
 ) -> Option<SessionEntryKind> {
     let features = extract(branch);
-    if branch.iter().all(|e| !matches!(e.kind, SessionEntryKind::User { .. })) {
+    if branch
+        .iter()
+        .all(|e| !matches!(e.kind, SessionEntryKind::User { .. }))
+    {
         return None;
     }
 
@@ -274,8 +275,7 @@ pub fn build_user_message(
     let user_request = first_user_text(branch).unwrap_or_else(|| "(no user message)".into());
     let final_reply = last_assistant_text(branch).unwrap_or_else(|| "(no assistant reply)".into());
     let context_loaded = collect_context_loads(branch);
-    let features_json =
-        serde_json::to_string_pretty(features).unwrap_or_else(|_| "{}".into());
+    let features_json = serde_json::to_string_pretty(features).unwrap_or_else(|_| "{}".into());
     let digest = action_digest(branch);
 
     format!(
@@ -302,7 +302,11 @@ fn collect_context_loads(branch: &[SessionEntry]) -> String {
     let entries: Vec<String> = branch
         .iter()
         .filter_map(|e| match &e.kind {
-            SessionEntryKind::ContextLoad { source, bytes, tokens } => Some(format!(
+            SessionEntryKind::ContextLoad {
+                source,
+                bytes,
+                tokens,
+            } => Some(format!(
                 "- {} ({} bytes, ~{} tokens)",
                 source,
                 bytes,

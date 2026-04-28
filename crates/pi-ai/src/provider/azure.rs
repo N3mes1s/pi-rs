@@ -218,24 +218,19 @@ impl Provider for AzureOpenAiProvider {
                                 ));
                             }
                         }
-                        if let Some(calls) =
-                            delta.get("tool_calls").and_then(|v| v.as_array())
-                        {
+                        if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
                             for call in calls {
-                                let idx =
-                                    call.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-                                let entry = acc
-                                    .entry(idx)
-                                    .or_insert_with(|| (String::new(), String::new(), String::new()));
+                                let idx = call.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let entry = acc.entry(idx).or_insert_with(|| {
+                                    (String::new(), String::new(), String::new())
+                                });
                                 if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
                                     if !id.is_empty() {
                                         entry.0 = id.to_string();
                                     }
                                 }
                                 if let Some(func) = call.get("function") {
-                                    if let Some(name) =
-                                        func.get("name").and_then(|v| v.as_str())
-                                    {
+                                    if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
                                         if !name.is_empty() {
                                             entry.1 = name.to_string();
                                         }
@@ -259,9 +254,7 @@ impl Provider for AzureOpenAiProvider {
                                 }
                             }
                         }
-                        if let Some(reason) =
-                            choice.get("finish_reason").and_then(|v| v.as_str())
-                        {
+                        if let Some(reason) = choice.get("finish_reason").and_then(|v| v.as_str()) {
                             let r = match reason {
                                 "tool_calls" | "function_call" => FinishReason::ToolUse,
                                 "stop" => FinishReason::Stop,
@@ -270,14 +263,10 @@ impl Provider for AzureOpenAiProvider {
                                 _ => FinishReason::Other,
                             };
                             if !acc.is_empty() {
-                                let (idx, (id, name, buf)) = acc
-                                    .iter()
-                                    .next()
-                                    .map(|(k, v)| (*k, v.clone()))
-                                    .unwrap();
+                                let (idx, (id, name, buf)) =
+                                    acc.iter().next().map(|(k, v)| (*k, v.clone())).unwrap();
                                 acc.remove(&idx);
-                                let input =
-                                    serde_json::from_str(&buf).unwrap_or(Value::Null);
+                                let input = serde_json::from_str(&buf).unwrap_or(Value::Null);
                                 return Some((
                                     Ok(StreamEvent::new(StreamEventKind::ToolCallComplete {
                                         id,

@@ -81,7 +81,9 @@ async fn bedrock_stream_assembles_text_and_finish() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/model/anthropic.claude-test/invoke-with-response-stream"))
+        .and(path(
+            "/model/anthropic.claude-test/invoke-with-response-stream",
+        ))
         .and(header("Authorization", "Bearer test-token"))
         .respond_with(
             ResponseTemplate::new(200)
@@ -98,7 +100,10 @@ async fn bedrock_stream_assembles_text_and_finish() {
         },
     );
 
-    let resp = provider.generate(req(), &model()).await.expect("generate ok");
+    let resp = provider
+        .generate(req(), &model())
+        .await
+        .expect("generate ok");
     assert_eq!(resp.message.text(), "Hello from Bedrock!");
     assert!(matches!(resp.finish_reason, FinishReason::Stop));
     assert!(resp.tool_calls.is_empty());
@@ -110,7 +115,9 @@ async fn bedrock_stream_yields_text_deltas() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/model/anthropic.claude-test/invoke-with-response-stream"))
+        .and(path(
+            "/model/anthropic.claude-test/invoke-with-response-stream",
+        ))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -147,7 +154,9 @@ async fn bedrock_5xx_yields_provider_error() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/model/anthropic.claude-test/invoke-with-response-stream"))
+        .and(path(
+            "/model/anthropic.claude-test/invoke-with-response-stream",
+        ))
         .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
         .mount(&server)
         .await;
@@ -159,7 +168,11 @@ async fn bedrock_5xx_yields_provider_error() {
         },
     );
 
-    let err = provider.stream(req(), &model()).await.err().expect("expected error");
+    let err = provider
+        .stream(req(), &model())
+        .await
+        .err()
+        .expect("expected error");
     match err {
         AiError::Provider { status, body } => {
             assert_eq!(status, 500);
@@ -172,10 +185,7 @@ async fn bedrock_5xx_yields_provider_error() {
 /// with_region builder sets the region field (smoke test).
 #[test]
 fn bedrock_with_region_builder() {
-    let provider = BedrockAnthropicProvider::new(
-        cfg("http://localhost".into()),
-        AuthMethod::None,
-    )
-    .with_region("eu-west-1");
+    let provider = BedrockAnthropicProvider::new(cfg("http://localhost".into()), AuthMethod::None)
+        .with_region("eu-west-1");
     assert_eq!(provider.region, "eu-west-1");
 }

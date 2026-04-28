@@ -54,11 +54,7 @@ fn load_dir_picks_up_md_files_and_skips_garbage() {
         "---\nttsrTrigger: 'foo'\n---\nbody\n",
     )
     .unwrap();
-    std::fs::write(
-        dir.path().join("bad.md"),
-        "this is not frontmatter\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join("bad.md"), "this is not frontmatter\n").unwrap();
     std::fs::write(
         dir.path().join("not-md.txt"),
         "---\nttsrTrigger: 'foo'\n---\nignored\n",
@@ -247,7 +243,10 @@ async fn interceptor_returns_inject_on_first_match_then_continue() {
     let rs = arc_ruleset(&[("planner", "\\bplan\\b", "STOP AND PLAN")]);
     let it = TtsrInterceptor::new(rs);
     it.turn_start().await;
-    assert_eq!(it.on_text_delta("we should ").await, InterceptAction::Continue);
+    assert_eq!(
+        it.on_text_delta("we should ").await,
+        InterceptAction::Continue
+    );
     let action = it.on_text_delta("plan now").await;
     match action {
         InterceptAction::AbortAndInject(s) => {
@@ -270,7 +269,10 @@ async fn interceptor_buffers_across_delta_boundary() {
     let rs = arc_ruleset(&[("p", "\\bplan\\b", "x")]);
     let it = TtsrInterceptor::new(rs);
     it.turn_start().await;
-    assert_eq!(it.on_text_delta("we should pl").await, InterceptAction::Continue);
+    assert_eq!(
+        it.on_text_delta("we should pl").await,
+        InterceptAction::Continue
+    );
     let action = it.on_text_delta("an now").await;
     assert!(matches!(action, InterceptAction::AbortAndInject(_)));
 }

@@ -167,10 +167,7 @@ impl WebSearchTool {
             })
             .unwrap_or(WebSearchProvider::Parallel);
         WebSearchConfig::from_env(provider).ok_or_else(|| {
-            ToolError::Other(format!(
-                "missing API key in env: {}",
-                provider.env_key()
-            ))
+            ToolError::Other(format!("missing API key in env: {}", provider.env_key()))
         })
     }
 }
@@ -233,11 +230,7 @@ pub fn format_results(
     results: &[SearchResult],
     max_chars: u32,
 ) -> String {
-    let mut s = format!(
-        "web_search via {} for: {}\n\n",
-        provider.as_str(),
-        query
-    );
+    let mut s = format!("web_search via {} for: {}\n\n", provider.as_str(), query);
     if results.is_empty() {
         s.push_str("(no results)\n");
         return s;
@@ -285,9 +278,7 @@ pub async fn run_search(
 }
 
 fn base(cfg: &WebSearchConfig, default: &str) -> String {
-    cfg.base_url
-        .clone()
-        .unwrap_or_else(|| default.to_string())
+    cfg.base_url.clone().unwrap_or_else(|| default.to_string())
 }
 
 // ── Parallel.ai ─────────────────────────────────────────────────────────────
@@ -325,7 +316,11 @@ fn extract_parallel(v: &Value) -> Vec<SearchResult> {
     };
     arr.iter()
         .map(|r| SearchResult {
-            url: r.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            url: r
+                .get("url")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
             title: r
                 .get("title")
                 .and_then(|x| x.as_str())
@@ -374,12 +369,24 @@ async fn exa_search(
     if !status.is_success() {
         return Err(format!("HTTP {status}: {v}"));
     }
-    let arr = v.get("results").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let arr = v
+        .get("results")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
     Ok(arr
         .into_iter()
         .map(|r| SearchResult {
-            url: r.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            title: r.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            url: r
+                .get("url")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            title: r
+                .get("title")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
             snippet: r
                 .get("text")
                 .and_then(|x| x.as_str())
@@ -396,7 +403,10 @@ async fn brave_search(
     cfg: &WebSearchConfig,
     query: &str,
 ) -> Result<Vec<SearchResult>, String> {
-    let url = format!("{}/res/v1/web/search", base(cfg, "https://api.search.brave.com"));
+    let url = format!(
+        "{}/res/v1/web/search",
+        base(cfg, "https://api.search.brave.com")
+    );
     let resp = http
         .get(&url)
         .header("X-Subscription-Token", &cfg.api_key)
@@ -417,8 +427,16 @@ async fn brave_search(
     Ok(arr
         .into_iter()
         .map(|r| SearchResult {
-            url: r.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            title: r.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            url: r
+                .get("url")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            title: r
+                .get("title")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
             snippet: r
                 .get("description")
                 .and_then(|x| x.as_str())
@@ -449,13 +467,25 @@ async fn jina_search(
     if !status.is_success() {
         return Err(format!("HTTP {status}: {v}"));
     }
-    let arr = v.get("data").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let arr = v
+        .get("data")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
     Ok(arr
         .into_iter()
         .take(cfg.max_results as usize)
         .map(|r| SearchResult {
-            url: r.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            title: r.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            url: r
+                .get("url")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            title: r
+                .get("title")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
             snippet: r
                 .get("content")
                 .and_then(|x| x.as_str())
@@ -475,7 +505,10 @@ async fn perplexity_search(
 ) -> Result<Vec<SearchResult>, String> {
     // Perplexity exposes /chat/completions; we use it as a search
     // backend by asking for citations.
-    let url = format!("{}/chat/completions", base(cfg, "https://api.perplexity.ai"));
+    let url = format!(
+        "{}/chat/completions",
+        base(cfg, "https://api.perplexity.ai")
+    );
     let resp = http
         .post(&url)
         .header("Authorization", format!("Bearer {}", cfg.api_key))
@@ -553,7 +586,11 @@ fn extract_anthropic(v: &Value) -> Vec<SearchResult> {
             if let Some(arr) = block.get("content").and_then(|x| x.as_array()) {
                 for item in arr {
                     out.push(SearchResult {
-                        url: item.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        url: item
+                            .get("url")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         title: item
                             .get("title")
                             .and_then(|x| x.as_str())
@@ -612,8 +649,16 @@ fn extract_gemini(v: &Value) -> Vec<SearchResult> {
     arr.iter()
         .filter_map(|c| c.get("web"))
         .map(|w| SearchResult {
-            url: w.get("uri").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            title: w.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            url: w
+                .get("uri")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            title: w
+                .get("title")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
             snippet: String::new(),
         })
         .collect()
@@ -639,7 +684,10 @@ mod tests {
         assert_eq!(WebSearchProvider::Exa.env_key(), "EXA_API_KEY");
         assert_eq!(WebSearchProvider::Brave.env_key(), "BRAVE_API_KEY");
         assert_eq!(WebSearchProvider::Jina.env_key(), "JINA_API_KEY");
-        assert_eq!(WebSearchProvider::Perplexity.env_key(), "PERPLEXITY_API_KEY");
+        assert_eq!(
+            WebSearchProvider::Perplexity.env_key(),
+            "PERPLEXITY_API_KEY"
+        );
         assert_eq!(WebSearchProvider::Anthropic.env_key(), "ANTHROPIC_API_KEY");
         assert_eq!(WebSearchProvider::Gemini.env_key(), "GEMINI_API_KEY");
     }
@@ -651,7 +699,12 @@ mod tests {
             title: "ex".into(),
             snippet: "α".repeat(100), // 200 bytes
         };
-        let out = format_results("q", WebSearchProvider::Parallel, std::slice::from_ref(&r), 10);
+        let out = format_results(
+            "q",
+            WebSearchProvider::Parallel,
+            std::slice::from_ref(&r),
+            10,
+        );
         // truncation marker + we never split a multi-byte char.
         assert!(out.contains("…"));
         assert!(out.contains("https://example.com"));

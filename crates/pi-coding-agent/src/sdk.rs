@@ -2,9 +2,9 @@
 //! Mirrors `createAgentSession` / `createAgentSessionRuntime` from upstream pi.
 
 pub use pi_agent_core::{
-    create_agent_session, AgentEvent, AgentEventKind, AgentSession, AgentSessionRuntime,
-    Compactor, ContextFile, EventSender, RuntimeConfig, SessionEntry, SessionEntryKind,
-    SessionManager, SessionMeta, SessionTree, Settings,
+    create_agent_session, AgentEvent, AgentEventKind, AgentSession, AgentSessionRuntime, Compactor,
+    ContextFile, EventSender, RuntimeConfig, SessionEntry, SessionEntryKind, SessionManager,
+    SessionMeta, SessionTree, Settings,
 };
 pub use pi_ai::{
     AuthMethod, AuthStorage, ContentBlock, FinishReason, Message, ModelInfo, ModelRegistry,

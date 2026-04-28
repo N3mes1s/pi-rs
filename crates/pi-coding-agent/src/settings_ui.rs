@@ -24,12 +24,7 @@ pub fn fields(settings: &Settings, themes: &[String]) -> Vec<SettingsField> {
         SettingsField {
             name: "thinking",
             current: thinking_label(settings.thinking).to_string(),
-            options: vec![
-                "off".into(),
-                "low".into(),
-                "medium".into(),
-                "high".into(),
-            ],
+            options: vec!["off".into(), "low".into(), "medium".into(), "high".into()],
         },
         SettingsField {
             name: "steering_mode",

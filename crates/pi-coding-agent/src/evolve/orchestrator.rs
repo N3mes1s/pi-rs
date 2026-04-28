@@ -35,9 +35,8 @@ use pi_ai::{AuthStorage, ModelRegistry};
 
 use super::agents_md::AgentsMd;
 use super::apply::{
-    add_poison, append_generation, backup_and_apply, best_strict_improvement,
-    decide, default_history_path, pareto_frontier, Candidate, GenerationLogEntry,
-    PendingApply,
+    add_poison, append_generation, backup_and_apply, best_strict_improvement, decide,
+    default_history_path, pareto_frontier, Candidate, GenerationLogEntry, PendingApply,
 };
 use super::benchmark::{
     load_cases, run_all, summarize, BenchmarkCase, BenchmarkSummary, Replay, RolloutResult,
@@ -156,10 +155,7 @@ pub async fn run_tick<R: Replay>(
     let mut candidate_scores: Vec<Vec<f32>> = vec![rollout_scores(&baseline_results)];
 
     // 9. Generations.
-    let mutable_indices: Vec<usize> = baseline_doc
-        .mutable_sections()
-        .map(|(i, _)| i)
-        .collect();
+    let mutable_indices: Vec<usize> = baseline_doc.mutable_sections().map(|(i, _)| i).collect();
     if mutable_indices.is_empty() {
         // Nothing we're allowed to touch (entire file pi:keep, or only
         // preamble). Log + return without applying.

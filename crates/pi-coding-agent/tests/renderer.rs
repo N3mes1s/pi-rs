@@ -377,7 +377,10 @@ fn render_exercises_user_assistant_thinking_toolcall_toolresult_error_compact_pa
 #[test]
 fn tool_result_with_more_than_twenty_lines_emits_overflow_marker() {
     let mut t = Transcript::default();
-    let body: String = (0..25).map(|i| format!("line-{i}")).collect::<Vec<_>>().join("\n");
+    let body: String = (0..25)
+        .map(|i| format!("line-{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     t.ingest(&ev(AgentEventKind::ToolResult {
         result: ToolResult {
             tool_use_id: "id".into(),

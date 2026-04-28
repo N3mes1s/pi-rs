@@ -54,23 +54,20 @@ impl AskInput {
         }
         let mut options = Vec::with_capacity(opts_v.len());
         for o in opts_v {
-            let s = o.as_str().ok_or_else(|| {
-                ToolError::InvalidInput("each option must be a string".into())
-            })?;
+            let s = o
+                .as_str()
+                .ok_or_else(|| ToolError::InvalidInput("each option must be a string".into()))?;
             options.push(s.to_string());
         }
         let allow_multi = v
             .get("allow_multi")
             .and_then(|x| x.as_bool())
             .unwrap_or(false);
-        let descriptions = v
-            .get("descriptions")
-            .and_then(|x| x.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .map(|x| x.as_str().unwrap_or("").to_string())
-                    .collect::<Vec<_>>()
-            });
+        let descriptions = v.get("descriptions").and_then(|x| x.as_array()).map(|arr| {
+            arr.iter()
+                .map(|x| x.as_str().unwrap_or("").to_string())
+                .collect::<Vec<_>>()
+        });
         Ok(AskInput {
             question,
             options,
@@ -85,12 +82,11 @@ impl Tool for AskTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "ask".into(),
-            description:
-                "Pose a structured multiple-choice question to the user. The TUI \
+            description: "Pose a structured multiple-choice question to the user. The TUI \
                  renders an inline picker; the user selects with arrow keys + Enter. \
                  Returns {answers: [string, …]}. In non-interactive modes (print, json, rpc) \
                  this tool is unavailable and returns an error."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

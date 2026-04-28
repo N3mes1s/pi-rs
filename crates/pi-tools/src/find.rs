@@ -39,15 +39,24 @@ impl Tool for FindTool {
             .get("glob")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing `glob`".into()))?;
-        let max = input.get("max_results").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+        let max = input
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(500) as usize;
         let path = match input.get("path").and_then(|v| v.as_str()) {
             Some(p) => resolve_path(ctx, p),
             None => ctx.cwd.clone(),
         };
-        let pat = glob::Pattern::new(glob_pat).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+        let pat =
+            glob::Pattern::new(glob_pat).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
         let mut out = String::new();
         let mut count = 0;
-        for ent in WalkBuilder::new(&path).standard_filters(true).hidden(false).build().flatten() {
+        for ent in WalkBuilder::new(&path)
+            .standard_filters(true)
+            .hidden(false)
+            .build()
+            .flatten()
+        {
             if pat.matches_path(ent.path()) {
                 out.push_str(&format!("{}\n", ent.path().display()));
                 count += 1;

@@ -22,9 +22,15 @@ async fn no_changes_yields_empty_outcome() {
 
     // No mutations.
 
-    let outcome = wt::finish(&repo, &dir, &baseline, "task-empty", wt::ReconcileMode::Branch)
-        .await
-        .unwrap();
+    let outcome = wt::finish(
+        &repo,
+        &dir,
+        &baseline,
+        "task-empty",
+        wt::ReconcileMode::Branch,
+    )
+    .await
+    .unwrap();
 
     assert!(matches!(outcome, wt::ReconcileOutcome::Empty));
 
@@ -35,7 +41,10 @@ async fn no_changes_yields_empty_outcome() {
         .args(["rev-parse", "--verify", "pi/task/task-empty"])
         .output()
         .unwrap();
-    assert!(!out.status.success(), "no branch should exist for empty diff");
+    assert!(
+        !out.status.success(),
+        "no branch should exist for empty diff"
+    );
 
     wt::cleanup(&dir).await;
 }

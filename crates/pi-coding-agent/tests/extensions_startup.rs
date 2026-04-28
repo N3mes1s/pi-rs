@@ -22,10 +22,7 @@ fn make_executable(path: &std::path::Path, body: &str) {
 
 /// Build a `LoadedExtension` with the given `startup_executable` path (or
 /// `None`), pointing at `/bin/true` as the regular extension executable.
-fn ext_with_startup(
-    root: &std::path::Path,
-    startup_executable: Option<String>,
-) -> LoadedExtension {
+fn ext_with_startup(root: &std::path::Path, startup_executable: Option<String>) -> LoadedExtension {
     LoadedExtension {
         manifest: ExtensionManifest {
             name: "startup-test-ext".into(),
@@ -53,10 +50,7 @@ async fn startup_hook_runs_and_creates_sentinel() {
     let sentinel = sentinel_dir.path().join("started.txt");
 
     // Shell script: create the sentinel file.
-    let script_body = format!(
-        "#!/bin/sh\ntouch \"{}\"\n",
-        sentinel.display()
-    );
+    let script_body = format!("#!/bin/sh\ntouch \"{}\"\n", sentinel.display());
     let script_path = ext_dir.path().join("startup.sh");
     make_executable(&script_path, &script_body);
 
@@ -117,5 +111,8 @@ async fn startup_hook_mixed_extensions() {
 
     run_startup_hooks(&[ext_a, ext_b]).await;
 
-    assert!(sentinel.exists(), "sentinel from ext_a startup hook must exist");
+    assert!(
+        sentinel.exists(),
+        "sentinel from ext_a startup hook must exist"
+    );
 }

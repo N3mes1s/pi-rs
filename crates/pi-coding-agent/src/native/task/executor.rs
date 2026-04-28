@@ -5,9 +5,7 @@
 //! batched [`TaskBatchResult`] in its `tool_result`.
 
 use futures::{stream, StreamExt};
-use pi_agent_core::{
-    AgentSession, AgentSessionRuntime, RuntimeConfig, Settings,
-};
+use pi_agent_core::{AgentSession, AgentSessionRuntime, RuntimeConfig, Settings};
 use pi_ai::{Role as AiRole, ThinkingLevel, Usage};
 use pi_tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
@@ -156,10 +154,7 @@ async fn synth_first_message(
             s.push_str("\n</shared_context>\n\n");
         }
     }
-    s.push_str(&format!(
-        "## Task `{}`",
-        task.id
-    ));
+    s.push_str(&format!("## Task `{}`", task.id));
     if let Some(d) = &task.description {
         if !d.is_empty() {
             s.push_str(" — ");
@@ -175,10 +170,7 @@ async fn synth_first_message(
 /// from the RFD: parent's tools, optionally restricted to
 /// `agent.tools`, with the `task` tool itself toggled on/off based on
 /// `agent.spawns`.
-fn build_child_tools(
-    parent_tools: &ToolRegistry,
-    agent: &AgentDefinition,
-) -> ToolRegistry {
+fn build_child_tools(parent_tools: &ToolRegistry, agent: &AgentDefinition) -> ToolRegistry {
     let mut tools = parent_tools.clone();
     if !agent.tools.is_empty() {
         // Always preserve `task` if the parent's allowlist included it
@@ -274,8 +266,7 @@ pub async fn run_one(
         current_agent: Some(agent.clone()),
     };
 
-    let prompt_result =
-        super::tool::with_runtime(child_handle, session.prompt(user_msg)).await;
+    let prompt_result = super::tool::with_runtime(child_handle, session.prompt(user_msg)).await;
     match prompt_result {
         Ok(final_msg) => {
             let text = final_msg.text();
@@ -340,7 +331,10 @@ pub async fn run_batch(
 /// currently-active agent. v1 always allows top-level `task` calls
 /// (parent has no spawn restriction); only nested calls — i.e. a
 /// subagent calling `task` again — are restricted.
-pub fn check_spawn_allowed(parent_agent: Option<&AgentDefinition>, child_name: &str) -> Result<(), ExecutorError> {
+pub fn check_spawn_allowed(
+    parent_agent: Option<&AgentDefinition>,
+    child_name: &str,
+) -> Result<(), ExecutorError> {
     let Some(p) = parent_agent else {
         return Ok(());
     };

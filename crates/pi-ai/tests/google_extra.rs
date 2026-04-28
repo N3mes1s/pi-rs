@@ -7,8 +7,8 @@
 use futures::StreamExt;
 use pi_ai::auth::AuthMethod;
 use pi_ai::message::{Attachment, AttachmentKind, ContentBlock, Message, ThinkingLevel};
-use pi_ai::provider::{GenerateRequest, GoogleProvider, Provider, ProviderKind};
 use pi_ai::provider::google::message_to_google_parts;
+use pi_ai::provider::{GenerateRequest, GoogleProvider, Provider, ProviderKind};
 use pi_ai::registry::{ModelInfo, ProviderConfig};
 use pi_ai::stream::StreamEventKind;
 use pi_ai::{AiError, FinishReason, ToolSpec};
@@ -101,7 +101,10 @@ fn google_parts_tool_result_with_error() {
     let parts = message_to_google_parts(&blocks);
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0]["functionResponse"]["name"], "call_1");
-    assert_eq!(parts[0]["functionResponse"]["response"]["is_error"], json!(true));
+    assert_eq!(
+        parts[0]["functionResponse"]["response"]["is_error"],
+        json!(true)
+    );
 }
 
 // ── AuthMethod::None → MissingAuth ─────────────────────────────────────────────
@@ -173,8 +176,7 @@ async fn google_system_instruction_forwarded() {
         .mount(&server)
         .await;
 
-    let provider =
-        GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider = GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut r = req();
     r.system = Some("You are helpful.".into());
@@ -200,8 +202,7 @@ async fn google_temperature_forwarded() {
         .mount(&server)
         .await;
 
-    let provider =
-        GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider = GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut r = req();
     r.temperature = Some(0.5);
@@ -226,8 +227,7 @@ async fn google_tools_forwarded() {
         .mount(&server)
         .await;
 
-    let provider =
-        GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider = GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut r = req();
     r.tools = vec![ToolSpec {
@@ -260,8 +260,7 @@ async fn google_usage_metadata_emitted() {
         .mount(&server)
         .await;
 
-    let provider =
-        GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider = GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let resp = provider.generate(req(), &model()).await.expect("ok");
     assert_eq!(resp.usage.input_tokens, 5);
@@ -285,14 +284,18 @@ async fn google_recitation_gives_refusal() {
         .mount(&server)
         .await;
 
-    let provider =
-        GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider = GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut stream = provider.stream(req(), &model()).await.expect("ok");
     let mut saw_refusal = false;
     while let Some(ev) = stream.next().await {
         if let Ok(e) = ev {
-            if matches!(e.kind, StreamEventKind::Finish { reason: FinishReason::Refusal }) {
+            if matches!(
+                e.kind,
+                StreamEventKind::Finish {
+                    reason: FinishReason::Refusal
+                }
+            ) {
                 saw_refusal = true;
             }
         }
@@ -317,8 +320,7 @@ async fn google_max_tokens_gives_length() {
         .mount(&server)
         .await;
 
-    let provider =
-        GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider = GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let resp = provider.generate(req(), &model()).await.expect("ok");
     assert!(matches!(resp.finish_reason, FinishReason::Length));
@@ -341,8 +343,7 @@ async fn google_tool_call_finish_reason() {
         .mount(&server)
         .await;
 
-    let provider =
-        GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider = GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let resp = provider.generate(req(), &model()).await.expect("ok");
     assert!(matches!(resp.finish_reason, FinishReason::ToolUse));
@@ -365,8 +366,7 @@ async fn google_unknown_finish_reason_gives_other() {
         .mount(&server)
         .await;
 
-    let provider =
-        GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider = GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let resp = provider.generate(req(), &model()).await.expect("ok");
     assert!(matches!(resp.finish_reason, FinishReason::Other));
@@ -401,14 +401,10 @@ async fn google_system_role_messages_filtered_from_contents() {
         .mount(&server)
         .await;
 
-    let provider =
-        GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let provider = GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
 
     let mut r = req();
-    r.messages = vec![
-        Message::system_text("system"),
-        Message::user_text("user"),
-    ];
+    r.messages = vec![Message::system_text("system"), Message::user_text("user")];
 
     let resp = provider.generate(r, &model()).await.expect("ok");
     assert_eq!(resp.message.text(), "filtered");

@@ -61,7 +61,8 @@ fn user_agent_present_when_no_project() {
     fs::create_dir_all(&user_agents).unwrap();
     fs::write(
         user_agents.join("solo.md"),
-        AGENT.replace("code-reviewer", "solo")
+        AGENT
+            .replace("code-reviewer", "solo")
             .replace("SOURCE-MARKER", "user-only"),
     )
     .unwrap();

@@ -90,8 +90,7 @@ fn cli_smol_flag_is_picked_up() {
 fn cli_slow_and_plan_flags_independent() {
     use clap::Parser;
     use pi_coding_agent::cli::Cli;
-    let cli =
-        Cli::try_parse_from(["pi", "--slow", "opus", "--plan", "sonnet-thinking"]).unwrap();
+    let cli = Cli::try_parse_from(["pi", "--slow", "opus", "--plan", "sonnet-thinking"]).unwrap();
     assert_eq!(cli.slow.as_deref(), Some("opus"));
     assert_eq!(cli.plan.as_deref(), Some("sonnet-thinking"));
     assert!(cli.smol.is_none());

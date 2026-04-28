@@ -23,8 +23,14 @@ fn usage_is_fully_populated_from_response_completed() {
         })
         .expect("Usage event must be emitted from response.completed");
 
-    assert_eq!(usage.input_tokens, 12, "input_tokens must come from usage.input_tokens");
-    assert_eq!(usage.output_tokens, 5, "output_tokens must come from usage.output_tokens");
+    assert_eq!(
+        usage.input_tokens, 12,
+        "input_tokens must come from usage.input_tokens"
+    );
+    assert_eq!(
+        usage.output_tokens, 5,
+        "output_tokens must come from usage.output_tokens"
+    );
     assert_eq!(
         usage.cache_read_tokens, 4,
         "cache_read_tokens must come from usage.input_tokens_details.cached_tokens"

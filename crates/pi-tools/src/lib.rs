@@ -103,8 +103,7 @@ impl ToolRegistry {
     }
 
     pub fn keep_only(&mut self, names: &[String]) {
-        let allowed: std::collections::HashSet<&str> =
-            names.iter().map(|s| s.as_str()).collect();
+        let allowed: std::collections::HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
         self.inner.retain(|k, _| allowed.contains(k.as_str()));
     }
 
@@ -139,9 +138,6 @@ pub(crate) fn truncate_for_model(text: &str, max_bytes: usize) -> String {
         .unwrap_or(0);
     let mut s = String::with_capacity(cut + 64);
     s.push_str(&text[..cut]);
-    s.push_str(&format!(
-        "\n\n[…truncated {} bytes…]",
-        text.len() - cut
-    ));
+    s.push_str(&format!("\n\n[…truncated {} bytes…]", text.len() - cut));
     s
 }

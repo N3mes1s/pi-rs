@@ -96,7 +96,9 @@ async fn diagnostics_on_write_attaches_items_array_without_marking_error() {
         .unwrap();
     assert!(!res.is_error);
     let display = res.display.expect("display payload");
-    let diags = display["diagnostics"].as_array().expect("diagnostics array");
+    let diags = display["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0]["_marker"], json!("diagnostics"));
 }
@@ -122,8 +124,5 @@ async fn format_and_diagnostics_compose_in_one_pass() {
     let display = res.display.unwrap();
     assert_eq!(display["formatted"], json!(true));
     assert!(display["diagnostics"].as_array().is_some());
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        "FORMATTED\nbody\n"
-    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "FORMATTED\nbody\n");
 }

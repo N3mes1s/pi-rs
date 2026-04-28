@@ -47,12 +47,7 @@ pub fn render_inline(state: &DashboardState) -> String {
 
     format!(
         "🔬 autoresearch {} runs {} kept │ ★ {}: {} ({}) │ conf: {}",
-        state.runs,
-        state.kept,
-        state.metric_name,
-        best_str,
-        pct_str,
-        conf_str,
+        state.runs, state.kept, state.metric_name, best_str, pct_str, conf_str,
     )
 }
 
@@ -67,10 +62,7 @@ pub fn render_table(state: &DashboardState, runs: &[(String, f64, bool)]) -> Str
     let mut out = String::new();
 
     // ── header ────────────────────────────────────────────────────────────────
-    out.push_str(&format!(
-        "autoresearch: {}\n",
-        state.session_name
-    ));
+    out.push_str(&format!("autoresearch: {}\n", state.session_name));
     out.push_str(&format!(
         "metric: {} | baseline: {} | direction: {}\n",
         state.metric_name,

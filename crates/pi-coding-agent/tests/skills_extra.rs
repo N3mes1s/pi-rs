@@ -31,7 +31,10 @@ fn bare_md_with_only_a_heading_yields_empty_description() {
     let mut reg = SkillRegistry::new();
     reg.load_dir(dir.path());
     let s = reg.get("only-heading").expect("loaded");
-    assert_eq!(s.description, "", "headings should not be picked as description");
+    assert_eq!(
+        s.description, "",
+        "headings should not be picked as description"
+    );
 }
 
 #[test]

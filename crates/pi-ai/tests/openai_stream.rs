@@ -158,5 +158,9 @@ async fn openai_closing_chunk_populates_every_usage_field() {
     assert_eq!(resp.usage.output_tokens, 56);
     assert_eq!(resp.usage.cache_read_tokens, 100);
     assert_eq!(resp.usage.reasoning_tokens, 20);
-    assert!(resp.usage.cost_usd > 0.0, "cost should be > 0, got {}", resp.usage.cost_usd);
+    assert!(
+        resp.usage.cost_usd > 0.0,
+        "cost should be > 0, got {}",
+        resp.usage.cost_usd
+    );
 }

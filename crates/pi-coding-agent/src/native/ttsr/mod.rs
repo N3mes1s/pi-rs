@@ -23,5 +23,5 @@ pub mod matcher;
 pub mod rule;
 
 pub use interceptor::TtsrInterceptor;
-pub use matcher::{Matcher, MatchResult};
-pub use rule::{render_reminder, Rule, RuleSet, default_dir};
+pub use matcher::{MatchResult, Matcher};
+pub use rule::{default_dir, render_reminder, Rule, RuleSet};

@@ -106,9 +106,18 @@ mod tests {
 
     #[test]
     fn lookup_is_case_insensitive_and_strips_leading_dot() {
-        assert_eq!(language_for_extension("RS").map(|e| e.language), Some("rust"));
-        assert_eq!(language_for_extension(".rs").map(|e| e.language), Some("rust"));
-        assert_eq!(language_for_extension(".TSX").map(|e| e.language), Some("typescript"));
+        assert_eq!(
+            language_for_extension("RS").map(|e| e.language),
+            Some("rust")
+        );
+        assert_eq!(
+            language_for_extension(".rs").map(|e| e.language),
+            Some("rust")
+        );
+        assert_eq!(
+            language_for_extension(".TSX").map(|e| e.language),
+            Some("typescript")
+        );
     }
 
     #[test]
@@ -121,7 +130,11 @@ mod tests {
     fn catalogue_languages_are_unique() {
         let mut seen: HashSet<&str> = HashSet::new();
         for e in DEFAULT_CATALOGUE {
-            assert!(seen.insert(e.language), "duplicate language: {}", e.language);
+            assert!(
+                seen.insert(e.language),
+                "duplicate language: {}",
+                e.language
+            );
         }
     }
 

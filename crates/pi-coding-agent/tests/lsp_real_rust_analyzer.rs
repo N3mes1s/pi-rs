@@ -83,13 +83,7 @@ fn ctx_for(cwd: &Path) -> ToolContext {
     }
 }
 
-async fn invoke_until<F>(
-    tool: &LspTool,
-    cwd: &Path,
-    input: Value,
-    n: usize,
-    ok: F,
-) -> Option<Value>
+async fn invoke_until<F>(tool: &LspTool, cwd: &Path, input: Value, n: usize, ok: F) -> Option<Value>
 where
     F: Fn(&Value) -> bool,
 {
@@ -139,12 +133,8 @@ async fn real_rust_analyzer_round_trip() {
         |result| {
             let arr = result.as_array();
             arr.map_or(false, |xs| {
-                xs.iter().any(|s| {
-                    matches!(
-                        s.get("name").and_then(|n| n.as_str()),
-                        Some("add" | "main")
-                    )
-                })
+                xs.iter()
+                    .any(|s| matches!(s.get("name").and_then(|n| n.as_str()), Some("add" | "main")))
             })
         },
     )
@@ -252,8 +242,7 @@ async fn real_rust_analyzer_round_trip() {
         20,
         |result| {
             result.is_object()
-                && (result.get("changes").is_some()
-                    || result.get("documentChanges").is_some())
+                && (result.get("changes").is_some() || result.get("documentChanges").is_some())
         },
     )
     .await

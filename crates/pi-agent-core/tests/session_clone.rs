@@ -8,8 +8,7 @@ use pi_ai::{Message, ToolCall, ToolResult};
 fn clone_branch_returns_new_id_and_replays_entries() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
-    let mgr =
-        SessionManager::on_disk(dir.path().to_path_buf(), cwd.path().to_path_buf()).unwrap();
+    let mgr = SessionManager::on_disk(dir.path().to_path_buf(), cwd.path().to_path_buf()).unwrap();
     let src = mgr.create("anthropic", "sonnet").unwrap();
     mgr.append(
         &src.id,
@@ -83,7 +82,14 @@ fn clone_branch_returns_new_id_and_replays_entries() {
         .collect();
     assert_eq!(
         kinds,
-        vec!["meta", "user", "assistant", "tool_call", "tool_result", "compaction"]
+        vec![
+            "meta",
+            "user",
+            "assistant",
+            "tool_call",
+            "tool_result",
+            "compaction"
+        ]
     );
 }
 

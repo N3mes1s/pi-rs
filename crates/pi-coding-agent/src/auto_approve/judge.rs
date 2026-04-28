@@ -26,10 +26,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use pi_ai::{
-    AnthropicProvider, AuthMethod, AuthStorage, AzureOpenAiProvider,
-    BedrockAnthropicProvider, GenerateRequest, GoogleProvider, Message, ModelInfo,
-    ModelRegistry, OpenAiCompatProvider, OpenAiProvider, Provider, ProviderConfig,
-    ProviderKind, ThinkingLevel,
+    AnthropicProvider, AuthMethod, AuthStorage, AzureOpenAiProvider, BedrockAnthropicProvider,
+    GenerateRequest, GoogleProvider, Message, ModelInfo, ModelRegistry, OpenAiCompatProvider,
+    OpenAiProvider, Provider, ProviderConfig, ProviderKind, ThinkingLevel,
 };
 
 const SYSTEM_PROMPT: &str = "\
@@ -168,12 +167,7 @@ impl Judge {
 
         let provider = self.provider.clone();
         let model = self.model_info.clone();
-        let resp = match tokio::time::timeout(
-            JUDGE_TIMEOUT,
-            provider.generate(req, &model),
-        )
-        .await
-        {
+        let resp = match tokio::time::timeout(JUDGE_TIMEOUT, provider.generate(req, &model)).await {
             Err(_) => return Err(JudgeError::Timeout),
             Ok(Err(e)) => return Err(JudgeError::Provider(e.to_string())),
             Ok(Ok(r)) => r,

@@ -273,16 +273,17 @@ async fn reader_loop(
 /// extra header lines (we honour `Content-Length` and ignore the rest,
 /// which matches the LSP spec). Returns `Ok(None)` on a clean EOF
 /// observed *before* any header bytes.
-async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-) -> Result<Option<Vec<u8>>> {
+async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<Vec<u8>>> {
     use tokio::io::AsyncBufReadExt;
 
     let mut content_length: Option<usize> = None;
     let mut saw_any = false;
     loop {
         let mut line = String::new();
-        let n = reader.read_line(&mut line).await.map_err(TransportError::Io)?;
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(TransportError::Io)?;
         if n == 0 {
             // EOF
             if saw_any {
@@ -420,8 +421,7 @@ mod tests {
 
     /// Path to the python fake LSP server checked into the repo.
     fn fake_server_path() -> String {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fake_lsp_server.py");
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake_lsp_server.py");
         p.to_string_lossy().into_owned()
     }
 
@@ -529,7 +529,10 @@ mod tests {
         client.initialize("file:///tmp/test").await.expect("init");
         // Ask the server to push a notification at us.
         client
-            .send_notification("test/push_notification", json!({"method": "window/logMessage", "params": {"type": 3, "message": "hello"}}))
+            .send_notification(
+                "test/push_notification",
+                json!({"method": "window/logMessage", "params": {"type": 3, "message": "hello"}}),
+            )
             .await
             .unwrap();
         // The server pushes asynchronously; await with a small timeout.

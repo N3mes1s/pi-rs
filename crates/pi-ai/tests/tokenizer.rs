@@ -39,8 +39,14 @@ fn english_text_in_sanity_range() {
 fn for_model_picks_o200k_for_modern_openai() {
     assert_eq!(TokenizerKind::for_model("gpt-5"), TokenizerKind::O200kBase);
     assert_eq!(TokenizerKind::for_model("gpt-4o"), TokenizerKind::O200kBase);
-    assert_eq!(TokenizerKind::for_model("o1-preview"), TokenizerKind::O200kBase);
-    assert_eq!(TokenizerKind::for_model("o3-mini"), TokenizerKind::O200kBase);
+    assert_eq!(
+        TokenizerKind::for_model("o1-preview"),
+        TokenizerKind::O200kBase
+    );
+    assert_eq!(
+        TokenizerKind::for_model("o3-mini"),
+        TokenizerKind::O200kBase
+    );
     assert_eq!(TokenizerKind::for_model("o4"), TokenizerKind::O200kBase);
 }
 

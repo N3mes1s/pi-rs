@@ -81,7 +81,12 @@ fn hot_themes_picks_up_new_file_within_1s() {
     let deadline2 = Instant::now() + Duration::from_millis(1000);
     let updated = poll_until(&hot, deadline2, |snap| {
         snap.get("mytheme")
-            .map(|t| matches!(t.accent, pi_tui::ColorSpec::Named(pi_tui::NamedColor::Magenta)))
+            .map(|t| {
+                matches!(
+                    t.accent,
+                    pi_tui::ColorSpec::Named(pi_tui::NamedColor::Magenta)
+                )
+            })
             .unwrap_or(false)
     });
 
@@ -96,7 +101,10 @@ fn hot_themes_picks_up_new_file_within_1s() {
     let snap2 = hot.snapshot();
     let t = snap2.get("mytheme").expect("mytheme must be present");
     assert!(
-        matches!(t.accent, pi_tui::ColorSpec::Named(pi_tui::NamedColor::Magenta)),
+        matches!(
+            t.accent,
+            pi_tui::ColorSpec::Named(pi_tui::NamedColor::Magenta)
+        ),
         "expected Magenta accent, got {:?}",
         t.accent
     );
