@@ -44,3 +44,6 @@ crosses crate boundaries.
 | 0010 | Differential cache pricing in `compute_cost`     | Discussion |
 | 0011 | Self-dogfood pi-rs (AGENTS.md + evolve + flamegraph) | Discussion |
 | 0012 | Trajectory judge context-awareness + flamegraph JSON | Discussion |
+| 0013 | Auto-apply the evolve daemon's AGENTS.md mutations | Discussion |
+| 0014 | Real tokenizer for `ContextLoad.tokens`           | Discussion |
+| 0015 | Replicate Usage population to OpenAI / Google / Bedrock | Discussion |
