@@ -6,6 +6,10 @@ fn main() -> anyhow::Result<()> {
     // for our 30+ flags is non-trivial; for these flags we don't need any
     // values or interactions, so a manual match shaves the parse cost.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.len() == 2 && args[0] == "router" && args[1] == "fetch-embeddings" {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        return rt.block_on(cmd::run_router_fetch_embeddings());
+    }
     if args.len() == 1 {
         match args[0].as_str() {
             "--list" => return cmd::run_list(),

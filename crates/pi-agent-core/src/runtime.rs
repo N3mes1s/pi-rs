@@ -13,6 +13,9 @@ use tokio::sync::Mutex;
 
 use crate::context::ContextFile;
 use crate::event::{AgentEvent, AgentEventKind, EventSender};
+use crate::router::{
+    EmbeddingRouter, ForceOverride, RouteMode, Router as _, RoutingContext, StaticRouter, ToolSpec,
+};
 use crate::session::{SessionEntryKind, SessionManager};
 use crate::settings::Settings;
 
@@ -172,9 +175,10 @@ impl AgentSessionRuntime {
 
     pub fn create_session(&self, sender: Option<EventSender>) -> std::io::Result<AgentSession> {
         let cfg = self.config.clone();
-        let meta = cfg
-            .session_manager
-            .create(&cfg.settings.provider, &cfg.settings.model)?;
+        let provider = cfg.settings.provider.clone();
+        let model = cfg.settings.model.clone();
+        let thinking: ThinkingLevel = cfg.settings.thinking.into();
+        let meta = cfg.session_manager.create(&provider, &model)?;
         Ok(AgentSession {
             id: meta.id,
             inner: Arc::new(Mutex::new(AgentSessionInner {
@@ -182,9 +186,9 @@ impl AgentSessionRuntime {
                 aborted: false,
                 queued_messages: Vec::new(),
                 messages: Vec::new(),
-                provider: cfg.settings.provider.clone(),
-                model: cfg.settings.model.clone(),
-                thinking: cfg.settings.thinking.into(),
+                provider,
+                model,
+                thinking,
                 tools: cfg.tools.clone(),
                 context_loads_emitted: false,
             })),
@@ -266,6 +270,78 @@ struct AgentSessionInner {
 }
 
 impl AgentSession {
+    fn routing_force_override(&self) -> Option<ForceOverride> {
+        let settings = &self.cfg.settings;
+        if matches!(settings.route, RouteMode::Static | RouteMode::Auto | RouteMode::Learned)
+            && (settings.route_model_override.is_some() || settings.route_thinking_override.is_some())
+        {
+            Some(ForceOverride::CliFlag {
+                provider: settings.route_provider_override.clone(),
+                model: settings
+                    .route_model_override
+                    .clone()
+                    .unwrap_or_else(|| settings.model.clone()),
+                thinking: settings.route_thinking_override.map(Into::into),
+            })
+        } else {
+            None
+        }
+    }
+
+    async fn apply_routing(
+        &self,
+        router_mode: RouteMode,
+        force: Option<ForceOverride>,
+        provider: String,
+        model: String,
+        thinking: ThinkingLevel,
+        messages: &[Message],
+        tools: &ToolRegistry,
+    ) -> Result<(String, String, ThinkingLevel), RuntimeError> {
+        if matches!(router_mode, RouteMode::Off) {
+            return Ok((provider, model, thinking));
+        }
+        let last_user_text = messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::User))
+            .map(extract_message_text)
+            .unwrap_or_default();
+        let ctx = RoutingContext {
+            registry: &self.cfg.model_registry,
+            user_lambda: 1.0,
+            force,
+            session_id: &self.id,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        let tool_specs: Vec<ToolSpec> = tools
+            .specs()
+            .into_iter()
+            .map(|s| ToolSpec { name: s.name })
+            .collect();
+        let decision = match router_mode {
+            RouteMode::Auto => EmbeddingRouter::bundled()
+                .map_err(|e| RuntimeError::Provider(e.to_string()))?
+                .route(&last_user_text, messages, &tool_specs, &ctx),
+            _ => StaticRouter::new(crate::router::RoutingDecision {
+                route_id: "static".into(),
+                provider,
+                model,
+                thinking,
+            })
+            .route(&last_user_text, messages, &tool_specs, &ctx),
+        }
+        .map_err(|e| RuntimeError::Provider(e.to_string()))?;
+        {
+            let mut g = self.inner.lock().await;
+            g.provider = decision.provider.clone();
+            g.model = decision.model.clone();
+            g.thinking = decision.thinking;
+        }
+        Ok((decision.provider, decision.model, decision.thinking))
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -443,9 +519,11 @@ impl AgentSession {
                 return Err(RuntimeError::Aborted);
             }
 
-            let (provider_name, model_name, thinking, messages, tools) = {
+            let (router_mode, force_override, provider_name, model_name, thinking, messages, tools) = {
                 let g = self.inner.lock().await;
                 (
+                    self.cfg.settings.route,
+                    self.routing_force_override(),
                     g.provider.clone(),
                     g.model.clone(),
                     g.thinking,
@@ -453,6 +531,9 @@ impl AgentSession {
                     g.tools.clone(),
                 )
             };
+            let (provider_name, model_name, thinking) = self
+                .apply_routing(router_mode, force_override, provider_name, model_name, thinking, &messages, &tools)
+                .await?;
 
             let (provider_cfg, model_info) = self
                 .cfg
@@ -842,6 +923,34 @@ impl AgentSession {
             });
         }
     }
+}
+
+fn extract_message_text(message: &Message) -> String {
+    let mut text = String::new();
+    for block in &message.content {
+        match block {
+            ContentBlock::Text { text: block_text } | ContentBlock::Thinking { text: block_text, .. } => {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(block_text);
+            }
+            ContentBlock::ToolResult { content, .. } => {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(content);
+            }
+            ContentBlock::ToolUse { name, .. } => {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(name);
+            }
+            _ => {}
+        }
+    }
+    text
 }
 
 fn build_provider(

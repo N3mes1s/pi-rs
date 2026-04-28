@@ -9,6 +9,12 @@ fn parse(args: &[&str]) -> Cli {
 }
 
 #[test]
+fn route_flag_accepts_auto() {
+    let cli = parse(&["--route", "auto"]);
+    assert_eq!(cli.route, "auto");
+}
+
+#[test]
 fn effective_mode_priority_rpc_over_json_print_interactive() {
     // rpc beats json + print
     let cli = parse(&["--rpc", "--json", "--print"]);

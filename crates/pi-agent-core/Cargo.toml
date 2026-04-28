@@ -25,4 +25,7 @@ uuid.workspace = true
 dirs.workspace = true
 walkdir.workspace = true
 sha2.workspace = true
+reqwest.workspace = true
+ndarray = "0.16"
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24"] }
 toml = "0.8"
