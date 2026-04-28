@@ -144,9 +144,10 @@ should be sandboxed in its own worktree. See
 ## Stats dashboard
 
 ```sh
-pi --stats sync          # JSONL → SQLite
-pi --stats json          # roll-up to stdout
-pi --stats server        # http://127.0.0.1:3847
+pi --stats sync             # JSONL → SQLite
+pi --stats json             # roll-up to stdout
+pi --stats server           # http://127.0.0.1:3847
+pi --stats route-savings    # auto-router cost vs sonnet-only counterfactual
 ```
 
 `server` mounts an embedded React dashboard at
