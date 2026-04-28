@@ -490,7 +490,19 @@ impl AgentSession {
                 intercept.turn_start().await;
             }
 
-            let mut stream = provider.stream(req, model_info).await.map_err(|e| RuntimeError::Provider(e.to_string()))?;
+            let mut stream = match provider.stream(req, model_info).await {
+                Ok(s) => s,
+                Err(e) => {
+                    // Surface the failure to listeners *before* unwinding —
+                    // otherwise JSON-mode printers (and other UIs that
+                    // wait for a terminal event) block forever on the
+                    // channel because no Aborted/TurnComplete ever fires.
+                    let message = e.to_string();
+                    self.emit(AgentEventKind::Error { message: message.clone() }).await;
+                    self.emit(AgentEventKind::Aborted).await;
+                    return Err(RuntimeError::Provider(message));
+                }
+            };
             let mut assistant_text = String::new();
             let mut assistant_thinking = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();

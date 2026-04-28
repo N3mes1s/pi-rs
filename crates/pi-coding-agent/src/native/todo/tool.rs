@@ -40,7 +40,27 @@ impl Tool for TodoTool {
                 "type": "object",
                 "properties": {
                     "op":          { "type": "string", "enum": ["replace", "add_phase", "add_task", "update", "remove_task"] },
-                    "phases":      { "type": "array", "description": "For op=replace. Array of {name, tasks: [{id, text, state}]}" },
+                    "phases":      {
+                        "type": "array",
+                        "description": "For op=replace. Array of {name, tasks: [{id, text, state}]}",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "tasks": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id":    { "type": "string" },
+                                            "text":  { "type": "string" },
+                                            "state": { "type": "string", "enum": ["pending", "in_progress", "completed", "abandoned"] }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
                     "name":        { "type": "string", "description": "For op=add_phase. New phase name." },
                     "phase_index": { "type": "integer", "minimum": 0, "description": "For op=add_task. 0-based index." },
                     "id":          { "type": "string", "description": "For op=add_task / update / remove_task." },
