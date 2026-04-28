@@ -131,6 +131,7 @@ pub mod bedrock;
 pub mod discover;
 pub mod google;
 pub mod openai;
+pub mod openai_responses;
 
 pub use anthropic::AnthropicProvider;
 pub use azure::AzureOpenAiProvider;

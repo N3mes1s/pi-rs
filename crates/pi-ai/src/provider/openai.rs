@@ -132,6 +132,16 @@ impl Provider for OpenAiProvider {
     }
 
     async fn stream(&self, req: GenerateRequest, model: &ModelInfo) -> Result<EventStream> {
+        // RFD 0019 dispatch: gpt-5.x and o-series go through
+        // /v1/responses; everything else stays on Chat Completions.
+        // Once `claude/responses-registry` lands the `api_kind` field
+        // on `ModelInfo`, swap this heuristic for `model.api_kind`.
+        if matches!(
+            super::openai_responses::pick_api_kind(model),
+            super::openai_responses::ApiKind::Responses,
+        ) {
+            return super::openai_responses::stream_responses(self, req, model).await;
+        }
         let url = format!("{}/chat/completions", self.config.base_url);
         let auth_value = self.auth_header()?;
 
