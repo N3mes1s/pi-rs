@@ -1,15 +1,16 @@
 # RFD 0021 — `pi --orchestrate` (built-in campaign mode)
 
-- **Status:** Discussion (v0.5)
+- **Status:** Discussion (v1.0)
 - **Author:** pi-rs maintainers (drafter: opus-4-7, thinking=high)
 - **Created:** 2026-04-29
 - **Implemented:** &lt;pending&gt;
 
 ## Revision history
 
-| Version | Commit  | Notes |
-| ------- | ------- | ----- |
-| v0.5    | (this)  | Initial draft. Built-in `pi --orchestrate <campaign.toml>` subcommand. TOML schema, serial+DAG execution, fix-loop, override rules, resume/dry-run/status, persisted state at `~/.pi/orchestrate/<id>/`. 4 implementation milestones. |
+| Version | Commit   | Notes |
+| ------- | -------- | ----- |
+| v0.5    | 675f109  | Initial draft. Built-in `pi --orchestrate <campaign.toml>` subcommand. TOML schema, serial+DAG execution, fix-loop, override rules, resume/dry-run/status, persisted state at `~/.pi/orchestrate/<id>/`. 4 implementation milestones. |
+| v1.0    | (this)   | Applied first critique pass (gpt-5.4 xhigh). Corrected primitives gap (`task` `isolated` flag is a no-op today; bundled-agent loading returns empty; `auto-approve` modes are `ask / auto-policy / auto-judge / yolo`; no repo-global branch-name guard; `pi-stats` has no per-session-id query surface). Split state machine (`MERGE_PENDING` separated from review verdict; `BLOCKED_ON_CONFLICT` / `BLOCKED_ON_REVIEW_STALE` as terminals). Tightened override rules (unmatched concern text = in-scope; `forward_to` only legal to `PENDING` milestones, validated up-front). Added serialised merge queue against parent-HEAD drift. Demoted `pi-orchestrate` from a new crate to a module under `pi-coding-agent`. Cost from session-JSONL `Usage` sums in v1, pi-stats integration deferred. Misc citation tightening. |
 
 ## Summary
 
@@ -68,8 +69,11 @@ the recurring foot-guns.
 
 ### Existing primitives this composes from
 
-Pi-rs already has every building block. `pi --orchestrate` is
-a thin coordinator on top of:
+Pi-rs has most of the building blocks. Two pieces are still
+to be wired for orchestrate v1: direct worktree execution
+inside the subagent dispatch path, and first-class shipping/
+discovery of stock reviewer agents. With those, orchestrate
+is a thin coordinator on top of:
 
 1. **`task` tool / subagent runtime (RFD 0005).** Subagent
    definitions live in `~/.pi/agent/agents/*.md` or
@@ -80,36 +84,55 @@ a thin coordinator on top of:
    `ParentHandle` plumbing lives in
    `crates/pi-coding-agent/src/native/task/tool.rs` and is
    wired into `modes/print.rs:73-78` and
-   `modes/json.rs:50-55`.
-2. **Worktree-isolated tasks (RFD 0006).** Subagents can run
-   inside `~/.pi/wt/data/<encoded-repo>/<task-id>/`, parent
-   tree is never touched. Reconciliation via cherry-pick to
-   `pi/task/<id>` branch or unified `.patch`. Code under
+   `modes/json.rs:50-55`. **Caveat:** the `task` tool's
+   `isolated: true` JSON-schema flag is currently a no-op
+   (`crates/pi-coding-agent/src/native/task/tool.rs:60-61,92-96`);
+   it logs a `tracing::warn!` and runs in the parent's tree.
+   Discovery precedence is `Project > User > Bundled`
+   (`crates/pi-coding-agent/src/native/task/discovery.rs:46-72`),
+   and `load_bundled()` returns empty today
+   (`discovery.rs:68-72`, "reserved for `include_dir!`").
+   Orchestrate v1 wires both gaps: it calls the executor
+   directly with a worktree-aware `RuntimeConfig` (no
+   `isolated:true` JSON detour), and ships the stock
+   `code-reviewer` definition via `include_dir!` so any
+   campaign that omits `defaults.reviewer` resolves cleanly
+   without a project-local copy.
+2. **Worktree-isolated tasks (RFD 0006).** Reconcile
+   machinery under
    `crates/pi-coding-agent/src/native/worktree/` (`mod.rs`,
-   `git.rs`, `reconcile.rs`, `baseline.rs`).
+   `git.rs`, `reconcile.rs`, `baseline.rs`). The
+   reconciler already classifies a base-HEAD-moved subagent
+   commit as a `ConflictedBranch` outcome
+   (`reconcile.rs:124-163`), which orchestrate's merge
+   queue (§Execution semantics) consumes directly.
 3. **`monitor` tool (RFD 0017).** Long cargo runs and
    `git push` retries surface progress one line at a time
    without blocking the agent loop. Implementation in
    `crates/pi-tools/src/monitor.rs`.
-4. **Code-reviewer subagent pattern.** Bundled definition at
+4. **Code-reviewer subagent pattern.** Definition at
    `.pi/agents/code-reviewer.md` (model
    `openai-codex/gpt-5.4`, thinking high, read-only tool
    allowlist). Verdict format ends with the regex-friendly
    line `Merge readiness: READY_TO_MERGE | NEEDS_FIX |
-   DO_NOT_MERGE`. Same shape used for the rfd-critic
+   DO_NOT_MERGE`. Same shape for the rfd-critic
    (`.pi/agents/rfd-critic.md`, ending in `Verdict: READY |
-   NEEDS_REVISION`).
+   NEEDS_REVISION`). Orchestrate v1 ships the
+   `code-reviewer` definition as bundled (via
+   `include_dir!` on `crates/pi-coding-agent/agents/`) so
+   discovery falls back to it when neither user nor project
+   provides one.
 5. **`pi-stats` cost telemetry (RFDs 0004 + 0008 + 0010).**
-   Per-session `Usage` events are persisted in JSONL and
-   roll up via `pi-stats` ingest. Cost helper:
-   `crates/pi-ai/src/cost.rs::compute_cost`. The orchestrator
-   reads aggregated session cost out of `pi-stats` for the
-   final report.
-
-The auto-approve policy (`crates/pi-coding-agent/src/auto_approve/`)
-plus the existing `--auto-approve` flag (`yolo` /`agentic` /
-`once`, see `cli.rs:166-174`) is the safety boundary the
-orchestrator inherits; it does not replace or duplicate it.
+   Per-session `Usage` events are persisted in JSONL. Cost
+   helper: `crates/pi-ai/src/cost.rs::compute_cost`.
+   `pi-stats`'s public aggregation today is
+   folder/model/recent-message
+   (`crates/pi-stats/src/aggregate.rs`); there is no
+   per-session-id query yet. Orchestrate v1 therefore sums
+   `Usage` entries directly from the session JSONLs it
+   already records under
+   `~/.pi/orchestrate/<id>/milestones/<id>/`. A pi-stats
+   session-id query surface is deferred (Out of scope §v2).
 
 ## Open Questions
 
@@ -153,7 +176,7 @@ The drafter is forwarding these instead of guessing.
 | Dagger | Code-as-config (Go/Python/TS) | container DAG | n/a | n/a | Pipelines are programs, not docs. Powerful but loses the "spec is reviewable" property we want. |
 | Pulumi Automation API | Code | program-level | n/a | n/a | Embedded SDK for orchestrating Pulumi programs from a host process — closest model for "library that *is* the orchestrator", but heavyweight for our 2-3-milestone case. |
 | Bazel actions | Starlark | full action DAG | n/a | n/a | DAG mechanics are sound prior art for `depends_on`; we copy the *idea*, not the build-system layering. |
-| Bors-NG / Mergify / Kodiak | YAML or per-PR labels | n/a | n/a (bots gate, don't fix) | n/a | ChatOps merge bots solve a *different* problem (merge-queue serialization for human PRs). We borrow the "bot decides READY vs NEEDS_FIX" pattern. Bors-NG itself is end-of-lifed in favour of GitHub's native merge queue per public README; Mergify and Kodiak remain commercially active. |
+| Bors-NG / Mergify / Kodiak | YAML or per-PR labels | n/a | n/a (bots gate, don't fix) | n/a | ChatOps merge bots solve a *different* problem (merge-queue serialization for human PRs). We borrow the "bot decides READY vs NEEDS_FIX" pattern. The drafter could not freshly verify Bors-NG's current upstream status in this session; treat the historical claim that it was wound down in favour of GitHub's native merge queue as drafter recollection only, not citation-grade. Mergify and Kodiak are commercially active per their public sites as of this writing. |
 
 The genuinely novel-to-pi-rs piece is the **fix-loop +
 override-rule** layer: the reviewer's verdict feeds back into
@@ -247,11 +270,11 @@ assignment  = """..."""
 | `name` | yes | — | Display only. |
 | `description` | no | empty | Echoed in the report header. |
 | `target_branch` | yes | — | Branch to merge milestones into. Always validated against `git remote show origin`; explicit refusal on `main` if `--auto-approve` is unset. |
-| `defaults.reviewer` | no | `"code-reviewer"` | Subagent name resolved against `<repo>/.pi/agents/`, then `~/.pi/agent/agents/`. Missing → fatal. |
+| `defaults.reviewer` | no | `"code-reviewer"` | Subagent name resolved with the existing discovery precedence `Project > User > Bundled` (`native/task/discovery.rs:46-72`). Orchestrate v1 ships `code-reviewer.md` as bundled (via `include_dir!` on `crates/pi-coding-agent/agents/`) so the default resolves cleanly without a project-local copy. Missing → fatal at validate time. |
 | `defaults.fix_loop_max` | no | `2` | 0 = strict (NEEDS_FIX always aborts the milestone). |
 | `defaults.push_retry_max` | no | `3` | Backoff schedule: 5s, 15s, 60s. |
 | `milestones[].id` | yes | — | Unique within the campaign. Used in state-dir + report rows. |
-| `milestones[].branch` | yes | — | Implementer pushes here. Must start with `claude/` or `pi/` to satisfy the existing branch-name guard. |
+| `milestones[].branch` | yes | — | Implementer pushes here. By repository convention the prefix is `claude/` or `pi/`; orchestrate v1 emits a *warning* (not a hard rejection) on other prefixes, since pi-rs has no repo-global branch-name guard today. |
 | `milestones[].depends_on` | no | `[]` | Cycle → fatal at validate time. |
 | `milestones[].assignment` | yes | — | Pasted into the subagent's first user turn. |
 | `milestones[].implementer` | yes | — | Subagent name. No default. |
@@ -265,68 +288,165 @@ assignment  = """..."""
 orchestrator builds the topological order at start time. A
 milestone becomes *eligible* once every dependency is
 `MERGED`. Cycles or references to undefined ids → validation
-error during dry-run.
+error during dry-run. Validation also requires every
+`override_rules[].forward_to` target to be in the current
+campaign and to *not* transitively depend on the source
+milestone (i.e. forwarding flows toward later work, never
+back into ancestors). Per the override-rule semantics below,
+forwarding is only legal at runtime when the target is still
+`PENDING`; the validator pre-rejects shapes where this is
+guaranteed to be impossible (e.g. forwarding to a sibling
+both eligible at the same time).
 
 **Concurrency.** Eligible milestones run in parallel up to
 `PI_ORCHESTRATE_PARALLEL` (default `2`). Each runs in its own
-worktree allocated by the existing RFD 0006 machinery; the
-orchestrator passes through `--worktree --worktree-mode patch`
-to the subagent's runtime, so no two milestones can corrupt
-each other's working tree even on the same branch ancestor.
-v1 caps `PI_ORCHESTRATE_PARALLEL ≤ 4` to bound `cargo`
-build-cache contention; raised in v2 once we measure.
+git worktree via the RFD 0006 reconciler. Orchestrate v1
+does not route through the `task` tool's `isolated:true`
+JSON flag (which is currently a no-op,
+`native/task/tool.rs:60-61,92-96`); it constructs the
+worktree with `native/worktree/{git,reconcile}.rs` directly
+and points the subagent's `RuntimeConfig` at it. v1 caps
+`PI_ORCHESTRATE_PARALLEL ≤ 4` to bound `cargo` build-cache
+contention; raised in v2 once we measure.
 
-**Per-milestone state machine.**
+**Per-milestone state machine.** State is split between
+*review disposition* and *merge progress*:
 
 ```
-PENDING → DISPATCHED → REVIEWING → (fix-loop iter ≤ N)
-                                  → READY_TO_MERGE → MERGED
-                                  → NEEDS_FIX (loop exhausted) → FAILED
-                                  → DO_NOT_MERGE → FAILED
-                                  → OVERRIDE_FORWARDED → MERGED
+PENDING
+  → DISPATCHED                  (implementer started)
+  → REVIEWED                    (reviewer returned a verdict)
+
+REVIEWED + verdict=READY_TO_MERGE
+  → MERGE_PENDING               (queued in the global merge queue)
+  → MERGED                      (target_branch fast-forwarded / cherry-picked)
+  | BLOCKED_ON_CONFLICT         (cherry-pick or merge conflict)
+  | BLOCKED_ON_REVIEW_STALE     (target HEAD moved since reviewer snapshot)
+
+REVIEWED + verdict=NEEDS_FIX
+  → DISPATCHED (iter+1)         (in-scope concerns, fix-loop counter ticks)
+  | FAILED                      (fix_loop_max exhausted)
+
+REVIEWED + verdict=DO_NOT_MERGE
+  → FAILED
+
+REVIEWED + every concern forwarded out-of-scope (no remaining in-scope)
+  → MERGE_PENDING               (forwarding events recorded in detail; not a state)
+
+dispatch error (LLM crash beyond retries)
+  → FAILED with reason=dispatch_error
 ```
+
+`MERGED`, `FAILED`, `BLOCKED_ON_CONFLICT`, and
+`BLOCKED_ON_REVIEW_STALE` are terminal. Forwarding is an
+*event* in `state.jsonl`, not a milestone state — the milestone
+that produced the forward is otherwise treated like any other
+review disposition.
 
 Each transition is appended to
 `~/.pi/orchestrate/<campaign-id>/state.jsonl` (one event per
-line, `serde_json` shape: `{milestone, from, to, ts,
-detail}`). The current snapshot is reconstructed by replaying
-the log, so partial writes can never corrupt state.
+line, `serde_json` shape: `{milestone, from, to, ts, detail}`).
+Forwarded concerns appear as
+`{milestone, kind: "forward", target, concern, ts}`. The
+current snapshot is reconstructed by replaying the log so
+partial writes can never corrupt state; resume drops a
+truncated final line.
+
+**Merge queue.** `MERGE_PENDING` milestones are processed by
+a single-threaded merge worker (one merge at a time, even
+with `PI_ORCHESTRATE_PARALLEL > 1`) so the target branch
+mutates serially. Before each merge attempt the worker
+checks whether `target_branch` HEAD has advanced past the
+review snapshot recorded in `state.jsonl`:
+
+- HEAD unchanged → cherry-pick / `git merge --no-ff`. On
+  success, transition to `MERGED`. On conflict, transition
+  to `BLOCKED_ON_CONFLICT`.
+- HEAD advanced → transition to `BLOCKED_ON_REVIEW_STALE`.
+  v1 does not auto-rebase or auto-re-review; the campaign
+  flags this as manual-resolution-required and continues
+  with milestones whose dependencies are still satisfiable.
 
 **Override rules.** When a milestone's reviewer returns
-`NEEDS_FIX`, its `override_rules` are matched (in declared
-order) against each `Concerns` bullet in the verdict. First
-matching rule wins:
+`NEEDS_FIX`, the orchestrator extracts each bullet under the
+verdict's `## Concerns` heading. Bullets without a leading
+`-` / `*` and free-form prose between bullets are treated as
+**implicit in-scope concerns** and never matched against
+`override_rules`. For each extracted bullet, rules are
+matched in declared order; first match wins:
 
 - `verdict = "in-scope"` → counts toward `fix_loop_max`,
   re-dispatch implementer with the concern appended.
-- `verdict = "out-of-scope"` → require `forward_to = <id>`;
-  append the concern verbatim to that milestone's
-  assignment (only legal if the target hasn't been
-  dispatched yet); does **not** count toward `fix_loop_max`.
+- `verdict = "out-of-scope"` requires `forward_to = <id>`.
+  At runtime this is legal only if `<id>` is in `PENDING`;
+  if `<id>` is already in `DISPATCHED` or later, the
+  forwarding **fails** with `E_FORWARD_TARGET_NOT_PENDING`,
+  the milestone is treated as if the rule did not match
+  (fall through to in-scope or to "no match → in-scope"
+  default), and the failure is recorded in `state.jsonl`
+  with full diagnostic detail. Successful forwards do not
+  count toward `fix_loop_max`.
+- No matching rule and no implicit-in-scope bullets in the
+  verdict → defaults to in-scope; the unmatched bullet is
+  appended verbatim to the implementer's next turn.
 
-If every concern is matched out-of-scope and zero in-scope
-concerns remain, the milestone is treated as
-`READY_TO_MERGE` (the verdict is "spent" by forwarding).
+A milestone is only promoted to `MERGE_PENDING` (after a
+forward-only verdict) if the verdict contained at least one
+`Concerns` bullet *and* every extracted concern was
+successfully forwarded. A `NEEDS_FIX` verdict with zero
+parsable concerns is treated as in-scope and the
+implementer is re-dispatched with the raw verdict text.
+
+**Reviewer parser contract.** Orchestrate v1 parses the
+reviewer output with a deliberately strict regex pipeline
+(documented in code comments): the `## Concerns` heading
+must appear, followed by one or more `- ` or `* ` bullets,
+terminated by a blank line, the next `## ` heading, or the
+mandatory `Merge readiness:` final line. Any deviation
+(missing heading, no bullets, missing final-line marker)
+flips the milestone to a defensive **in-scope, full re-
+dispatch** path: the entire reviewer text becomes the
+implementer's next-turn context, and the fix-loop counter
+ticks. This avoids silently dropping concerns that the
+reviewer wrote in prose and protects against reviewer
+prompt drift.
 
 **Retry policy.**
 
 - *Implementer/reviewer LLM crash* (provider 5xx, network
   error): up to 2 automatic retries with 30s backoff before
-  marking the milestone `FAILED` with reason
-  `dispatch_error`.
-- *`git push` failure*: `push_retry_max` retries with the
-  backoff schedule above.
-- *Merge conflict*: never auto-resolve. State machine moves
-  to `CONFLICT_ABORT`, the milestone is parked at
-  `READY_TO_MERGE`, and the campaign continues with
-  remaining independent milestones; report flags this as
-  manual-merge-required.
+  marking the milestone `FAILED` with
+  `reason=dispatch_error`.
+- *`git push` failure*: `push_retry_max` retries with
+  backoff schedule 5s, 15s, 60s.
+- *Merge conflict*: never auto-resolve; transition to
+  `BLOCKED_ON_CONFLICT`. The campaign continues with
+  milestones whose dependencies remain satisfiable
+  (`MERGED` ancestors).
+- *Review-stale*: see merge queue above
+  (`BLOCKED_ON_REVIEW_STALE`).
 
 **Cancellation.** `Ctrl-C` once → graceful: finish
 in-flight milestones, then exit (state is durable so resume
 works). `Ctrl-C` twice → hard kill; in-flight subagent
-runtimes are aborted, their worktrees are *not* cleaned up
-(left for human inspection), state log is closed cleanly.
+runtimes are aborted and their worktrees are *not* cleaned
+up (left for human inspection). Resume from a hard-killed
+campaign restarts each `DISPATCHED` milestone from scratch
+on the same branch (new commit on top of whatever the
+subagent had pushed before the kill); the previous session
+JSONL is preserved with a `.aborted` suffix for cost
+accounting.
+
+**Exit codes.**
+
+- `0` — every non-`FAILED` milestone reached `MERGED`.
+- `2` — at least one milestone in `FAILED` (fix-loop or
+  dispatch error).
+- `3` — at least one milestone in `BLOCKED_ON_CONFLICT` or
+  `BLOCKED_ON_REVIEW_STALE` (manual-resolution-required).
+- `4` — schema validation failed (dry-run or pre-flight).
+- `5` — `E_SPEC_DRIFT` on resume.
+- `130` — terminated by SIGINT.
 
 ### Output: `MERGE-REPORT-<campaign>.md`
 
@@ -365,7 +485,7 @@ it.
 
 ```
 ~/.pi/orchestrate/
-  <campaign-id>/                        # sha256[..16] of canonicalised campaign.toml path
+  <campaign-id>/                        # sha256[..16] of std::fs::canonicalize(campaign.toml) — symlinks resolved
     spec.toml                           # copy of the campaign at first launch (immutable)
     state.jsonl                         # append-only event log
     milestones/
@@ -378,39 +498,61 @@ it.
 
 Resume reconstructs the in-memory plan by replaying
 `state.jsonl`; if `spec.toml` content has changed since the
-first launch (sha mismatch), resume aborts with
-`E_SPEC_DRIFT`. Use `--orchestrate-status` to inspect.
+first launch (sha mismatch on the file body, not the path),
+resume aborts with `E_SPEC_DRIFT` and exit code `5`. Use
+`--orchestrate-status` to inspect.
+
+The schema deserialiser uses `#[serde(deny_unknown_fields)]`
+on every TOML struct: a typo in a campaign field is a
+validation failure, not a silent drop. Test
+`orchestrate_schema::reject_unknown_field` enforces this.
 
 ### Integration with existing pi-rs
 
-- **Task runtime.** The orchestrator drives subagents through
-  the same `TaskInput` → `TaskOutcome` API
-  (`crates/pi-coding-agent/src/native/task/executor.rs`).
-  No new spawn channel; the orchestrator is just another
-  `ParentHandle` wired the way `modes/print.rs:73-78` already
-  wires one. The third entry point that needs this wiring is
-  the new `modes/orchestrate.rs` (see implementation plan).
+- **Task runtime.** The orchestrator drives subagents
+  through the same `TaskInput` → `TaskOutcome` API
+  (`crates/pi-coding-agent/src/native/task/executor.rs`)
+  but calls the executor **directly** rather than going
+  through the `task` tool's JSON surface. This sidesteps
+  the `isolated:true` no-op and gives orchestrate a stable
+  Rust call site. No new spawn channel; the parent of these
+  subagent runtimes is the `modes/orchestrate.rs` entry
+  point (the third entry alongside `modes/print.rs` and
+  `modes/json.rs`), which installs its own `ParentHandle`
+  the same way `modes/print.rs:73-78` does.
 - **Worktrees.** Existing reconcile machinery is reused as
-  is. The orchestrator never touches `~/.pi/wt/` directly; it
-  passes `--worktree --worktree-mode patch
-  --worktree-id <campaign-id>--<milestone-id>` to the
-  subagent CLI and lets RFD 0006 do the rest.
+  is. The orchestrator allocates one worktree per milestone
+  via `native/worktree/{git,reconcile}.rs` directly (not
+  via the `task` tool's `isolated` flag, which is a no-op
+  today). The `ConflictedBranch` reconcile outcome
+  (`reconcile.rs:124-163`) is the merge-queue's
+  `BLOCKED_ON_CONFLICT` trigger. Worktree paths under
+  `~/.pi/wt/data/<encoded-repo>/<campaign-id>--<milestone-id>/`
+  match the existing layout.
 - **`--auto-approve` interaction.** The orchestrator's own
   invocation honours `--auto-approve`. Each subagent spawned
   by the orchestrator inherits that level via existing
   parent-context propagation
-  (`crates/pi-coding-agent/src/auto_approve/`). The
-  campaign schema does **not** override approval mode; if
-  the user wants `yolo` for the whole campaign they pass
-  `--auto-approve yolo` on the `pi --orchestrate` invocation
-  exactly like any other pi run. This avoids a second axis of
-  trust that would have to be audited separately.
+  (`crates/pi-coding-agent/src/auto_approve/`). The valid
+  modes are `ask` / `auto-policy` (alias `auto`) /
+  `auto-judge` / `yolo`
+  (`crates/pi-coding-agent/src/auto_approve/mod.rs:69-71`,
+  `cli.rs:166-174`). The campaign schema does **not**
+  override approval mode; if the user wants `yolo` for the
+  whole campaign they pass `--auto-approve yolo` on the
+  `pi --orchestrate` invocation exactly like any other pi
+  run. This avoids a second axis of trust that would have to
+  be audited separately.
 - **Cost telemetry.** Each subagent session's JSONL is
-  ingested by `pi-stats` (RFD 0004) on the next `pi --stats`
-  call as today. The orchestrator's report queries pi-stats
-  for the per-`session_id` cost roll-up rather than
-  recomputing it; that keeps `cost.rs::compute_cost`
-  (RFD 0010) the single canonical entry point.
+  recorded by orchestrate under
+  `~/.pi/orchestrate/<id>/milestones/<id>/`. The report
+  computes cost by replaying those JSONLs and summing
+  `Usage` entries via
+  `crates/pi-ai/src/cost.rs::compute_cost` (RFD 0010 — the
+  single canonical cost helper). `pi-stats` ingest still
+  picks the JSONLs up on the next `pi --stats` run as today;
+  a per-session-id query surface in `pi-stats` is deferred
+  (§Out of scope, Deferred to v2).
 - **GPG.** The orchestrator's commit (the merge commit) and
   the implementer subagents' commits inherit the user's
   `git config`. We do *not* set
@@ -423,23 +565,38 @@ first launch (sha mismatch), resume aborts with
 
 - `crates/pi-coding-agent/tests/orchestrate_schema.rs`
   - parse minimum-valid campaign
-  - reject unknown fields (warn-and-continue OR fail; v1
-    chooses fail)
+  - reject unknown fields (`#[serde(deny_unknown_fields)]`)
   - reject cyclic `depends_on`
-  - reject `branch` outside `claude/*` or `pi/*` allowlist
+  - warn (not reject) on branch prefix outside `claude/*`
+    or `pi/*`
   - reject duplicate milestone ids
-  - reject `forward_to` pointing at a missing or already-
-    dispatched milestone
+  - reject `forward_to` pointing at a missing milestone
+  - reject campaign shapes where `forward_to` provably
+    cannot be `PENDING` at the time the source milestone
+    reviews (e.g. forwarding to a sibling at the same
+    topological depth with no dependency edge between them)
 - `crates/pi-coding-agent/tests/orchestrate_state.rs`
   - state.jsonl replay reconstructs identical in-memory plan
   - mid-write crash (truncated last line) is dropped, prior
     state preserved
   - spec.toml drift between runs returns `E_SPEC_DRIFT`
+    with exit code 5
 - `crates/pi-coding-agent/tests/orchestrate_override.rs`
   - regex match on Concerns bullet, forward to dependent
   - first-match-wins ordering
-  - all-out-of-scope verdict promotes to READY_TO_MERGE
+  - `forward_to` to non-`PENDING` target →
+    `E_FORWARD_TARGET_NOT_PENDING`, falls through to
+    in-scope, fix-loop counter ticks
+  - all-out-of-scope verdict (with at least one parsable
+    bullet) promotes to `MERGE_PENDING`
+  - `NEEDS_FIX` verdict with zero parsable bullets is
+    treated as in-scope full-redispatch
   - in-scope concern increments fix-loop counter
+- `crates/pi-coding-agent/tests/orchestrate_merge_queue.rs`
+  - serial merging under `PI_ORCHESTRATE_PARALLEL=4`
+  - target-HEAD-drift between review snapshot and merge
+    attempt → `BLOCKED_ON_REVIEW_STALE`
+  - cherry-pick conflict → `BLOCKED_ON_CONFLICT`
 
 ### Integration smoke campaign
 
@@ -523,14 +680,14 @@ run becomes the validation artifact.
 
 ## Implementation plan
 
-| M  | Branch                          | Scope                                                                                                            | LOC est. | Dogfood spend |
-| -- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------- | -------- | ------------- |
-| M1 | `claude/orchestrate-schema`     | TOML schema parser, `--orchestrate-dry-run`, validation errors. New crate `pi-orchestrate` (lib only). State-dir layout defined but not written. | ~700     | $1            |
-| M2 | `claude/orchestrate-serial`     | Serial executor: dispatch → review → fix-loop → merge → report for `depends_on`-respecting linear walk (i.e. parallel = 1 forced). `modes/orchestrate.rs` entry point. State.jsonl read/write. Override-rule engine. | ~1200    | $3            |
-| M3 | `claude/orchestrate-parallel`   | Lift the parallel = 1 cap; concurrency up to `PI_ORCHESTRATE_PARALLEL`. Worktree-per-milestone wiring. Push retry, conflict-abort. | ~500     | $2            |
-| M4 | `claude/orchestrate-resume`     | `--orchestrate-resume`, `--orchestrate-status`. Drift detection. `Ctrl-C`-twice handling.                                                                       | ~400     | $1            |
+| M  | Branch                          | Scope                                                                                                                                                                                                                              | LOC est. | Dogfood spend |
+| -- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ------------- |
+| M1 | `claude/orchestrate-schema`     | TOML schema parser (`#[serde(deny_unknown_fields)]`), validator, `--orchestrate-dry-run`. Module under `crates/pi-coding-agent/src/orchestrate/`. State-dir layout defined but not written. Bundled `code-reviewer.md` shipped via `include_dir!` on `crates/pi-coding-agent/agents/`. | ~700     | $1            |
+| M2 | `claude/orchestrate-serial`     | Serial executor (`PI_ORCHESTRATE_PARALLEL=1` forced): dispatch → review → fix-loop → merge → report on the topological walk. `modes/orchestrate.rs` entry point, direct executor call (not via `task` tool JSON). State.jsonl read/write. Override-rule engine with the strict reviewer parser. Per-milestone session JSONL recording + `compute_cost` rollup for the report. | ~1300    | $3            |
+| M3 | `claude/orchestrate-parallel`   | Lift the parallel-1 cap up to `PI_ORCHESTRATE_PARALLEL` (≤4). Worktree-per-milestone wiring against `native/worktree/{git,reconcile}.rs` directly. Single-threaded merge queue with target-HEAD-drift detection. Push retry, conflict-abort, review-stale handling. | ~600     | $2            |
+| M4 | `claude/orchestrate-resume`     | `--orchestrate-resume`, `--orchestrate-status`. Drift detection (`E_SPEC_DRIFT`). `Ctrl-C`-twice handling and `.aborted` session preservation. Exit-code matrix.                                                                                                                                                                                                                            | ~400     | $1            |
 
-**Total LOC: ~2800.** **Total dogfood spend: ~$7.** (For
+**Total LOC: ~3000.** **Total dogfood spend: ~$7.** (For
 comparison, RFD 0020 v1.1 budgeted $15 across three
 milestones with no infra reuse; this is a thinner band
 because most of the heavy lifting — task runtime, worktree
