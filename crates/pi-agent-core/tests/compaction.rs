@@ -110,6 +110,7 @@ fn fake_model() -> ModelInfo {
         alias: Some("mock".into()),
         context_window: 1000,
         max_output_tokens: 100,
+        tier: 1,
         supports_thinking: false,
         supports_tools: false,
         supports_vision: false,

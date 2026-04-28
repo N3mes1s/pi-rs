@@ -32,6 +32,7 @@ fn make_info(provider: &str, id: &str, ctx: u32, out: u32) -> ModelInfo {
         alias: None,
         context_window: ctx,
         max_output_tokens: out,
+        tier: 1,
         supports_thinking: false,
         supports_tools: true,
         supports_vision: false,

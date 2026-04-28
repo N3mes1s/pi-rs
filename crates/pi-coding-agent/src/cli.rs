@@ -23,6 +23,11 @@ pub struct Cli {
     #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(["off","low","medium","high","xhigh"]))]
     pub thinking: Option<String>,
 
+    /// Route mode: `off` disables the router; `static` preserves
+    /// today's manual dispatch behaviour. Defaults to `static`.
+    #[arg(long = "route", default_value = "static", value_parser = clap::builder::PossibleValuesParser::new(["off", "static"]))]
+    pub route: String,
+
     /// Allowlist of tool names. Comma-separated.
     #[arg(long)]
     pub tools: Option<String>,

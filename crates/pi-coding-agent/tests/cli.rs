@@ -47,6 +47,15 @@ fn at_files_extracts_at_prefixed_paths() {
 }
 
 #[test]
+fn route_flag_defaults_to_static_and_accepts_off() {
+    let cli = parse(&[]);
+    assert_eq!(cli.route, "static");
+
+    let cli = parse(&["--route", "off"]);
+    assert_eq!(cli.route, "off");
+}
+
+#[test]
 fn thinking_flag_rejects_non_allowed_values() {
     let res = Cli::try_parse_from(["pi", "--thinking", "ultra"]);
     assert!(res.is_err(), "clap should reject `ultra` thinking value");

@@ -54,6 +54,7 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
             "low" => pi_agent_core::settings::ThinkingSetting::Low,
             "medium" => pi_agent_core::settings::ThinkingSetting::Medium,
             "high" => pi_agent_core::settings::ThinkingSetting::High,
+            "xhigh" => pi_agent_core::settings::ThinkingSetting::XHigh,
             _ => pi_agent_core::settings::ThinkingSetting::Off,
         };
     }
