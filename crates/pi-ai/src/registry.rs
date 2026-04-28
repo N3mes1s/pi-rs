@@ -148,9 +148,9 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
             auth_header: "x-api-key".into(),
             auth_format: "{token}".into(),
             models: vec![
-                m("anthropic", "claude-opus-4-7", Some("opus"), 200_000, 32_000, true, true, 15.0, 75.0),
+                m("anthropic", "claude-opus-4-7", Some("opus"), 200_000, 32_000, true, true, 5.0, 25.0),
                 m("anthropic", "claude-sonnet-4-6", Some("sonnet"), 1_000_000, 64_000, true, true, 3.0, 15.0),
-                m("anthropic", "claude-haiku-4-5-20251001", Some("haiku"), 200_000, 16_000, true, true, 0.8, 4.0),
+                m("anthropic", "claude-haiku-4-5-20251001", Some("haiku"), 200_000, 16_000, true, true, 1.0, 5.0),
             ],
         },
         ProviderConfig {
@@ -163,16 +163,16 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
                 m("openai", "gpt-4o", Some("gpt-4o"), 128_000, 16_384, false, true, 2.5, 10.0),
                 m("openai", "gpt-4o-mini", Some("gpt-4o-mini"), 128_000, 16_384, false, true, 0.15, 0.60),
                 m("openai", "o1", Some("o1"), 200_000, 100_000, true, true, 15.0, 60.0),
-                m("openai", "o1-mini", Some("o1-mini"), 128_000, 65_536, true, false, 3.0, 12.0),
+                m("openai", "o1-mini", Some("o1-mini"), 128_000, 65_536, true, false, 1.10, 4.40),
                 m("openai", "o3-mini", Some("o3-mini"), 200_000, 100_000, true, false, 1.10, 4.40),
                 // Reasoning family additions (E1).
-                m("openai", "o3", Some("o3"), 200_000, 100_000, true, true, 10.0, 40.0),
-                m("openai", "o3-pro", Some("o3-pro"), 200_000, 100_000, true, true, 60.0, 240.0),
+                m("openai", "o3", Some("o3"), 200_000, 100_000, true, true, 2.0, 8.0),
+                m("openai", "o3-pro", Some("o3-pro"), 200_000, 100_000, true, true, 20.0, 80.0),
                 m("openai", "o4-mini", Some("o4-mini"), 200_000, 100_000, true, true, 1.10, 4.40),
                 // GPT-5 family (reasoning-capable per OpenAI announcement).
-                m("openai", "gpt-5", Some("gpt-5"), 400_000, 100_000, true, true, 5.0, 20.0),
-                m("openai", "gpt-5-mini", Some("gpt-5-mini"), 400_000, 100_000, true, true, 0.5, 2.0),
-                m("openai", "gpt-5-nano", Some("gpt-5-nano"), 400_000, 100_000, true, true, 0.10, 0.40),
+                m("openai", "gpt-5", Some("gpt-5"), 400_000, 100_000, true, true, 1.25, 10.0),
+                m("openai", "gpt-5-mini", Some("gpt-5-mini"), 400_000, 100_000, true, true, 0.25, 2.0),
+                m("openai", "gpt-5-nano", Some("gpt-5-nano"), 400_000, 100_000, true, true, 0.05, 0.40),
             ],
         },
         ProviderConfig {
@@ -182,8 +182,8 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
             auth_header: "x-goog-api-key".into(),
             auth_format: "{token}".into(),
             models: vec![
-                m("google", "gemini-2.5-pro", Some("gemini-pro"), 1_000_000, 8_192, true, true, 1.25, 5.0),
-                m("google", "gemini-2.5-flash", Some("gemini"), 1_000_000, 8_192, false, true, 0.075, 0.30),
+                m("google", "gemini-2.5-pro", Some("gemini-pro"), 1_000_000, 8_192, true, true, 1.25, 10.0),
+                m("google", "gemini-2.5-flash", Some("gemini"), 1_000_000, 8_192, false, true, 0.30, 2.50),
             ],
         },
         ProviderConfig {
@@ -243,8 +243,8 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
                     32_000,
                     true,
                     true,
-                    15.0,
-                    75.0,
+                    5.0,
+                    25.0,
                 ),
                 m(
                     "bedrock",
@@ -265,8 +265,8 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
                     16_000,
                     true,
                     true,
-                    0.8,
-                    4.0,
+                    1.0,
+                    5.0,
                 ),
             ],
         },
@@ -287,7 +287,7 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
             auth_header: "Authorization".into(),
             auth_format: "Bearer {token}".into(),
             models: vec![
-                m("cerebras", "llama3.1-70b", Some("llama3.1-70b"), 131_072, 8_192, false, false, 0.5, 1.5),
+                m("cerebras", "llama3.1-70b", Some("llama3.1-70b"), 131_072, 8_192, false, false, 0.60, 0.60),
             ],
         },
         ProviderConfig {
@@ -297,7 +297,7 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
             auth_header: "Authorization".into(),
             auth_format: "Bearer {token}".into(),
             models: vec![
-                m("groq", "llama-3.3-70b-versatile", Some("llama-3.3-70b-versatile"), 131_072, 8_192, false, false, 0.5, 1.5),
+                m("groq", "llama-3.3-70b-versatile", Some("llama-3.3-70b-versatile"), 131_072, 8_192, false, false, 0.59, 0.79),
             ],
         },
         ProviderConfig {
@@ -307,7 +307,7 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
             auth_header: "Authorization".into(),
             auth_format: "Bearer {token}".into(),
             models: vec![
-                m("xai", "grok-2-latest", Some("grok-2-latest"), 131_072, 8_192, false, false, 0.5, 1.5),
+                m("xai", "grok-2-latest", Some("grok-2-latest"), 131_072, 8_192, false, false, 2.0, 10.0),
             ],
         },
         ProviderConfig {
@@ -326,8 +326,8 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
             auth_header: "Authorization".into(),
             auth_format: "Bearer {token}".into(),
             models: vec![
-                m("deepseek", "deepseek-chat", Some("deepseek-chat"), 131_072, 8_192, false, false, 0.5, 1.5),
-                m("deepseek", "deepseek-reasoner", Some("deepseek-reasoner"), 131_072, 8_192, true, false, 0.5, 1.5),
+                m("deepseek", "deepseek-chat", Some("deepseek-chat"), 131_072, 8_192, false, false, 0.14, 0.28),
+                m("deepseek", "deepseek-reasoner", Some("deepseek-reasoner"), 131_072, 8_192, true, false, 0.14, 0.28),
             ],
         },
         ProviderConfig {
@@ -337,7 +337,7 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
             auth_header: "Authorization".into(),
             auth_format: "Bearer {token}".into(),
             models: vec![
-                m("mistral", "mistral-large-latest", Some("mistral-large-latest"), 131_072, 8_192, false, false, 0.5, 1.5),
+                m("mistral", "mistral-large-latest", Some("mistral-large-latest"), 131_072, 8_192, false, false, 2.0, 6.0),
             ],
         },
         ProviderConfig {
@@ -347,7 +347,7 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
             auth_header: "Authorization".into(),
             auth_format: "Bearer {token}".into(),
             models: vec![
-                m("zai", "glm-4.6", Some("glm-4.6"), 131_072, 8_192, false, false, 0.5, 1.5),
+                m("zai", "glm-4.6", Some("glm-4.6"), 131_072, 8_192, false, false, 0.60, 2.20),
             ],
         },
         ProviderConfig {
@@ -375,7 +375,7 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
             auth_header: "Authorization".into(),
             auth_format: "Bearer {token}".into(),
             models: vec![
-                m("kimi", "moonshot-v1-128k", Some("moonshot-v1-128k"), 131_072, 8_192, false, false, 0.5, 1.5),
+                m("kimi", "moonshot-v1-128k", Some("moonshot-v1-128k"), 131_072, 8_192, false, false, 2.0, 5.0),
             ],
         },
         ProviderConfig {
@@ -388,4 +388,44 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
             models: vec![],
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_model_has_non_zero_pricing() {
+        for p in default_providers() {
+            for m in &p.models {
+                assert!(
+                    m.input_cost_per_mtok > 0.0,
+                    "{}/{} input zero",
+                    p.name,
+                    m.id
+                );
+                assert!(
+                    m.output_cost_per_mtok > 0.0,
+                    "{}/{} output zero",
+                    p.name,
+                    m.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_row_uses_the_legacy_placeholder_pair() {
+        for p in default_providers() {
+            for m in &p.models {
+                let placeholder = (m.input_cost_per_mtok - 0.5).abs() < 1e-9
+                    && (m.output_cost_per_mtok - 1.5).abs() < 1e-9;
+                assert!(
+                    !placeholder,
+                    "{}/{} still has the (0.5, 1.5) placeholder",
+                    p.name, m.id
+                );
+            }
+        }
+    }
 }
