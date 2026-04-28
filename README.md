@@ -1,144 +1,282 @@
 # pi-rs
 
-**A 1:1 Rust rewrite of [pi](https://github.com/badlogic/pi-mono)** — Mario
-Zechner's minimal terminal coding agent harness — packaged with native ports
-of common pi extensions like
-[pi-autoresearch](https://github.com/davebcn87/pi-autoresearch).
+A self-contained Rust rewrite of [pi](https://github.com/badlogic/pi-mono),
+Mario Zechner's minimal terminal coding-agent harness. Same public surface,
+same JSONL session format, same skill / extension contracts — plus a
+batteries-included set of native modules: an autoresearch loop, a SQLite-backed
+stats dashboard, worktree-isolated subagents, a flamegraph viewer, and a
+self-improvement (`--evolve`) daemon that mutates `AGENTS.md` based on
+recorded outcomes.
 
-`pi-rs` is **not** a fork or a derivative; it's a faithful re-implementation
-in Rust of the same agent harness, plus a small set of native modules that
-make it self-contained for common workflows. It tracks pi's design philosophy
-("if I don't need it, it won't be built") and matches its public surface so
-upstream skills, prompt templates, and packages work without modification.
+If you've used upstream `pi`, this is a drop-in. If you haven't: it's a
+single static binary that talks to Anthropic, OpenAI, Google, Bedrock,
+Azure, and ~12 OpenAI-compat providers, runs your code through a TUI or
+in non-interactive print/JSON/RPC modes, and gives you somewhere to put
+the Markdown that tells the agent how your repo works.
 
-## Scope
-
-### What pi-rs replicates from upstream pi
-
-- **Built-in tools**: `read`, `write`, `edit`, `bash`, plus the
-  disabled-by-default extras `grep`, `find`, `ls`.
-- **Session management**: JSONL tree, parent-id branching, `/fork`,
-  `/clone`, `/resume`, `/tree`. Default location
-  `~/.pi/agent/sessions/<cwd-slug>/<session-id>.jsonl`.
-- **Slash commands**: `/login` (OAuth PKCE — Anthropic, ChatGPT, GitHub
-  Copilot, Gemini CLI, Antigravity), `/logout`, `/model`, `/scoped-models`,
-  `/settings` (interactive), `/resume`, `/tree`, `/fork`, `/clone`,
-  `/compact` (heuristic + LLM-driven), `/export` (HTML), `/share`
-  (`gh gist create`), `/hotkeys`, `/help`, `/quit`, plus `/<name>.md`
-  prompt templates.
-- **Skills** (Agent Skills spec): `~/.pi/agent/skills/`, `.agents/skills/`,
-  `.pi/skills/`. The `autoresearch-create` skill from upstream
-  pi-autoresearch ships built-in.
-- **Themes**: dark + light + JSON-loadable user themes, hot-reloaded by the
-  TUI render loop via `notify`.
-- **Keybindings**: defaults match upstream + JSON overrides at
-  `~/.pi/agent/keybindings.json`. Extensions can register their own chords.
-- **Operating modes**: Interactive (raw-mode TUI with picker overlays for
-  every flow), Print (`-p`), JSON event stream (`--json`), RPC
-  (bidirectional JSONL), SDK (the workspace crates are usable as a library).
-- **Multi-provider LLM API**: Anthropic Messages, OpenAI Chat Completions,
-  OpenAI-compat (Fireworks, Cerebras, Groq, xAI, OpenRouter, DeepSeek,
-  Mistral, ZAI, Hugging Face, Ollama, Kimi, MiniMax), Google Generative AI
-  (Gemini), AWS Bedrock (Anthropic), Azure OpenAI. Streaming SSE, tool use,
-  thinking budgets, OAuth subscriptions.
-- **Extensions**: subprocess-based (Rust-idiomatic — matches pi.dev's
-  "CLI tools with READMEs" stance). Extensions can register tools, slash
-  commands, keybindings, event hooks (`tool_call`, `tool_result`,
-  `assistant_message`, `user_message`), replace built-in tools, and run
-  async startup hooks. Manifest schema documented in
-  `crates/pi-coding-agent/src/extensions.rs`.
-- **Packages**: `pi install npm:…|git:…|https://…` from the package
-  registry. Auto-discovery of `pi-extension.json` manifests.
-
-### Native modules (Rust ports of common pi extensions)
-
-These are bundled in pi-rs rather than installed as separate packages:
-
-- **pi-autoresearch** — autonomous experiment loop with confidence scoring,
-  dashboard, and JSONL persistence. Tools `init_experiment`,
-  `run_experiment`, `log_experiment` match upstream byte-for-byte; skill
-  `autoresearch-create` ships built-in. See
-  `crates/pi-coding-agent/src/autoresearch/` and
-  `crates/pi-coding-agent/skills/autoresearch-create/SKILL.md`.
-
-### Planned native modules
-
-- **auto-approval** — pre-approve tool calls matching a policy
-  (read/write/bash patterns) so long-running runs don't stall on every
-  permission prompt. Shape mirroring upstream pi's permission flow.
-- **pi-pods** — vLLM/llama.cpp-pod orchestration, like upstream's
-  `packages/pods`.
-- **pi-mom** — Slack bot bridge analogous to upstream's `packages/mom`.
-- **pi-web-ui** — browser-served UI mirroring `packages/web-ui`.
-
-## Workspace
-
-| Crate | Purpose |
-| --- | --- |
-| `pi-ai` | Unified LLM API (Anthropic / OpenAI / Google / Bedrock / Azure / OpenAI-compat) |
-| `pi-tools` | Built-in `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls` |
-| `pi-agent-core` | Agent loop, JSONL sessions, compaction, settings |
-| `pi-tui` | Diff renderer + editor primitives + theme registry |
-| `pi-coding-agent` | The `pi` binary: CLI, modes, slash commands, skills, prompts, themes, packages, extensions, autoresearch |
-
-## Build
+## Install
 
 ```sh
-cargo build --release -p pi-coding-agent
+# Build the release binary (static-musl works too — see Makefile).
+cargo build --release --bin pi
 ./target/release/pi --help
+
+# Or symlink onto your PATH.
+ln -sf "$PWD/target/release/pi" ~/.local/bin/pi
+```
+
+Provider credentials are read from environment variables at startup; no
+keys ever land in committed files.
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-…
+export OPENAI_API_KEY=sk-…
+export GOOGLE_API_KEY=…
+# or run `pi` then `/login` for OAuth (Anthropic, ChatGPT, Copilot, Gemini).
 ```
 
 ## Quick start
 
+Three commands that exercise the headline features.
+
+### 1. One-shot print mode
+
 ```sh
-# Print mode (non-interactive, exits after response)
-pi -p "list files in this directory"
+pi -p "say hi"
+```
 
-# JSON event stream
-pi --json -p "read README.md and summarise it"
+Reads stdin if piped, streams the assistant reply, exits.
 
-# Continue most recent session
-pi -c
+### 2. Stats: ingest sessions, dump JSON
 
-# Pick model / provider explicitly
-pi --provider anthropic --model claude-sonnet-4-6 "implement quicksort in rust"
-pi --provider openai --model gpt-4o "..."
+```sh
+pi --stats sync && pi --stats json
+```
 
-# Run an autoresearch loop on any repo
-cd /path/to/some/repo
-pi --provider anthropic --model claude-opus-4-7 \
-    "/autoresearch optimize cargo build time, target the test workload"
+`sync` walks every `~/.pi/agent/sessions/<cwd>/*.jsonl` file and folds
+`Usage` / `Outcome` rows into `~/.pi/agent/stats.db`. `json` prints the
+roll-up: tokens in/out, cache hit rate, $ spent, per-model and per-cwd
+breakdowns. See [RFD 0004](rfd/0004-stats-crate.md).
+
+### 3. Worktree-isolated task
+
+```sh
+pi --worktree -p "refactor crates/pi-tools/src/edit.rs to use anyhow"
+```
+
+Allocates a fresh `git worktree` under
+`~/.pi/wt/data/<encoded-repo>/<task-id>/`, runs the agent there, then
+either cherry-picks the result onto a `pi/task/<id>` branch or emits a
+`.patch`. Your working tree is never touched. See
+[RFD 0006](rfd/0006-worktree-isolated-tasks.md).
+
+## Authoring an `AGENTS.md`
+
+`AGENTS.md` (or `CLAUDE.md`) is the per-repo brief the agent reads on
+every session. Pi-rs auto-discovers them by walking cwd → ancestors →
+`~/.pi/agent/AGENTS.md`, sorts by depth, and joins them into the system
+prompt. Use `--no-context-files` to opt out.
+
+Anything between `<!-- pi:keep -->` and `<!-- /pi:keep -->` is treated
+as a load-bearing invariant by the `--evolve` daemon (see below) — it
+will rewrite the rest of the file but never touch a `pi:keep` block.
+Outcomes recorded by the trajectory judge feed back into evolve, which
+proposes `AGENTS.md` rewrites by H2 section.
+
+```markdown
+# AGENTS.md — my-cool-repo
+
+<!-- pi:keep -->
+## House rules
+- Never use `--no-verify`.
+- API keys are env-var only.
+<!-- /pi:keep -->
+
+## Where things live
+- Source: `crates/foo/src/`
+- Integration tests skip cleanly when their tool is absent.
+
+## Optimisation lessons
+<!-- This block is mutable. The evolve daemon may rewrite it. -->
+- The legacy build target was 5× slower than the musl target.
+```
+
+See [RFD 0011](rfd/0011-self-dogfood-evolve.md) for the discovery and
+mutation rules.
+
+## Subagents (`task` tool)
+
+The `task` tool delegates a self-contained unit of work to a subagent:
+a fresh runtime with its own message history, model selection,
+allowlisted tool registry, session JSONL, and (optionally) git
+worktree. The subagent's full transcript collapses into a single
+`tool_result` in the parent's stream, so context windows stay clean.
+
+Subagents are Markdown-with-frontmatter files in
+`~/.pi/agent/agents/*.md` or `<repo>/.pi/agents/*.md`:
+
+```markdown
+---
+name: code-reviewer
+description: Reads a diff and flags regressions. Read-only.
+model: sonnet
+tools: [read, grep, find, ls]
+spawns: []
+---
+You are a careful code reviewer. Look for...
+```
+
+| Frontmatter | Meaning |
+| --- | --- |
+| `name` | Tool-call key. Required. |
+| `description` | Shown to the parent. Required. |
+| `model` | Role alias (`sonnet`, `opus`) or `provider/model`. |
+| `tools` | Allowlist; empty = inherit parent registry. |
+| `spawns` | `*` for unrestricted nesting, list for allowlist, omitted = no nested `task`. |
+| `thinking` | `low` / `medium` / `high` / `off`. |
+
+Use a subagent when (a) the work is read-only and benefits from a
+clean context (review, search), or (b) the work mutates files and
+should be sandboxed in its own worktree. See
+[RFD 0005](rfd/0005-subagents-task-tool.md) and
+[RFD 0006](rfd/0006-worktree-isolated-tasks.md).
+
+## Stats dashboard
+
+```sh
+pi --stats sync          # JSONL → SQLite
+pi --stats json          # roll-up to stdout
+pi --stats server        # http://127.0.0.1:3847
+```
+
+`server` mounts an embedded React dashboard at
+`http://127.0.0.1:3847`: per-model spend, cache hit rates, daily cost,
+context-window heatmaps, $/session. Backed by `~/.pi/agent/stats.db`.
+See [RFD 0004](rfd/0004-stats-crate.md). Cache-rate accuracy depends
+on [RFDs 0008](rfd/0008-populate-usage-fields.md) /
+[0010](rfd/0010-differential-cache-pricing.md) /
+[0015](rfd/0015-usage-population-other-providers.md).
+
+## Flamegraph
+
+```sh
+pi --flamegraph                                      # opens HTML viewer
+pi --flamegraph --flamegraph-format json > traj.json # machine-readable
+```
+
+Renders a session's trajectory as a token-weighted flamegraph: which
+tools / messages / context loads consumed the most context window.
+The JSON shape exists so `--evolve` (and your own scripts) can ingest
+trajectory shape without parsing HTML. See
+[RFD 0012](rfd/0012-judge-context-and-flamegraph-json.md).
+
+## Evolve
+
+The evolve daemon reads recorded `Outcome` entries from your sessions,
+identifies the worst-scoring H2 section in `AGENTS.md`, asks the slow
+model for a rewrite, benchmarks the candidate against current on a
+sample of replayed sessions, and either applies it or rolls back.
+
+```sh
+pi --evolve status     # show daily $ usage, queued candidates
+pi --evolve dry-run    # propose a rewrite, print the diff, don't apply
+pi --evolve apply      # land the rewrite if score delta ≥ MARGIN (default 0.10)
+pi --evolve off        # disable
+```
+
+Auto-apply is gated by the rollback-on-regression contract in
+`evolve::apply`: if the next batch of outcomes regresses, the change is
+reverted. `<!-- pi:keep -->` blocks are never modified. Spend is bounded
+by `daily_cost_cap_usd` in settings. See
+[RFD 0013](rfd/0013-evolve-auto-apply.md) and
+[RFD 0011](rfd/0011-self-dogfood-evolve.md).
+
+## Where things live
+
+| Crate | Purpose |
+| --- | --- |
+| `pi-ai` | Unified LLM API (Anthropic / OpenAI / Google / Bedrock / Azure / OpenAI-compat); SSE streaming, tool use, OAuth subscriptions, cost computation. |
+| `pi-tools` | Built-in `read`, `write`, `edit`, `bash` plus disabled-by-default `grep`, `find`, `ls`. |
+| `pi-agent-core` | Agent loop, JSONL sessions, compaction, settings, context-file discovery, runtime config. |
+| `pi-tui` | Diff renderer, editor primitives, theme registry, picker overlays. |
+| `pi-stats` | JSONL ingest → SQLite → axum HTTP API + embedded React dashboard. |
+| `pi-coding-agent` | The `pi` binary: CLI, modes, slash commands, skills, prompts, themes, packages, extensions, and native modules (autoresearch, task, worktree, evolve, flamegraph, trajectory). |
+
+Native modules live under `crates/pi-coding-agent/src/native/`:
+
+```
+autoresearch/  # init/run/log_experiment + autoresearch-create skill
+task/          # subagent definition + executor (RFD 0005)
+worktree/      # git-worktree allocation + reconcile (RFD 0006)
+trajectory/    # outcome recorder + LLM judge (RFD 0011/0012)
+evolve/        # AGENTS.md mutation daemon (RFD 0011/0013)
+lsp/           # on-write formatter + diagnostics (RFD 0001/0007)
 ```
 
 ## Configuration
 
-Directory layout matches upstream pi:
+Pi-rs reads layered settings; project files override user files.
 
 ```
 ~/.pi/agent/settings.json     # global settings
-~/.pi/agent/SYSTEM.md         # custom system prompt addendum
+~/.pi/agent/SYSTEM.md         # custom system-prompt addendum
 ~/.pi/agent/AGENTS.md         # global context
 ~/.pi/agent/keybindings.json  # custom keybindings
 ~/.pi/agent/sessions/         # JSONL sessions, organised by cwd
+~/.pi/agent/agents/           # subagent definitions (RFD 0005)
 ~/.pi/agent/skills/           # skills (Agent Skills spec)
 ~/.pi/agent/prompts/          # slash-command prompt templates
 ~/.pi/agent/themes/           # themes
 ~/.pi/agent/packages/         # installed pi packages
+~/.pi/agent/stats.db          # pi-stats SQLite (RFD 0004)
+~/.pi/wt/data/                # worktree allocations (RFD 0006)
 
 .pi/settings.json             # project overrides
-.pi/SYSTEM.md / .pi/skills / .pi/prompts / .pi/themes
+.pi/agents/ .pi/skills/ .pi/prompts/ .pi/themes/
 AGENTS.md / CLAUDE.md         # auto-loaded context (cwd + parents)
 ```
 
-Environment:
+`settings.json` shape (abbreviated):
+
+```jsonc
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "thinking": "off",                 // off | low | medium | high
+  "model_roles": {                   // role aliases for subagents
+    "opus": "anthropic/claude-opus-4-7",
+    "sonnet": "anthropic/claude-sonnet-4-6",
+    "haiku": "anthropic/claude-haiku-4-5"
+  },
+  "task": {
+    "max_concurrency": 4,            // subagent fan-out cap
+    "agent_models": {                // per-agent model overrides
+      "code-reviewer": "haiku"
+    }
+  },
+  "evolve": {
+    "enabled": false,                // master switch, opt-in
+    "daily_cost_cap_usd": 5.0,
+    "min_samples": 20                // min outcomes before a tick
+  },
+  "lsp": {
+    "enabled": false,
+    "format_on_write": false,
+    "diagnostics_on_write": true,
+    "languages": { "rust": { "command": ["rust-analyzer"] } }
+  }
+}
+```
+
+Environment overrides:
 
 ```
 PI_CODING_AGENT_DIR     override ~/.pi/agent
 PI_PACKAGE_DIR          override package directory
-PI_TELEMETRY=0          opt out of telemetry (no-op anyway)
+PI_WORKTREE_ROOT        override ~/.pi/wt (used by tests)
 PI_SKIP_VERSION_CHECK   skip startup version check
-ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY / ...
-                        provider credentials
+PI_TELEMETRY=0          opt out of telemetry (no-op anyway)
+ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY / …
 ```
 
 ## Modes
@@ -146,62 +284,40 @@ ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY / ...
 | Mode | Flag | Behaviour |
 | --- | --- | --- |
 | Interactive | (default) | Raw-mode TUI: editor, scroll buffer, hotkeys, picker overlays, message queue (Enter steers, Alt+Enter follow-up). |
-| Print | `-p / --print` | Reads stdin if piped, streams the assistant reply, exits. |
-| JSON | `--json` | Same as print but emits a JSONL event stream. |
+| Print | `-p`, `--print` | Reads stdin if piped, streams the assistant reply, exits. |
+| JSON | `--json` | Print mode emitting a JSONL event stream for tooling. |
 | RPC | `--rpc` | Bidirectional JSONL on stdin/stdout for process integration. |
-| SDK | (library) | Use `pi-agent-core` directly: `AgentSession`, `SessionManager`, etc. |
+| SDK | (library) | Use `pi-agent-core` directly: `AgentSession`, `SessionManager`, `Runtime`. |
 
 ## Built-in tools
 
 ```
-read        path, [offset], [limit]            -> file content (image -> attachment)
+read        path, [offset], [limit]            -> file content
 write       path, content                      -> creates parent dirs, writes
 edit        path, old_string, new_string,
             [replace_all]                      -> exact-match surgical edit
 bash        command, [timeout_ms], [cwd]       -> stdout/stderr/exit
-grep        pattern, [path], [glob], [-n]      -> matching lines
+grep        pattern, [path], [glob]            -> matching lines
 find        glob, [path]                       -> matching paths
 ls          path                               -> directory listing
+task        agent, assignment, [tasks]         -> subagent (RFD 0005)
 ```
 
-`--tools <list>` allowlist, `--no-builtin-tools`, `--no-tools` work as in upstream pi.
+`--tools <list>` allowlists, `--no-builtin-tools` and `--no-tools`
+disable subsets.
 
-## Autoresearch (native module)
+## Further reading
 
-`pi-rs` ships pi-autoresearch as a native module. The on-disk schema and tool
-contracts are byte-for-byte compatible with upstream
-[pi-autoresearch](https://github.com/davebcn87/pi-autoresearch):
+The design behind every feature above lives in [`rfd/`](rfd/). Start
+with [`rfd/README.md`](rfd/README.md) for the index. Highlights:
 
-```
-autoresearch.config.json (optional, in cwd)
-autoresearch.md          (session document — agent writes via the skill)
-autoresearch.sh          (benchmark, prints METRIC name=value lines)
-autoresearch.checks.sh   (optional correctness gate, runs after benchmark)
-autoresearch.jsonl       (append-only run log)
-autoresearch.ideas.md    (optional deferred-idea backlog)
-```
-
-Tools: `init_experiment`, `run_experiment`, `log_experiment`. Status enum:
-`keep` / `discard` / `crash` / `checks_failed` (only `keep` triggers a git
-commit; the rest auto-revert via `git reset --hard`).
-
-The upstream `autoresearch-create` skill is shipped built-in at
-`crates/pi-coding-agent/skills/autoresearch-create/SKILL.md`. To start a
-session, just `/autoresearch <goal>` or `pi -p "/autoresearch optimize
-build time of this project"` and the agent will write the session files
-and start the loop autonomously.
-
-## Sessions
-
-JSONL tree, one entry per message with `id` + `parent_id`. Stored under
-`~/.pi/agent/sessions/<cwd-slug>/<session-id>.jsonl`. Branching via `/fork`
-and `/clone`, time-travel via `/tree`.
-
-## Status
-
-* All four operating modes wired up.
-* All seven slash-command flows (login/share/clone/scoped-models/settings/
-  resume/tree/fork) implemented.
-* Autoresearch native module shipped with upstream-compatible JSONL schema.
-* Live-tested against the Anthropic API (Opus 4.7 + Sonnet 4.6 + Haiku 4.5).
-* Coverage on the testable surface: ≥ 90% lines / ≥ 90% functions.
+- [RFD 0001](rfd/0001-lsp-write-hook.md) — LSP-on-write hook.
+- [RFD 0003](rfd/0003-adaptive-thinking.md) — adaptive thinking on Opus 4.7+.
+- [RFD 0004](rfd/0004-stats-crate.md) — `pi --stats`.
+- [RFD 0005](rfd/0005-subagents-task-tool.md) — `task` tool.
+- [RFD 0006](rfd/0006-worktree-isolated-tasks.md) — `pi --worktree`.
+- [RFD 0011](rfd/0011-self-dogfood-evolve.md) — `AGENTS.md` + evolve + flamegraph.
+- [RFD 0012](rfd/0012-judge-context-and-flamegraph-json.md) — judge + flamegraph JSON.
+- [RFD 0013](rfd/0013-evolve-auto-apply.md) — `--evolve apply` auto-apply.
+- [RFD 0014](rfd/0014-real-tokenizer.md) — real tokenizer for `ContextLoad`.
+- [RFD 0015](rfd/0015-usage-population-other-providers.md) — `Usage` everywhere.
