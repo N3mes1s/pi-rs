@@ -479,7 +479,7 @@ fn total_tokens(branch: &[SessionEntry]) -> u64 {
 }
 
 fn est_tokens(s: &str) -> f64 {
-    s.chars().count() as f64 / 4.0
+    pi_ai::tokenizer::count_default(s) as f64
 }
 
 fn short(s: &str, max: usize) -> String {

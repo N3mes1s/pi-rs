@@ -265,13 +265,6 @@ struct AgentSessionInner {
     context_loads_emitted: bool,
 }
 
-/// Rough approximation: 1 token ≈ 4 bytes for English text. Off by
-/// ~20 % vs. real tokenizers; good enough for the trajectory judge's
-/// ranking. RFD 0012 — plumbing a real tokenizer is RFD 0014.
-fn estimate_tokens(s: &str) -> u64 {
-    (s.len() as u64).div_ceil(4)
-}
-
 impl AgentSession {
     pub fn id(&self) -> &str {
         &self.id
@@ -415,7 +408,7 @@ impl AgentSession {
                     SessionEntryKind::ContextLoad {
                         source: ctx.path.display().to_string(),
                         bytes,
-                        tokens: Some(estimate_tokens(&ctx.content)),
+                        tokens: Some(pi_ai::tokenizer::count_default(&ctx.content)),
                     },
                 );
             }

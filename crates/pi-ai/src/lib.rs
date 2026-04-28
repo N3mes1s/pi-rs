@@ -13,6 +13,7 @@ pub mod oauth;
 pub mod provider;
 pub mod registry;
 pub mod stream;
+pub mod tokenizer;
 pub mod tool;
 
 pub use auth::{AuthMethod, AuthStorage};
