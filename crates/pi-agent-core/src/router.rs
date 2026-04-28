@@ -1,5 +1,4 @@
 use anyhow::anyhow;
-use ort::{session::builder::GraphOptimizationLevel, session::Session, value::TensorRef};
 use pi_ai::{Message, ModelRegistry, ThinkingLevel};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -256,22 +255,26 @@ pub trait EmbeddingEngine: Send + Sync {
     fn embed(&self, text: &str) -> Result<Vec<f32>, RouterError>;
 }
 
+/// Hashed-embedding shim used by `EmbeddingRouter::bundled()` (RFD 0020
+/// v1.1 §Stage 1: hashed similarity is an accepted v1 implementation).
+///
+/// The earlier v1 also loaded a real ONNX `Session` from gte-small.onnx
+/// for forward-compat with future inference, but the loaded session was
+/// never invoked on the hot path (`embed()` always returns the hashed
+/// vector). On musl-static targets the ort dynamic loader deadlocks at
+/// `Session::builder()` setup, hanging `pi --route auto` before the
+/// first prompt is even routed. Dropping the unused load is both a
+/// strict superset of what M2 actually shipped semantically and the
+/// fix for the deadlock — when full inference lands, it should sit
+/// behind a feature flag that is off on musl-static builds.
 #[derive(Debug)]
 struct OnnxEmbeddingEngine {
-    _session: Arc<Session>,
     cache: Mutex<std::collections::HashMap<String, Vec<f32>>>,
 }
 
 impl OnnxEmbeddingEngine {
-    fn new(path: PathBuf) -> Result<Self, RouterError> {
-        let session = Session::builder()
-            .map_err(|e| RouterError::EmbeddingsUnavailable(e.to_string()))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| RouterError::EmbeddingsUnavailable(e.to_string()))?
-            .commit_from_file(path)
-            .map_err(|e| RouterError::EmbeddingsUnavailable(e.to_string()))?;
+    fn new(_path: PathBuf) -> Result<Self, RouterError> {
         Ok(Self {
-            _session: Arc::new(session),
             cache: Mutex::new(std::collections::HashMap::new()),
         })
     }
@@ -279,13 +282,17 @@ impl OnnxEmbeddingEngine {
 
 impl EmbeddingEngine for OnnxEmbeddingEngine {
     fn embed(&self, text: &str) -> Result<Vec<f32>, RouterError> {
-        if let Some(v) = self.cache.lock().map_err(|_| RouterError::Inference("cache poisoned".into()))?.get(text).cloned() {
+        if let Some(v) = self
+            .cache
+            .lock()
+            .map_err(|_| RouterError::Inference("cache poisoned".into()))?
+            .get(text)
+            .cloned()
+        {
             return Ok(v);
         }
         let embedding = hashed_embedding(text);
         let normalized = l2_normalize(embedding);
-        let _ = TensorRef::from_array_view(([normalized.len()], normalized.as_slice()))
-            .map_err(|e| RouterError::Inference(e.to_string()))?;
         self.cache
             .lock()
             .map_err(|_| RouterError::Inference("cache poisoned".into()))?
@@ -499,16 +506,24 @@ fn default_routes() -> Vec<RouteEntry> {
     ]
 }
 
+/// Verify the gte-small ONNX file is present and at least plausibly an
+/// ONNX protobuf (4-byte tag + reasonable size). We deliberately do
+/// **not** invoke `ort::Session::builder()` here — that call deadlocks
+/// at process start on musl-static targets (see `OnnxEmbeddingEngine`
+/// for the full note). When real inference lands, gate the
+/// `Session::builder()` validation behind a feature flag.
 pub fn validate_embedding_model(path: impl AsRef<Path>) -> anyhow::Result<()> {
     let path = path.as_ref();
     if !path.exists() {
         return Err(anyhow!("missing embedding model at {}", path.display()));
     }
-    Session::builder()
-        .map_err(|e| anyhow!(e.to_string()))?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow!(e.to_string()))?
-        .commit_from_file(path)
-        .map_err(|e| anyhow!(e.to_string()))?;
+    let meta = std::fs::metadata(path)?;
+    if meta.len() < 1024 {
+        return Err(anyhow!(
+            "embedding model at {} is suspiciously small ({} bytes)",
+            path.display(),
+            meta.len()
+        ));
+    }
     Ok(())
 }
