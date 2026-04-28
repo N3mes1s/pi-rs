@@ -16,6 +16,7 @@ fn opus_4_7() -> ModelInfo {
         output_cost_per_mtok: 75.0,
         cache_read_cost_per_mtok: None,
         cache_write_cost_per_mtok: None,
+        api_kind: Default::default(),
     }
 }
 
@@ -75,6 +76,7 @@ fn opus_4_7_with_cache(read: Option<f64>, write: Option<f64>) -> ModelInfo {
         output_cost_per_mtok: 25.0,
         cache_read_cost_per_mtok: read,
         cache_write_cost_per_mtok: write,
+        api_kind: Default::default(),
     }
 }
 

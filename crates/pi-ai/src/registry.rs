@@ -4,6 +4,23 @@ use std::collections::BTreeMap;
 use crate::auth::AuthStorage;
 use crate::provider::ProviderKind;
 
+/// Which OpenAI-shaped API surface a model is served from. RFD 0019.
+///
+/// Most providers ship a Chat-Completions–compatible endpoint, so that's
+/// the safe default. OpenAI's gpt-5.x and o-series reasoning models live
+/// behind the newer `/v1/responses` surface and need different request
+/// shaping + streaming-event parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ApiKind {
+    /// `POST /v1/chat/completions` — the legacy / OpenAI-compat shape.
+    #[default]
+    #[serde(rename = "chat-completions")]
+    ChatCompletions,
+    /// `POST /v1/responses` — required for gpt-5.x and o-series.
+    #[serde(rename = "responses")]
+    Responses,
+}
+
 /// Information about a single model offered by a provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -27,6 +44,11 @@ pub struct ModelInfo {
     /// `None`. RFD 0010.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_cost_per_mtok: Option<f64>,
+    /// Which API surface to dispatch this model through. Defaults to
+    /// `ChatCompletions`; OpenAI gpt-5.x / o-series use `Responses`.
+    /// RFD 0019.
+    #[serde(default)]
+    pub api_kind: ApiKind,
 }
 
 /// Configuration for a single provider.
@@ -147,7 +169,15 @@ fn m(
         output_cost_per_mtok: out_cost,
         cache_read_cost_per_mtok: None,
         cache_write_cost_per_mtok: None,
+        api_kind: ApiKind::ChatCompletions,
     }
+}
+
+/// Mark a model as dispatched through OpenAI's `/v1/responses` API
+/// (RFD 0019). Wraps an `m(...)` row the same way `with_cache` does.
+fn with_responses_api(mut model: ModelInfo) -> ModelInfo {
+    model.api_kind = ApiKind::Responses;
+    model
 }
 
 /// Wrap an `m(...)` row with explicit cache-rate overrides (RFD 0010).
@@ -208,33 +238,42 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
                 m("openai", "o1-mini", Some("o1-mini"), 128_000, 65_536, true, false, 1.10, 4.40),
                 m("openai", "o3-mini", Some("o3-mini"), 200_000, 100_000, true, false, 1.10, 4.40),
                 // Reasoning family additions (E1).
-                with_cache(
+                with_responses_api(with_cache(
                     m("openai", "o3", Some("o3"), 200_000, 100_000, true, true, 2.0, 8.0),
                     Some(1.0),
                     None,
-                ),
-                m("openai", "o3-pro", Some("o3-pro"), 200_000, 100_000, true, true, 20.0, 80.0),
-                with_cache(
+                )),
+                with_responses_api(m(
+                    "openai", "o3-pro", Some("o3-pro"), 200_000, 100_000, true, true, 20.0, 80.0,
+                )),
+                with_responses_api(with_cache(
                     m("openai", "o4-mini", Some("o4-mini"), 200_000, 100_000, true, true, 1.10, 4.40),
                     Some(0.55),
                     None,
-                ),
+                )),
                 // GPT-5 family (reasoning-capable per OpenAI announcement).
-                with_cache(
+                with_responses_api(with_cache(
                     m("openai", "gpt-5", Some("gpt-5"), 400_000, 100_000, true, true, 1.25, 10.0),
                     Some(0.625),
                     None,
-                ),
-                with_cache(
+                )),
+                // gpt-5.4 — Responses-only reasoning model used by the
+                // bundled code-reviewer subagent (RFD 0019).
+                with_responses_api(with_cache(
+                    m("openai", "gpt-5.4", Some("gpt-5.4"), 400_000, 100_000, true, true, 1.25, 10.0),
+                    Some(0.625),
+                    None,
+                )),
+                with_responses_api(with_cache(
                     m("openai", "gpt-5-mini", Some("gpt-5-mini"), 400_000, 100_000, true, true, 0.25, 2.0),
                     Some(0.125),
                     None,
-                ),
-                with_cache(
+                )),
+                with_responses_api(with_cache(
                     m("openai", "gpt-5-nano", Some("gpt-5-nano"), 400_000, 100_000, true, true, 0.05, 0.40),
                     Some(0.025),
                     None,
-                ),
+                )),
             ],
         },
         ProviderConfig {

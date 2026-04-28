@@ -42,6 +42,7 @@ fn priced_model() -> ModelInfo {
         output_cost_per_mtok: 10.0,
         cache_read_cost_per_mtok: None,
         cache_write_cost_per_mtok: None,
+        api_kind: Default::default(),
     }
 }
 

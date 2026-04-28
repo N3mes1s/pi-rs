@@ -40,6 +40,7 @@ fn model() -> ModelInfo {
         output_cost_per_mtok: 0.0,
         cache_read_cost_per_mtok: None,
         cache_write_cost_per_mtok: None,
+        api_kind: Default::default(),
     }
 }
 
@@ -545,6 +546,7 @@ async fn bedrock_usage_shape_matches_anthropic_byte_for_byte() {
         output_cost_per_mtok: 75.0,
         cache_read_cost_per_mtok: None,
         cache_write_cost_per_mtok: None,
+        api_kind: Default::default(),
     };
 
     let provider = BedrockAnthropicProvider::new(
