@@ -1,9 +1,9 @@
 # RFD 0017 — Native `monitor` tool for streaming background events
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-28
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** 646618e
 
 ## Summary
 

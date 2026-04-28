@@ -5,6 +5,7 @@ use pi_agent_core::{
 };
 use pi_tools::ToolRegistry;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::cli::Cli;
 use crate::context::{
@@ -110,6 +111,42 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     if !settings.tools.is_empty() {
         tools.keep_only(&settings.tools);
     }
+
+    // 5b. RFD 0017 — register the `monitor` tool. The tool emits
+    // notifications onto `monitor_rx`; we drain them into the
+    // `MonitorPump` so the next assistant turn sees them. (Mode
+    // handlers may additionally bridge into their AgentEvent stream
+    // via `spawn_event_bridge`, but the pump path is enough to
+    // surface the events to the model.)
+    let monitor_pump = std::sync::Arc::new(crate::native::monitor::MonitorPump::new());
+    let (monitor_tx, monitor_rx) = tokio::sync::mpsc::unbounded_channel();
+    if !settings.no_tools && (settings.tools.is_empty() || settings.tools.iter().any(|t| t == "monitor")) {
+        let mcfg = pi_tools::monitor::MonitorConfig {
+            max_concurrent: settings.monitor.max_concurrent,
+            batch_window: std::time::Duration::from_millis(settings.monitor.batch_window_ms),
+            volume_cap_lines: settings.monitor.volume_cap_lines,
+            volume_cap_window: std::time::Duration::from_millis(settings.monitor.volume_cap_window_ms),
+            default_timeout: std::time::Duration::from_millis(settings.monitor.default_timeout_ms),
+            max_timeout: std::time::Duration::from_millis(settings.monitor.max_timeout_ms),
+        };
+        tools.register(Arc::new(pi_tools::monitor::MonitorTool::new(
+            monitor_tx.clone(),
+            mcfg,
+        )));
+        // Drain notifications into the pump (host-mode AgentEvent
+        // forwarding is optional and lives in the per-mode glue).
+        crate::native::monitor::spawn_event_bridge(
+            String::new(),
+            monitor_rx,
+            None,
+            monitor_pump.clone(),
+        );
+    } else {
+        // monitor tool disabled — drop the receiver so the channel
+        // closes cleanly.
+        drop(monitor_rx);
+    }
+    drop(monitor_tx);
 
     // 6. system prompt + addenda.
     let mut system = String::from(default_system_prompt());
@@ -362,12 +399,22 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
             Some(d) if d.is_dir() => crate::native::ttsr::RuleSet::load_dir(&d),
             _ => crate::native::ttsr::RuleSet::new(),
         };
-        if rs.is_empty() {
+        let ttsr: Option<std::sync::Arc<dyn pi_agent_core::StreamInterceptor>> = if rs.is_empty() {
             None
         } else {
             let arc_rs = std::sync::Arc::new(rs);
             Some(std::sync::Arc::new(crate::native::ttsr::TtsrInterceptor::new(arc_rs))
                 as std::sync::Arc<dyn pi_agent_core::StreamInterceptor>)
+        };
+        // Chain TTSR + monitor pump. If both are present, the chained
+        // interceptor calls them in order on each delta and returns
+        // the first non-Continue action.
+        match ttsr {
+            None => Some(monitor_pump.clone() as std::sync::Arc<dyn pi_agent_core::StreamInterceptor>),
+            Some(t) => Some(std::sync::Arc::new(ChainedInterceptor {
+                a: t,
+                b: monitor_pump.clone(),
+            }) as std::sync::Arc<dyn pi_agent_core::StreamInterceptor>),
         }
     };
 
@@ -398,4 +445,25 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         extensions: loaded_exts,
         slash_registry,
     })
+}
+
+/// Compose two [`StreamInterceptor`]s in order. RFD 0017 wires this so
+/// TTSR rules and the monitor pump can both fire on the same stream.
+struct ChainedInterceptor {
+    a: std::sync::Arc<dyn pi_agent_core::StreamInterceptor>,
+    b: std::sync::Arc<dyn pi_agent_core::StreamInterceptor>,
+}
+
+#[async_trait::async_trait]
+impl pi_agent_core::StreamInterceptor for ChainedInterceptor {
+    async fn turn_start(&self) {
+        self.a.turn_start().await;
+        self.b.turn_start().await;
+    }
+    async fn on_text_delta(&self, text: &str) -> pi_agent_core::InterceptAction {
+        if let pi_agent_core::InterceptAction::AbortAndInject(s) = self.a.on_text_delta(text).await {
+            return pi_agent_core::InterceptAction::AbortAndInject(s);
+        }
+        self.b.on_text_delta(text).await
+    }
 }

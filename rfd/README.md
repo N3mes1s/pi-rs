@@ -48,4 +48,4 @@ crosses crate boundaries.
 | 0014 | Real tokenizer for `ContextLoad.tokens`           | Implemented |
 | 0015 | Replicate Usage population to OpenAI / Google / Bedrock | Implemented |
 | 0016 | Usage population on `OpenAiCompatProvider`       | Implemented |
-| 0017 | Native `monitor` tool for streaming background events | Discussion |
+| 0017 | Native `monitor` tool for streaming background events | Implemented |

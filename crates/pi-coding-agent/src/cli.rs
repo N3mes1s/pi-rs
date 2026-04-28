@@ -196,6 +196,13 @@ pub struct Cli {
     #[arg(long = "stats-port", default_value_t = 3847)]
     pub stats_port: u16,
 
+    /// Monitor subcommand (RFD 0017): `list` (show active monitors,
+    /// across-session diagnostics — v1 reports per-process state only)
+    /// or `stop ID` (force-stop a monitor by id). Short-circuits the
+    /// agent loop.
+    #[arg(long = "monitor", value_name = "VERB", num_args = 0..=2)]
+    pub monitor: Vec<String>,
+
     /// Free-form positional args. `@file` references add attachments.
     #[arg(value_name = "MESSAGE_OR_AT_FILES")]
     pub positionals: Vec<String>,

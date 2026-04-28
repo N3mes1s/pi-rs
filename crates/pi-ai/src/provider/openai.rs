@@ -153,7 +153,12 @@ impl Provider for OpenAiProvider {
             body["temperature"] = json!(t);
         }
         if let Some(m) = req.max_output_tokens {
-            body["max_tokens"] = json!(m);
+            // gpt-5 family + reasoning models require `max_completion_tokens`.
+            if model.id.starts_with("gpt-5") || model.id.starts_with("o1") || model.id.starts_with("o3") || model.id.starts_with("o4") {
+                body["max_completion_tokens"] = json!(m);
+            } else {
+                body["max_tokens"] = json!(m);
+            }
         }
         if !req.tools.is_empty() {
             body["tools"] = Value::Array(

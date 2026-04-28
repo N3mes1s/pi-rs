@@ -57,7 +57,55 @@ pub struct Settings {
     /// model overrides. See `pi_coding_agent::native::task` (RFD 0005).
     #[serde(default)]
     pub task: TaskSettings,
+    /// `monitor` tool settings (RFD 0017).
+    #[serde(default)]
+    pub monitor: MonitorSettings,
 }
+
+/// `monitor` tool configuration (RFD 0017). Caps + batching window for
+/// long-running background-watch processes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MonitorSettings {
+    /// Hard cap on concurrently-active monitors per session.
+    #[serde(default = "default_monitor_max_concurrent")]
+    pub max_concurrent: usize,
+    /// Stdout-line batching window in milliseconds. Lines emitted within
+    /// the same window become one notification.
+    #[serde(default = "default_monitor_batch_window_ms")]
+    pub batch_window_ms: u64,
+    /// Volume guardrail: if a monitor emits more than `volume_cap_lines`
+    /// lines within `volume_cap_window_ms` ms, the runtime auto-stops it.
+    #[serde(default = "default_monitor_volume_cap_lines")]
+    pub volume_cap_lines: usize,
+    #[serde(default = "default_monitor_volume_cap_window_ms")]
+    pub volume_cap_window_ms: u64,
+    /// Default `timeout_ms` when not persistent.
+    #[serde(default = "default_monitor_timeout_ms")]
+    pub default_timeout_ms: u64,
+    /// Hard ceiling on `timeout_ms`.
+    #[serde(default = "default_monitor_max_timeout_ms")]
+    pub max_timeout_ms: u64,
+}
+
+impl Default for MonitorSettings {
+    fn default() -> Self {
+        Self {
+            max_concurrent: default_monitor_max_concurrent(),
+            batch_window_ms: default_monitor_batch_window_ms(),
+            volume_cap_lines: default_monitor_volume_cap_lines(),
+            volume_cap_window_ms: default_monitor_volume_cap_window_ms(),
+            default_timeout_ms: default_monitor_timeout_ms(),
+            max_timeout_ms: default_monitor_max_timeout_ms(),
+        }
+    }
+}
+
+fn default_monitor_max_concurrent() -> usize { 8 }
+fn default_monitor_batch_window_ms() -> u64 { 200 }
+fn default_monitor_volume_cap_lines() -> usize { 100 }
+fn default_monitor_volume_cap_window_ms() -> u64 { 5_000 }
+fn default_monitor_timeout_ms() -> u64 { 300_000 }
+fn default_monitor_max_timeout_ms() -> u64 { 3_600_000 }
 
 /// Configuration for the `task` tool / subagent system. Lives here so
 /// `Settings` is self-contained; consumed by
@@ -240,6 +288,7 @@ impl Default for Settings {
             evolve: EvolveSettings::default(),
             lsp: LspSettings::default(),
             task: TaskSettings::default(),
+            monitor: MonitorSettings::default(),
         }
     }
 }
