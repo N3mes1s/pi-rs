@@ -68,6 +68,10 @@ impl SlashRegistry {
                 "skill",
                 "Invoke an agent-skill explicitly: /skill:<name> [args]",
             ),
+            (
+                "cost",
+                "Sync pi-stats and report total cost for the current cwd",
+            ),
         ] {
             self.inner.insert(
                 name.into(),

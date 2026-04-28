@@ -1243,6 +1243,14 @@ async fn handle_slash(
             session.compact_with_llm(ins).await;
             SlashOutcome::Continue
         }
+        "cost" => {
+            let cwd = startup.runtime_config.cwd.clone();
+            let body = crate::slash_cost::run_cost_command(&cwd).await;
+            view.transcript
+                .blocks
+                .push(crate::renderer::Block::Note(body));
+            SlashOutcome::Continue
+        }
         "model" => {
             let target = args.trim();
             if target.is_empty() {
@@ -2000,6 +2008,11 @@ async fn handle_slash_line(
             };
             session.compact(ins).await;
             println!("[compacted]");
+            LineSlashOutcome::Continue
+        }
+        "cost" => {
+            let body = crate::slash_cost::run_cost_command(&startup.runtime_config.cwd).await;
+            println!("{body}");
             LineSlashOutcome::Continue
         }
         "model" => {
