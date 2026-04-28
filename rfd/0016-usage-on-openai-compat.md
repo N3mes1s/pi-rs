@@ -3,7 +3,7 @@
 - **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-29
-- **Implemented:** 56105b0
+- **Implemented:** 643780f
 
 ## Summary
 
