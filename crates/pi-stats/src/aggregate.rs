@@ -293,6 +293,86 @@ pub fn errors(c: &Connection, limit: i64) -> rusqlite::Result<Vec<RecentRow>> {
     rows.collect()
 }
 
+// ---------------------------------------------------------------------------
+// Route savings: compare actual cost against a "what if everything went to
+// claude-sonnet-4-6?" counterfactual.
+// ---------------------------------------------------------------------------
+
+/// Counterfactual pricing for claude-sonnet-4-6 (per-million tokens).
+const SONNET_INPUT_PER_MTOK: f64 = 3.00;
+const SONNET_OUTPUT_PER_MTOK: f64 = 15.00;
+const SONNET_CACHE_READ_PER_MTOK: f64 = 0.30;
+const SONNET_CACHE_WRITE_PER_MTOK: f64 = 3.75;
+
+fn sonnet_cost(input: i64, output: i64, cache_read: i64, cache_write: i64) -> f64 {
+    let m = 1_000_000.0_f64;
+    (input as f64) / m * SONNET_INPUT_PER_MTOK
+        + (output as f64) / m * SONNET_OUTPUT_PER_MTOK
+        + (cache_read as f64) / m * SONNET_CACHE_READ_PER_MTOK
+        + (cache_write as f64) / m * SONNET_CACHE_WRITE_PER_MTOK
+}
+
+/// Per-route savings row: actual cost vs. counterfactual (all-sonnet).
+#[derive(Debug, Clone)]
+pub struct RouteSavings {
+    pub route_id: String,
+    pub turns: u64,
+    pub actual_cost_usd: f64,
+    pub counterfactual_cost_usd: f64,
+}
+
+/// For each routing_decision, find the assistant message in the same
+/// session_file with the smallest timestamp_ms strictly greater than the
+/// decision's timestamp_ms. Aggregate by route_id.
+pub fn route_savings(conn: &Connection) -> rusqlite::Result<Vec<RouteSavings>> {
+    // Join routing_decisions to their paired assistant message row.
+    // The "next" message is defined as the minimum timestamp_ms in the
+    // messages table for the same session_file that is strictly greater
+    // than the routing decision's timestamp_ms.
+    let mut stmt = conn.prepare(
+        "SELECT rd.route_id,
+                COUNT(*),
+                COALESCE(SUM(m.cost_usd), 0.0),
+                COALESCE(SUM(m.input_tokens), 0),
+                COALESCE(SUM(m.output_tokens), 0),
+                COALESCE(SUM(m.cache_read_tok), 0),
+                COALESCE(SUM(m.cache_write_tok), 0)
+           FROM routing_decisions rd
+           JOIN messages m
+             ON m.session_file = rd.session_file
+            AND m.timestamp_ms = (
+                    SELECT MIN(m2.timestamp_ms)
+                      FROM messages m2
+                     WHERE m2.session_file = rd.session_file
+                       AND m2.timestamp_ms > rd.timestamp_ms
+                )
+          GROUP BY rd.route_id
+          ORDER BY rd.route_id ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let route_id: String = r.get(0)?;
+        let turns: i64 = r.get(1)?;
+        let actual_cost: f64 = r.get(2)?;
+        let input: i64 = r.get(3)?;
+        let output: i64 = r.get(4)?;
+        let cache_read: i64 = r.get(5)?;
+        let cache_write: i64 = r.get(6)?;
+        Ok((route_id, turns, actual_cost, input, output, cache_read, cache_write))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        let (route_id, turns, actual_cost_usd, input, output, cache_read, cache_write) = row?;
+        let counterfactual_cost_usd = sonnet_cost(input, output, cache_read, cache_write);
+        result.push(RouteSavings {
+            route_id,
+            turns: turns as u64,
+            actual_cost_usd,
+            counterfactual_cost_usd,
+        });
+    }
+    Ok(result)
+}
+
 pub fn request_detail(c: &Connection, id: i64) -> rusqlite::Result<Option<RecentRow>> {
     let mut stmt = c.prepare(
         "SELECT id, timestamp_ms, folder, model, provider,
