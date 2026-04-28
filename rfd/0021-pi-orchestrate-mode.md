@@ -1,6 +1,6 @@
 # RFD 0021 — `pi --orchestrate` (built-in campaign mode)
 
-- **Status:** Discussion (v1.2)
+- **Status:** Discussion (v1.3 — Open Questions resolved)
 - **Author:** pi-rs maintainers (drafter: opus-4-7, thinking=high)
 - **Created:** 2026-04-29
 - **Implemented:** &lt;pending&gt;
@@ -12,7 +12,8 @@
 | v0.5    | 675f109  | Initial draft. Built-in `pi --orchestrate <campaign.toml>` subcommand. TOML schema, serial+DAG execution, fix-loop, override rules, resume/dry-run/status, persisted state at `~/.pi/orchestrate/<id>/`. 4 implementation milestones. |
 | v1.0    | 8ea4327  | Applied first critique pass (gpt-5.4 xhigh). Corrected primitives gap (`task` `isolated` flag is a no-op today; bundled-agent loading returns empty; `auto-approve` modes are `ask / auto-policy / auto-judge / yolo`; no repo-global branch-name guard; `pi-stats` has no per-session-id query surface). Split state machine (`MERGE_PENDING` separated from review verdict; `BLOCKED_ON_CONFLICT` / `BLOCKED_ON_REVIEW_STALE` as terminals). Tightened override rules (unmatched concern text = in-scope; `forward_to` only legal to `PENDING` milestones, validated up-front). Added serialised merge queue against parent-HEAD drift. Demoted `pi-orchestrate` from a new crate to a module under `pi-coding-agent`. Cost from session-JSONL `Usage` sums in v1, pi-stats integration deferred. Misc citation tightening. |
 | v1.1    | 9afd0b8  | Applied second critique pass (gpt-5.4 xhigh). Concretised the merge queue's "review snapshot" as the persisted tuple `(reviewed_branch_sha, reviewed_target_head_sha)`. Reformulated the validator rule as "`forward_to` MUST be a strict descendant of the source milestone in the dependency DAG" instead of an underspecified scheduler-theorem-prover. Added an **Operator recovery** subsection with concrete `--orchestrate-reset <milestone-id>` and `--orchestrate-re-review <milestone-id>` flows so `BLOCKED_ON_*` terminals are not dead-ends. Reworked the reviewer-parser contract into explicit structured-mode vs fallback-mode rules (heading + ≥1 bullet → structured; prose between bullets captured as implicit-in-scope chunks; missing heading or zero bullets → fallback full-redispatch). Picked **cherry-pick** as the single v1 merge primitive (matching the worktree reconciler). Demoted `PI_ORCHESTRATE_PARALLEL ≤ 4` from spec contract to implementation cap. Purged stale `CONFLICT_ABORT` references. Fixed the report's cost-source wording. Citation cleanup: `reconcile.rs` paths normalised to `crates/pi-coding-agent/src/native/worktree/reconcile.rs:124-163`. Added two tests (parser prose-between-bullets; forwarded-concern dedup on resume). |
-| v1.2    | (this)   | Applied third critique pass (gpt-5.4 xhigh). Internal consistency on the cherry-pick choice (purged the stray "fast-forwarded / cherry-picked" copy in the state-machine comment); M3 implementation-plan row now uses `BLOCKED_ON_CONFLICT` instead of "conflict-abort". Made `--orchestrate-re-review` semantics explicit when the milestone branch HEAD has changed since the blocked snapshot. Annotated the `/tmp/task-router-orchestrator-v2.txt` reference as historical local context, not a repo-stable artifact. Critique-pass cap reached. |
+| v1.2    | c7bfb83  | Applied third critique pass (gpt-5.4 xhigh). Internal consistency on the cherry-pick choice (purged the stray "fast-forwarded / cherry-picked" copy in the state-machine comment); M3 implementation-plan row now uses `BLOCKED_ON_CONFLICT` instead of "conflict-abort". Made `--orchestrate-re-review` semantics explicit when the milestone branch HEAD has changed since the blocked snapshot. Annotated the `/tmp/task-router-orchestrator-v2.txt` reference as historical local context, not a repo-stable artifact. Critique-pass cap reached. |
+| v1.3    | (this)   | Open Questions resolved by the maintainer (2026-04-28): TOML schema confirmed, reviewer stays as `.pi/agents/code-reviewer.md` subagent, `fix_loop_max` only ticks on in-scope concerns. Open Questions block replaced with a Decisions block; rest of the proposal unchanged. |
 
 ## Summary
 
@@ -140,32 +141,27 @@ is a thin coordinator on top of:
    `~/.pi/orchestrate/<id>/milestones/<id>/`. A pi-stats
    session-id query surface is deferred (Out of scope §v2).
 
-## Open Questions
+## Decisions resolved (v1.3)
 
-The drafter is forwarding these instead of guessing.
+The three v1.2 Open Questions were resolved by the maintainer
+on 2026-04-28; the drafter's recommendations stood.
 
-1. **Schema format: TOML vs YAML?** The RFD currently picks
-   **TOML** (justified in §Proposal). Tradeoffs: TOML matches
-   `Cargo.toml` / `pricing.json` ergonomics and pi-rs has zero
-   YAML deps today; YAML is what GitHub Actions /
-   Dagger-Python / Mergify use, so users may pattern-match
-   faster. Recommendation: **TOML** for v1, accept a
-   `--from-yaml` adapter in v2 if anyone files a request.
-2. **Reviewer-as-subagent vs reviewer-as-builtin?** Today
-   the reviewer is a Markdown subagent at
-   `.pi/agents/code-reviewer.md`. Alternative: bake reviewer
-   logic into Rust so the orchestrator depends on a stable
-   trait, not free-form Markdown that ships in skill-style.
-   Recommendation: **keep reviewer-as-subagent**; the
-   override-rule regex sits between "reviewer text output"
-   and the orchestrator and absorbs prompt drift. This is the
-   pattern that already worked twice.
-3. **Should `fix_loop_max` count reviewer rejections that the
-   override-rule absorbs as out-of-scope?** Recommendation:
-   **no**. Out-of-scope concerns become *forwarded* concerns
-   on the dependent milestone's assignment; the fix-loop
-   counter only ticks when a concern is "in-scope" (the
-   implementer must change the code under review).
+1. **Schema format: TOML.** Matches `Cargo.toml` /
+   `pricing.json` ergonomics and pi-rs has zero YAML deps
+   today. A `--from-yaml` adapter is a v2 follow-up if anyone
+   files a request.
+2. **Reviewer-as-subagent.** `.pi/agents/code-reviewer.md`
+   stays the source of reviewer behaviour; the override-rule
+   regex sits between "reviewer text output" and the
+   orchestrator and absorbs prompt drift. The pattern already
+   worked twice today (RFD 0019 and RFD 0020 v1.1).
+3. **`fix_loop_max` only ticks on in-scope concerns.**
+   Out-of-scope concerns become *forwarded* asks on the
+   dependent milestone's assignment; the counter advances only
+   when the implementer must change the code under review.
+
+These three decisions are load-bearing for §Proposal and
+§Implementation plan below — any deviation requires a v2 RFD.
 
 ## Research landscape
 
