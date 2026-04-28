@@ -48,7 +48,55 @@ fn main() -> anyhow::Result<()> {
         return cmd::run_evolve(verb);
     }
     if let Some(target) = &cli.flamegraph {
-        return cmd::run_flamegraph(target);
+        // RFD 0012: dispatch on --flamegraph-format. The HTML path
+        // delegates to cmd::run_flamegraph (unchanged); the JSON path
+        // builds a Trajectory in-place and prints it.
+        let format = cli
+            .flamegraph_format
+            .as_deref()
+            .and_then(pi_coding_agent::native::trajectory::flamegraph::Format::parse)
+            .unwrap_or(pi_coding_agent::native::trajectory::flamegraph::Format::Html);
+        match format {
+            pi_coding_agent::native::trajectory::flamegraph::Format::Html => {
+                return cmd::run_flamegraph(target);
+            }
+            pi_coding_agent::native::trajectory::flamegraph::Format::Json => {
+                use pi_agent_core::SessionEntry;
+                use pi_coding_agent::context::sessions_dir;
+                use pi_coding_agent::native::trajectory::flamegraph;
+                let path = if std::path::Path::new(target).is_file() {
+                    std::path::PathBuf::from(target)
+                } else {
+                    let cwd = std::env::current_dir()?;
+                    let slug = cwd.display().to_string().replace(['/', '\\', ':'], "_");
+                    let dir = sessions_dir().join(slug);
+                    let candidate = dir.join(format!("{target}.jsonl"));
+                    if !candidate.exists() {
+                        anyhow::bail!(
+                            "no session jsonl at {} (looked up id={} for cwd={})",
+                            candidate.display(),
+                            target,
+                            cwd.display()
+                        );
+                    }
+                    candidate
+                };
+                let txt = std::fs::read_to_string(&path)?;
+                let entries: Vec<SessionEntry> = txt
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .filter_map(|l| serde_json::from_str(l).ok())
+                    .collect();
+                let session_id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("session")
+                    .to_string();
+                let trajectory = flamegraph::build_trajectory(&session_id, &entries);
+                println!("{}", flamegraph::render_json(&trajectory));
+                return Ok(());
+            }
+        }
     }
     if let Some(target) = &cli.share {
         return cmd::run_share(target);

@@ -128,6 +128,16 @@ pub struct Cli {
     #[arg(long = "flamegraph", value_name = "SESSION_OR_PATH")]
     pub flamegraph: Option<String>,
 
+    /// Output format for `--flamegraph`: `html` (default; the self-
+    /// contained dark-mode page) or `json` (agent-readable trajectory
+    /// shape with per-turn blocks). RFD 0012.
+    #[arg(
+        long = "flamegraph-format",
+        value_name = "FORMAT",
+        value_parser = clap::builder::PossibleValuesParser::new(["html", "json"])
+    )]
+    pub flamegraph_format: Option<String>,
+
     /// Render a session as a self-contained HTML transcript and write
     /// it to `~/.pi/agent/shares/<id>.html` (path printed on stdout).
     #[arg(long = "share", value_name = "SESSION_OR_PATH")]
