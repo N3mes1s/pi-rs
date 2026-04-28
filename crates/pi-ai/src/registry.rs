@@ -235,6 +235,15 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
                     Some(0.025),
                     None,
                 ),
+                // gpt-5.4 dot-release (mid-2026). Same 400k/100k window and
+                // Chat-Completions endpoint as gpt-5; pricing tracks the gpt-5
+                // base rate at launch (RFD 0009 -> evolve when OpenAI publishes
+                // the rate card).
+                with_cache(
+                    m("openai", "gpt-5.4", Some("gpt-5.4"), 400_000, 100_000, true, true, 1.25, 10.0),
+                    Some(0.625),
+                    None,
+                ),
             ],
         },
         ProviderConfig {
