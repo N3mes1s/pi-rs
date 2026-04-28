@@ -1,9 +1,9 @@
 # RFD 0004 — `pi-stats` crate
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-27
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** 3074b8c
 
 ## Summary
 

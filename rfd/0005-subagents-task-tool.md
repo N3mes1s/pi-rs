@@ -1,9 +1,9 @@
 # RFD 0005 — Subagents and the `task` tool
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-27
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** e846b43
 
 ## Summary
 

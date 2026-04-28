@@ -1,9 +1,9 @@
 # RFD 0014 — Real tokenizer for `ContextLoad.tokens` (and Usage estimates)
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-28
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** e054d4a
 
 ## Summary
 

@@ -1,9 +1,9 @@
 # RFD 0010 — Differential cache pricing in `compute_cost`
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-28
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** 1c1fb41
 
 ## Summary
 

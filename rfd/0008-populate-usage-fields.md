@@ -1,9 +1,9 @@
 # RFD 0008 — Populate every `Usage` field on stream finish
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-27
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** 9e56356
 
 ## Summary
 

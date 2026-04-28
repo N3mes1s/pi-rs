@@ -35,15 +35,15 @@ crosses crate boundaries.
 | 0001 | LSP-on-write hook                                | Implemented |
 | 0002 | Tier-5 follow-ups                                | Draft      |
 | 0003 | Adaptive thinking (Opus 4.7+)                    | Implemented |
-| 0004 | `pi-stats` crate                                 | Discussion |
-| 0005 | Subagents and the `task` tool                    | Discussion |
-| 0006 | Worktree-isolated tasks                          | Discussion |
-| 0007 | Per-language LSP formatting options              | Discussion |
-| 0008 | Populate every `Usage` field on stream finish    | Discussion |
-| 0009 | Audit + calibrate the model pricing table        | Discussion |
-| 0010 | Differential cache pricing in `compute_cost`     | Discussion |
-| 0011 | Self-dogfood pi-rs (AGENTS.md + evolve + flamegraph) | Discussion |
-| 0012 | Trajectory judge context-awareness + flamegraph JSON | Discussion |
-| 0013 | Auto-apply the evolve daemon's AGENTS.md mutations | Discussion |
-| 0014 | Real tokenizer for `ContextLoad.tokens`           | Discussion |
-| 0015 | Replicate Usage population to OpenAI / Google / Bedrock | Discussion |
+| 0004 | `pi-stats` crate                                 | Implemented |
+| 0005 | Subagents and the `task` tool                    | Implemented |
+| 0006 | Worktree-isolated tasks                          | Implemented |
+| 0007 | Per-language LSP formatting options              | Implemented |
+| 0008 | Populate every `Usage` field on stream finish    | Implemented |
+| 0009 | Audit + calibrate the model pricing table        | Implemented |
+| 0010 | Differential cache pricing in `compute_cost`     | Implemented |
+| 0011 | Self-dogfood pi-rs (AGENTS.md + evolve + flamegraph) | Implemented |
+| 0012 | Trajectory judge context-awareness + flamegraph JSON | Implemented |
+| 0013 | Auto-apply the evolve daemon's AGENTS.md mutations | Implemented |
+| 0014 | Real tokenizer for `ContextLoad.tokens`           | Implemented |
+| 0015 | Replicate Usage population to OpenAI / Google / Bedrock | Implemented |

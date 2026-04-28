@@ -1,9 +1,9 @@
 # RFD 0013 — Auto-apply the evolve daemon's AGENTS.md mutations
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-28
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** 91cbe34
 
 ## Summary
 

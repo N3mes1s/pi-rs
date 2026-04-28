@@ -1,9 +1,9 @@
 # RFD 0007 — Per-language LSP formatting options
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-27
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** c008b44
 
 ## Summary
 

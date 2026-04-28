@@ -1,9 +1,9 @@
 # RFD 0011 — Self-dogfood pi-rs with AGENTS.md + evolve + flamegraph
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-28
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** aff4c7d
 
 ## Summary
 

@@ -1,9 +1,9 @@
 # RFD 0006 — Worktree-isolated tasks
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-27
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** f877620
 
 ## Summary
 

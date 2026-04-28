@@ -1,9 +1,9 @@
 # RFD 0012 — Trajectory judge context-awareness + agent-readable flamegraph
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-28
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** 1e4b092
 
 ## Summary
 

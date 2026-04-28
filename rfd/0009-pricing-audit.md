@@ -1,9 +1,9 @@
 # RFD 0009 — Audit + calibrate the model pricing table
 
-- **Status:** Discussion
+- **Status:** Implemented
 - **Author:** pi-rs maintainers
 - **Created:** 2026-04-28
-- **Implemented:** &lt;pending&gt;
+- **Implemented:** e0ea8f7
 
 ## Summary
 
