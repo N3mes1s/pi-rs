@@ -18,6 +18,8 @@ pub struct AnthropicProvider {
     pub client: Client,
 }
 
+pub use crate::cost::compute_cost;
+
 #[derive(Default, Clone, Copy)]
 pub struct UsageAcc {
     pub input_tokens: u64,
@@ -25,13 +27,6 @@ pub struct UsageAcc {
     pub cache_write_tok: u64,
     pub output_tokens: u64,
     pub reasoning_tok: u64,
-}
-
-pub fn compute_cost(model: &ModelInfo, u: &UsageAcc) -> f64 {
-    let in_tok = u.input_tokens + u.cache_read_tok + u.cache_write_tok;
-    let out_tok = u.output_tokens + u.reasoning_tok;
-    (in_tok as f64 / 1_000_000.0) * model.input_cost_per_mtok
-        + (out_tok as f64 / 1_000_000.0) * model.output_cost_per_mtok
 }
 
 impl AnthropicProvider {

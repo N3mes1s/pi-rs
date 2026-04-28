@@ -28,6 +28,8 @@ fn model() -> ModelInfo {
         supports_vision: false,
         input_cost_per_mtok: 0.0,
         output_cost_per_mtok: 0.0,
+        cache_read_cost_per_mtok: None,
+        cache_write_cost_per_mtok: None,
     }
 }
 
@@ -122,6 +124,8 @@ async fn anthropic_stream_populates_every_usage_field_with_real_cost() {
         supports_vision: true,
         input_cost_per_mtok: 15.0,
         output_cost_per_mtok: 75.0,
+        cache_read_cost_per_mtok: None,
+        cache_write_cost_per_mtok: None,
     };
 
     let provider = AnthropicProvider::new(

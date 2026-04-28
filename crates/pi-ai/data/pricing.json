@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "audited_at": "2026-04-28T00:00:00Z",
   "default_provider": "parallel",
   "rows": [
@@ -8,6 +8,8 @@
       "model": "claude-opus-4-7",
       "input_cost_per_mtok": 5.0,
       "output_cost_per_mtok": 25.0,
+      "cache_read_cost_per_mtok": 0.50,
+      "cache_write_cost_per_mtok": 6.25,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -20,6 +22,8 @@
       "model": "claude-sonnet-4-6",
       "input_cost_per_mtok": 3.0,
       "output_cost_per_mtok": 15.0,
+      "cache_read_cost_per_mtok": 0.30,
+      "cache_write_cost_per_mtok": 3.75,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -32,6 +36,8 @@
       "model": "claude-haiku-4-5-20251001",
       "input_cost_per_mtok": 1.0,
       "output_cost_per_mtok": 5.0,
+      "cache_read_cost_per_mtok": 0.10,
+      "cache_write_cost_per_mtok": 1.25,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -44,6 +50,7 @@
       "model": "gpt-4o",
       "input_cost_per_mtok": 2.5,
       "output_cost_per_mtok": 10.0,
+      "cache_read_cost_per_mtok": 1.25,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -56,6 +63,7 @@
       "model": "gpt-4o-mini",
       "input_cost_per_mtok": 0.15,
       "output_cost_per_mtok": 0.60,
+      "cache_read_cost_per_mtok": 0.075,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -68,6 +76,7 @@
       "model": "o1",
       "input_cost_per_mtok": 15.0,
       "output_cost_per_mtok": 60.0,
+      "cache_read_cost_per_mtok": 7.5,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -104,6 +113,7 @@
       "model": "o3",
       "input_cost_per_mtok": 2.0,
       "output_cost_per_mtok": 8.0,
+      "cache_read_cost_per_mtok": 1.0,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -126,6 +136,7 @@
       "model": "o4-mini",
       "input_cost_per_mtok": 1.10,
       "output_cost_per_mtok": 4.40,
+      "cache_read_cost_per_mtok": 0.55,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -138,6 +149,7 @@
       "model": "gpt-5",
       "input_cost_per_mtok": 1.25,
       "output_cost_per_mtok": 10.0,
+      "cache_read_cost_per_mtok": 0.625,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -149,6 +161,7 @@
       "model": "gpt-5-mini",
       "input_cost_per_mtok": 0.25,
       "output_cost_per_mtok": 2.0,
+      "cache_read_cost_per_mtok": 0.125,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -160,6 +173,7 @@
       "model": "gpt-5-nano",
       "input_cost_per_mtok": 0.05,
       "output_cost_per_mtok": 0.40,
+      "cache_read_cost_per_mtok": 0.025,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -171,6 +185,7 @@
       "model": "gemini-2.5-pro",
       "input_cost_per_mtok": 1.25,
       "output_cost_per_mtok": 10.0,
+      "cache_read_cost_per_mtok": 0.3125,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -183,6 +198,7 @@
       "model": "gemini-2.5-flash",
       "input_cost_per_mtok": 0.30,
       "output_cost_per_mtok": 2.50,
+      "cache_read_cost_per_mtok": 0.075,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -228,6 +244,8 @@
       "model": "anthropic.claude-opus-4-7",
       "input_cost_per_mtok": 5.0,
       "output_cost_per_mtok": 25.0,
+      "cache_read_cost_per_mtok": 0.50,
+      "cache_write_cost_per_mtok": 6.25,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -240,6 +258,8 @@
       "model": "anthropic.claude-sonnet-4-6",
       "input_cost_per_mtok": 3.0,
       "output_cost_per_mtok": 15.0,
+      "cache_read_cost_per_mtok": 0.30,
+      "cache_write_cost_per_mtok": 3.75,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
@@ -251,6 +271,8 @@
       "model": "anthropic.claude-haiku-4-5",
       "input_cost_per_mtok": 1.0,
       "output_cost_per_mtok": 5.0,
+      "cache_read_cost_per_mtok": 0.10,
+      "cache_write_cost_per_mtok": 1.25,
       "verified": "confirmed",
       "verified_at": "2026-04-28",
       "sources": [
