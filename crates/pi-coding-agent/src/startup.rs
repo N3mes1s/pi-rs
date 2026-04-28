@@ -1,8 +1,8 @@
-use pi_ai::{AuthStorage, ModelRegistry};
 use pi_agent_core::{
-    discover_context_files, default_system_prompt, ContextFile, RuntimeConfig, SessionManager,
+    default_system_prompt, discover_context_files, ContextFile, RuntimeConfig, SessionManager,
     Settings,
 };
+use pi_ai::{AuthStorage, ModelRegistry};
 use pi_tools::ToolRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,6 +54,7 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
             "low" => pi_agent_core::settings::ThinkingSetting::Low,
             "medium" => pi_agent_core::settings::ThinkingSetting::Medium,
             "high" => pi_agent_core::settings::ThinkingSetting::High,
+            "xhigh" => pi_agent_core::settings::ThinkingSetting::XHigh,
             _ => pi_agent_core::settings::ThinkingSetting::Off,
         };
     }
@@ -120,12 +121,16 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     // surface the events to the model.)
     let monitor_pump = std::sync::Arc::new(crate::native::monitor::MonitorPump::new());
     let (monitor_tx, monitor_rx) = tokio::sync::mpsc::unbounded_channel();
-    if !settings.no_tools && (settings.tools.is_empty() || settings.tools.iter().any(|t| t == "monitor")) {
+    if !settings.no_tools
+        && (settings.tools.is_empty() || settings.tools.iter().any(|t| t == "monitor"))
+    {
         let mcfg = pi_tools::monitor::MonitorConfig {
             max_concurrent: settings.monitor.max_concurrent,
             batch_window: std::time::Duration::from_millis(settings.monitor.batch_window_ms),
             volume_cap_lines: settings.monitor.volume_cap_lines,
-            volume_cap_window: std::time::Duration::from_millis(settings.monitor.volume_cap_window_ms),
+            volume_cap_window: std::time::Duration::from_millis(
+                settings.monitor.volume_cap_window_ms,
+            ),
             default_timeout: std::time::Duration::from_millis(settings.monitor.default_timeout_ms),
             max_timeout: std::time::Duration::from_millis(settings.monitor.max_timeout_ms),
         };
@@ -184,7 +189,8 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     let session_manager = if cli.no_session {
         SessionManager::in_memory()
     } else {
-        SessionManager::on_disk(session_dir, cwd.clone()).unwrap_or_else(|_| SessionManager::in_memory())
+        SessionManager::on_disk(session_dir, cwd.clone())
+            .unwrap_or_else(|_| SessionManager::in_memory())
     };
 
     // 9. prompts (global + project + packages).
@@ -208,10 +214,8 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     // formatSkillsForPrompt).
     {
         let names = skills.names();
-        let resolved: Vec<&crate::skills::Skill> = names
-            .iter()
-            .filter_map(|n| skills.get(n))
-            .collect();
+        let resolved: Vec<&crate::skills::Skill> =
+            names.iter().filter_map(|n| skills.get(n)).collect();
         system.push_str(&crate::skills::format_skills_for_prompt(&resolved));
     }
 
@@ -289,18 +293,14 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         // agent can call the `status` op and see "no servers running"
         // when LSP is disabled.
         let lsp_cfg = crate::native::lsp::LspConfig::from(&settings.lsp);
-        tools.register(Arc::new(crate::native::lsp::LspTool::new(
-            lsp_cfg.clone(),
-        )));
+        tools.register(Arc::new(crate::native::lsp::LspTool::new(lsp_cfg.clone())));
         // RFD 0001: when LSP is enabled, swap the bare `write` tool
         // for the wrapper that fires `format_on_write` and
         // `diagnostics_on_write` after every successful write. The
         // wrapper registers under the same name so the registry's
         // BTreeMap insert overrides the entry left by `with_extras()`.
         if lsp_cfg.enabled {
-            tools.register(Arc::new(crate::native::lsp::LspWriteTool::new(
-                lsp_cfg,
-            )));
+            tools.register(Arc::new(crate::native::lsp::LspWriteTool::new(lsp_cfg)));
         }
     }
 
@@ -403,18 +403,23 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
             None
         } else {
             let arc_rs = std::sync::Arc::new(rs);
-            Some(std::sync::Arc::new(crate::native::ttsr::TtsrInterceptor::new(arc_rs))
-                as std::sync::Arc<dyn pi_agent_core::StreamInterceptor>)
+            Some(
+                std::sync::Arc::new(crate::native::ttsr::TtsrInterceptor::new(arc_rs))
+                    as std::sync::Arc<dyn pi_agent_core::StreamInterceptor>,
+            )
         };
         // Chain TTSR + monitor pump. If both are present, the chained
         // interceptor calls them in order on each delta and returns
         // the first non-Continue action.
         match ttsr {
-            None => Some(monitor_pump.clone() as std::sync::Arc<dyn pi_agent_core::StreamInterceptor>),
+            None => {
+                Some(monitor_pump.clone() as std::sync::Arc<dyn pi_agent_core::StreamInterceptor>)
+            }
             Some(t) => Some(std::sync::Arc::new(ChainedInterceptor {
                 a: t,
                 b: monitor_pump.clone(),
-            }) as std::sync::Arc<dyn pi_agent_core::StreamInterceptor>),
+            })
+                as std::sync::Arc<dyn pi_agent_core::StreamInterceptor>),
         }
     };
 
@@ -461,7 +466,8 @@ impl pi_agent_core::StreamInterceptor for ChainedInterceptor {
         self.b.turn_start().await;
     }
     async fn on_text_delta(&self, text: &str) -> pi_agent_core::InterceptAction {
-        if let pi_agent_core::InterceptAction::AbortAndInject(s) = self.a.on_text_delta(text).await {
+        if let pi_agent_core::InterceptAction::AbortAndInject(s) = self.a.on_text_delta(text).await
+        {
             return pi_agent_core::InterceptAction::AbortAndInject(s);
         }
         self.b.on_text_delta(text).await

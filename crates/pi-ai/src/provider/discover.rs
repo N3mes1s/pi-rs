@@ -32,6 +32,7 @@ fn make_info(provider: &str, id: &str, ctx: u32, out: u32) -> ModelInfo {
         alias: None,
         context_window: ctx,
         max_output_tokens: out,
+        tier: 1,
         supports_thinking: false,
         supports_tools: true,
         supports_vision: false,
@@ -171,8 +172,10 @@ pub async fn google(
                 .get("supportedGenerationMethods")
                 .and_then(|v| v.as_array())
                 .map(|a| {
-                    a.iter()
-                        .any(|s| s.as_str() == Some("generateContent") || s.as_str() == Some("streamGenerateContent"))
+                    a.iter().any(|s| {
+                        s.as_str() == Some("generateContent")
+                            || s.as_str() == Some("streamGenerateContent")
+                    })
                 })
                 .unwrap_or(true);
             if !supports_gen {

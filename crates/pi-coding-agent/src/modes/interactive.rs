@@ -20,13 +20,13 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::extensions;
 use crate::keymap::{chord_from_event, Action, Chord, ChordCode, Keymap};
 use crate::modes::build_session;
 use crate::picker::{PickItem, Picker};
 use crate::renderer::Transcript;
 use crate::slash::{self, SlashKind, SlashRegistry};
 use crate::startup::Startup;
-use crate::extensions;
 
 /// Entry point. Picks raw-TUI or line-based depending on TTY state.
 pub async fn run(startup: Startup) -> anyhow::Result<()> {
@@ -208,10 +208,15 @@ pub enum KeyOutcome {
     },
     /// The `@`-filename completion picker resolved: replace the `@<query>`
     /// token with the chosen path.
-    AtComplete { picked: String },
+    AtComplete {
+        picked: String,
+    },
     /// User typed `!command` (silent=false) or `!!command` (silent=true) and
     /// pressed Enter. The outer loop should run `command` via a shell.
-    Bang { command: String, silent: bool },
+    Bang {
+        command: String,
+        silent: bool,
+    },
 }
 
 /// Pure key handler — no I/O. Returns what the outer loop must drive.
@@ -550,7 +555,10 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
         (KeyCode::Home, _) => {
             // Go to start of current visual line.
             let cur = view.editor.cursor;
-            let line_start = view.editor.text[..cur].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let line_start = view.editor.text[..cur]
+                .rfind('\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
             view.editor.cursor = line_start;
         }
         (KeyCode::End, _) => {
@@ -739,7 +747,11 @@ fn build_frame(
             )],
         });
         for (i, (_score, item)) in overlay.picker.ranked().iter().enumerate() {
-            let prefix = if i == overlay.picker.selected { "▸ " } else { "  " };
+            let prefix = if i == overlay.picker.selected {
+                "▸ "
+            } else {
+                "  "
+            };
             frame.lines.push(Line {
                 spans: vec![Span::coloured(
                     format!("{}{}", prefix, item.label),
@@ -783,13 +795,9 @@ fn build_frame(
 
     // Footer (powerline-style: model ▶ cwd ▶ git ▶ usage ▶ ctx).
     let git = view.git_status_cache.get(cwd);
-    let mut footer = view.transcript.footer_powerline(
-        theme,
-        model,
-        cwd,
-        git.as_ref(),
-        view.context_window,
-    );
+    let mut footer =
+        view.transcript
+            .footer_powerline(theme, model, cwd, git.as_ref(), view.context_window);
     if view.scoped_models {
         // Highlight that model changes will only apply to the next message.
         footer.spans.push(Span::coloured(
@@ -1172,7 +1180,10 @@ fn run_external_editor(initial: &str) -> Option<String> {
     let mut path = std::env::temp_dir();
     path.push(format!("pi-edit-{}.txt", std::process::id()));
     std::fs::write(&path, initial).ok()?;
-    let status = std::process::Command::new(&editor).arg(&path).status().ok()?;
+    let status = std::process::Command::new(&editor)
+        .arg(&path)
+        .status()
+        .ok()?;
     if !status.success() {
         let _ = std::fs::remove_file(&path);
         return None;
@@ -1189,10 +1200,7 @@ async fn run_bang_command(command: &str) -> String {
     use tokio::process::Command;
     let result = tokio::time::timeout(
         Duration::from_secs(30),
-        Command::new("bash")
-            .arg("-lc")
-            .arg(command)
-            .output(),
+        Command::new("bash").arg("-lc").arg(command).output(),
     )
     .await;
     match result {
@@ -1437,13 +1445,19 @@ async fn handle_slash(
             let mgr = startup.runtime_config.session_manager.clone();
             let branch = mgr.current_branch(session.id());
             let meta = mgr.meta(session.id());
-            let (provider, model) = meta
-                .map(|m| (m.provider, m.model))
-                .unwrap_or_else(|| (startup.settings.provider.clone(), startup.settings.model.clone()));
+            let (provider, model) = meta.map(|m| (m.provider, m.model)).unwrap_or_else(|| {
+                (
+                    startup.settings.provider.clone(),
+                    startup.settings.model.clone(),
+                )
+            });
             let html = crate::share::render_session_html(&branch, session.id(), &provider, &model);
             // Write to a temp file and report the path.
             let mut path = std::env::temp_dir();
-            path.push(format!("pi-export-{}.html", session.id().chars().take(8).collect::<String>()));
+            path.push(format!(
+                "pi-export-{}.html",
+                session.id().chars().take(8).collect::<String>()
+            ));
             match std::fs::write(&path, html) {
                 Ok(()) => view
                     .transcript
@@ -1469,20 +1483,26 @@ async fn handle_slash(
             let mgr = startup.runtime_config.session_manager.clone();
             let branch = mgr.current_branch(session.id());
             let meta = mgr.meta(session.id());
-            let (provider, model) = meta
-                .map(|m| (m.provider, m.model))
-                .unwrap_or_else(|| (startup.settings.provider.clone(), startup.settings.model.clone()));
-            let html =
-                crate::share::render_session_html(&branch, session.id(), &provider, &model);
+            let (provider, model) = meta.map(|m| (m.provider, m.model)).unwrap_or_else(|| {
+                (
+                    startup.settings.provider.clone(),
+                    startup.settings.model.clone(),
+                )
+            });
+            let html = crate::share::render_session_html(&branch, session.id(), &provider, &model);
             let shares_dir = crate::context::agent_dir().join("shares");
             let res = std::fs::create_dir_all(&shares_dir).and_then(|_| {
                 let p = shares_dir.join(format!("{}.html", session.id()));
                 std::fs::write(&p, &html).map(|_| p)
             });
             match res {
-                Ok(path) => view.transcript.blocks.push(crate::renderer::Block::Note(
-                    format!("[shared: {}]", path.display()),
-                )),
+                Ok(path) => view
+                    .transcript
+                    .blocks
+                    .push(crate::renderer::Block::Note(format!(
+                        "[shared: {}]",
+                        path.display()
+                    ))),
                 Err(e) => view
                     .transcript
                     .blocks
@@ -1492,7 +1512,7 @@ async fn handle_slash(
         }
         "autoresearch" => {
             use crate::autoresearch::slash_helpers::{
-                parse_action, AutoresearchAction, clear_artefacts, export_dashboard,
+                clear_artefacts, export_dashboard, parse_action, AutoresearchAction,
             };
             let action = parse_action(args);
             match action {
@@ -1505,9 +1525,9 @@ async fn handle_slash(
                     // the protocol on its own. No hand-written prompt
                     // scaffolding here.
                     view.autoresearch_active = true;
-                    view.transcript
-                        .blocks
-                        .push(crate::renderer::Block::Note("autoresearch active".to_string()));
+                    view.transcript.blocks.push(crate::renderer::Block::Note(
+                        "autoresearch active".to_string(),
+                    ));
                     return SlashOutcome::Submit(format!("autoresearch: {text}"));
                 }
                 AutoresearchAction::Off => {
@@ -1532,20 +1552,27 @@ async fn handle_slash(
                                 .join(", ")
                         )
                     };
-                    view.transcript.blocks.push(crate::renderer::Block::Note(msg));
+                    view.transcript
+                        .blocks
+                        .push(crate::renderer::Block::Note(msg));
                 }
                 AutoresearchAction::Export => {
                     let cwd_path = &startup.runtime_config.cwd;
                     match export_dashboard(cwd_path) {
                         Ok(path) => {
-                            view.transcript.blocks.push(crate::renderer::Block::Note(
-                                format!("[autoresearch export: {}]", path.display()),
-                            ));
+                            view.transcript
+                                .blocks
+                                .push(crate::renderer::Block::Note(format!(
+                                    "[autoresearch export: {}]",
+                                    path.display()
+                                )));
                         }
                         Err(e) => {
-                            view.transcript.blocks.push(crate::renderer::Block::Error(
-                                format!("autoresearch export: {e}"),
-                            ));
+                            view.transcript
+                                .blocks
+                                .push(crate::renderer::Block::Error(format!(
+                                    "autoresearch export: {e}"
+                                )));
                         }
                     }
                 }
@@ -1667,11 +1694,9 @@ async fn handle_slash(
             let (field_name, field_value) = if let Some(idx) = encoded.find('\x00') {
                 (&encoded[..idx], &encoded[idx + 1..])
             } else {
-                view.transcript
-                    .blocks
-                    .push(crate::renderer::Block::Error(
-                        "settings: internal error (no field encoding)".into(),
-                    ));
+                view.transcript.blocks.push(crate::renderer::Block::Error(
+                    "settings: internal error (no field encoding)".into(),
+                ));
                 return SlashOutcome::Continue;
             };
             match crate::settings_ui::apply(&mut startup.settings, field_name, field_value) {
@@ -1704,7 +1729,9 @@ async fn handle_slash(
                         view.thinking = startup.settings.thinking;
                         let level: pi_ai::ThinkingLevel = startup.settings.thinking.into();
                         let s = session.clone();
-                        tokio::spawn(async move { s.set_thinking(level).await; });
+                        tokio::spawn(async move {
+                            s.set_thinking(level).await;
+                        });
                     }
                 }
                 Err(e) => {
@@ -1781,11 +1808,9 @@ async fn handle_slash(
                                         .push(crate::renderer::Block::Note(stdout));
                                 }
                                 Err(e) => {
-                                    view.transcript
-                                        .blocks
-                                        .push(crate::renderer::Block::Error(format!(
-                                            "extension command /{cname}: {e}"
-                                        )));
+                                    view.transcript.blocks.push(crate::renderer::Block::Error(
+                                        format!("extension command /{cname}: {e}"),
+                                    ));
                                 }
                             }
                         } else {
@@ -1880,7 +1905,11 @@ async fn run_line_based(mut startup: Startup) -> anyhow::Result<()> {
                 }
                 AgentEventKind::ToolResult { result } => {
                     let mut out = std::io::stdout();
-                    let color = if result.is_error { Color::Red } else { Color::DarkGrey };
+                    let color = if result.is_error {
+                        Color::Red
+                    } else {
+                        Color::DarkGrey
+                    };
                     let _ = execute!(out, SetForegroundColor(color));
                     for line in result.model_output.lines().take(20) {
                         let _ = writeln!(out, "  {line}");
@@ -1949,7 +1978,10 @@ async fn run_line_based(mut startup: Startup) -> anyhow::Result<()> {
         }
         // Bang command detection: `!cmd` or `!!cmd`.
         if let Some(EditorEvent::BangCommand { command, silent }) = {
-            let tmp_editor = Editor { text: trimmed.to_string(), cursor: trimmed.len() };
+            let tmp_editor = Editor {
+                text: trimmed.to_string(),
+                cursor: trimmed.len(),
+            };
             tmp_editor.special_command()
         } {
             let output = run_bang_command(&command).await;
@@ -2450,12 +2482,17 @@ mod tests {
             cycle_thinking(ThinkingSetting::Medium),
             ThinkingSetting::High
         );
-        assert_eq!(cycle_thinking(ThinkingSetting::High), ThinkingSetting::Off);
+        assert_eq!(
+            cycle_thinking(ThinkingSetting::High),
+            ThinkingSetting::XHigh
+        );
+        assert_eq!(cycle_thinking(ThinkingSetting::XHigh), ThinkingSetting::Off);
         // Label helper covers the same arms.
         assert_eq!(thinking_label(ThinkingSetting::Off), "off");
         assert_eq!(thinking_label(ThinkingSetting::Low), "low");
         assert_eq!(thinking_label(ThinkingSetting::Medium), "medium");
         assert_eq!(thinking_label(ThinkingSetting::High), "high");
+        assert_eq!(thinking_label(ThinkingSetting::XHigh), "xhigh");
     }
 
     #[test]
@@ -2728,7 +2765,11 @@ mod tests {
         let mut v = fresh_view();
         v.turn_in_progress = true;
         let mut current = "anthropic/sonnet".to_string();
-        ingest_event(&mut v, &agent_event(AgentEventKind::TurnComplete), &mut current);
+        ingest_event(
+            &mut v,
+            &agent_event(AgentEventKind::TurnComplete),
+            &mut current,
+        );
         assert!(!v.turn_in_progress);
     }
 
@@ -2748,7 +2789,11 @@ mod tests {
         v.scoped_previous_model = Some("openai/gpt-4o".into());
         v.turn_in_progress = true;
         let mut current = "anthropic/haiku".to_string();
-        ingest_event(&mut v, &agent_event(AgentEventKind::TurnComplete), &mut current);
+        ingest_event(
+            &mut v,
+            &agent_event(AgentEventKind::TurnComplete),
+            &mut current,
+        );
         assert_eq!(current, "openai/gpt-4o");
         assert_eq!(v.transcript.model_label, "openai/gpt-4o");
         assert!(v.scoped_previous_model.is_none());
@@ -2951,7 +2996,10 @@ mod tests {
     fn ctrl_shift_t_cycles_dashboard_mode_inline_to_expanded_to_hidden() {
         let mut v = fresh_view();
         // lowercase 't' with CONTROL+SHIFT — common terminal mapping.
-        let chord = ke(KeyCode::Char('t'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        let chord = ke(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
         let _ = handle_key(&mut v, &chord);
         assert_eq!(v.dashboard_mode, DashboardMode::Expanded);
         let _ = handle_key(&mut v, &chord);
@@ -2964,7 +3012,10 @@ mod tests {
     fn ctrl_shift_t_uppercase_variant_also_cycles() {
         let mut v = fresh_view();
         // Some terminals deliver Ctrl+Shift+T as KeyCode::Char('T') instead.
-        let chord = ke(KeyCode::Char('T'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        let chord = ke(
+            KeyCode::Char('T'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
         let _ = handle_key(&mut v, &chord);
         assert_eq!(v.dashboard_mode, DashboardMode::Expanded);
     }
@@ -2980,8 +3031,8 @@ mod tests {
 
     #[test]
     fn build_frame_includes_inline_dashboard_when_snapshot_present() {
-        use crate::autoresearch::dashboard::DashboardState;
         use crate::autoresearch::confidence::{ConfidenceBand, ConfidenceScore};
+        use crate::autoresearch::dashboard::DashboardState;
         use crate::autoresearch::session::MetricDirection;
         let mut v = fresh_view();
         v.dashboard_snapshot = Some(DashboardSnapshot {
@@ -2998,24 +3049,37 @@ mod tests {
                     band: ConfidenceBand::Green,
                 },
             },
-            runs: vec![("baseline".into(), 100.0, true), ("delta".into(), 80.0, true)],
+            runs: vec![
+                ("baseline".into(), 100.0, true),
+                ("delta".into(), 80.0, true),
+            ],
         });
         let theme = pi_tui::ThemeRegistry::new().get("dark").cloned().unwrap();
-        let frame = build_frame(&v, &theme, 80, 24, "openai/gpt-4o", std::path::Path::new("/tmp"));
+        let frame = build_frame(
+            &v,
+            &theme,
+            80,
+            24,
+            "openai/gpt-4o",
+            std::path::Path::new("/tmp"),
+        );
         let dump = frame
             .lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
             .collect::<Vec<_>>()
             .join("");
-        assert!(dump.contains("autoresearch"), "missing autoresearch line: {dump}");
+        assert!(
+            dump.contains("autoresearch"),
+            "missing autoresearch line: {dump}"
+        );
         assert!(dump.contains("3 runs"));
     }
 
     #[test]
     fn build_frame_omits_dashboard_when_hidden() {
-        use crate::autoresearch::dashboard::DashboardState;
         use crate::autoresearch::confidence::{ConfidenceBand, ConfidenceScore};
+        use crate::autoresearch::dashboard::DashboardState;
         use crate::autoresearch::session::MetricDirection;
         let mut v = fresh_view();
         v.dashboard_mode = DashboardMode::Hidden;
@@ -3105,8 +3169,8 @@ mod tests {
 
     #[test]
     fn refresh_dashboard_clears_snapshot_when_no_session() {
-        use crate::autoresearch::dashboard::DashboardState;
         use crate::autoresearch::confidence::{ConfidenceBand, ConfidenceScore};
+        use crate::autoresearch::dashboard::DashboardState;
         use crate::autoresearch::session::MetricDirection;
         let dir = tempfile::tempdir().expect("tempdir");
         let mut v = fresh_view();

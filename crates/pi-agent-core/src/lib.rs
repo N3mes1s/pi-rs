@@ -3,6 +3,7 @@
 pub mod compaction;
 pub mod context;
 pub mod event;
+pub mod router;
 pub mod runtime;
 pub mod session;
 pub mod settings;
