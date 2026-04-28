@@ -27,18 +27,38 @@ fn thinking_block_serialises_with_signature() {
 }
 
 #[test]
-fn thinking_block_serialises_without_signature_as_null() {
+fn thinking_block_with_no_signature_is_dropped_from_request_body() {
+    // Anthropic rejects {"signature": null} with
+    // `messages.*.content.*.thinking.signature.str: Input should be a
+    // valid string`. content_blocks_to_anthropic must therefore skip
+    // any thinking block whose signature it never captured (replayed
+    // sessions, synthesised content, anything that didn't go through a
+    // fresh signature_delta event). The text + tool blocks around it
+    // still serialise; only the unsigned thinking is dropped.
+    let blocks = vec![
+        ContentBlock::Thinking {
+            text: "raw".into(),
+            signature: None,
+        },
+        ContentBlock::Text { text: "hello".into() },
+    ];
+    let v = content_blocks_to_anthropic(&blocks);
+    assert_eq!(v, json!([{"type": "text", "text": "hello"}]));
+}
+
+#[test]
+fn thinking_block_with_signature_round_trips_to_anthropic_format() {
     let blocks = vec![ContentBlock::Thinking {
-        text: "raw".into(),
-        signature: None,
+        text: "signed reasoning".into(),
+        signature: Some("OPAQUE_SIG".into()),
     }];
     let v = content_blocks_to_anthropic(&blocks);
     assert_eq!(
         v,
         json!([{
             "type": "thinking",
-            "thinking": "raw",
-            "signature": serde_json::Value::Null,
+            "thinking": "signed reasoning",
+            "signature": "OPAQUE_SIG",
         }])
     );
 }

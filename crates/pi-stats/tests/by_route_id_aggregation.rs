@@ -154,3 +154,68 @@ fn by_route_id_aggregates_same_route_across_distinct_sessions() {
     assert_eq!(s.sessions, 3);
     assert_eq!(s.avg_budget_tokens, None);
 }
+
+#[test]
+fn by_route_id_one_session_multiple_routes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sessions = tmp.path().join("sessions");
+    let cwd_dir = sessions.join("_work_proj");
+    fs::create_dir_all(&cwd_dir).unwrap();
+
+    // Session with 4 routing decisions: 2 on "fast", 1 on "default", 1 on "hard" (no budget)
+    let path = cwd_dir.join("single.jsonl");
+    {
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(line(&meta("m_single", 1_700_000_000_000)).as_bytes()).unwrap();
+        f.write_all(line(&route("r1", 1_700_000_000_100, "fast", None)).as_bytes()).unwrap();
+        f.write_all(line(&route("r2", 1_700_000_000_200, "fast", None)).as_bytes()).unwrap();
+        f.write_all(line(&route("r3", 1_700_000_000_300, "default", None)).as_bytes()).unwrap();
+        f.write_all(line(&route("r4", 1_700_000_000_400, "hard", None)).as_bytes()).unwrap();
+    }
+
+    let mut conn = open_in_memory().unwrap();
+    ingest::sync_all(&mut conn, &sessions).unwrap();
+
+    let mut stats = aggregate::by_route_id(&conn).unwrap();
+    stats.sort_by(|a, b| a.route_id.cmp(&b.route_id));
+    assert_eq!(stats.len(), 3, "expected 3 route groups, got {stats:?}");
+
+    for s in &stats {
+        assert_eq!(
+            s.sessions, 1,
+            "each group should report sessions=1: {s:?}"
+        );
+    }
+}
+
+#[test]
+fn by_route_id_three_sessions_same_route_default() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sessions = tmp.path().join("sessions");
+    let cwd_dir = sessions.join("_work_proj");
+    fs::create_dir_all(&cwd_dir).unwrap();
+
+    // 3 distinct sessions, each with 5 routing decisions on "default"
+    for (sess_idx, file_name) in ["sess1.jsonl", "sess2.jsonl", "sess3.jsonl"].iter().enumerate() {
+        let path = cwd_dir.join(file_name);
+        let mut f = fs::File::create(&path).unwrap();
+        let base_ts = 1_700_000_000_000_i64 + (sess_idx as i64) * 10_000;
+        f.write_all(line(&meta(&format!("m_sess{}", sess_idx), base_ts)).as_bytes()).unwrap();
+        for j in 0..5 {
+            let id = format!("r{sess_idx}_{j}");
+            let ts = base_ts + 100 + (j as i64) * 10;
+            f.write_all(line(&route(&id, ts, "default", None)).as_bytes()).unwrap();
+        }
+    }
+
+    let mut conn = open_in_memory().unwrap();
+    ingest::sync_all(&mut conn, &sessions).unwrap();
+
+    let stats = aggregate::by_route_id(&conn).unwrap();
+    assert_eq!(stats.len(), 1, "expected 1 route group, got {stats:?}");
+    let s = &stats[0];
+    assert_eq!(s.route_id, "default");
+    assert_eq!(s.decisions, 15);
+    assert_eq!(s.sessions, 3);
+    assert_eq!(s.avg_budget_tokens, None);
+}

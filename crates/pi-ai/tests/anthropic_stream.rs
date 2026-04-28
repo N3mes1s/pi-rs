@@ -31,6 +31,7 @@ fn model() -> ModelInfo {
         cache_read_cost_per_mtok: None,
         cache_write_cost_per_mtok: None,
         api_kind: Default::default(),
+        tier: 1,
     }
 }
 
@@ -128,6 +129,7 @@ async fn anthropic_stream_populates_every_usage_field_with_real_cost() {
         cache_read_cost_per_mtok: None,
         cache_write_cost_per_mtok: None,
         api_kind: Default::default(),
+        tier: 3,
     };
 
     let provider = AnthropicProvider::new(

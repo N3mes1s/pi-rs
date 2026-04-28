@@ -11,6 +11,13 @@ pub enum StreamEventKind {
     TextDelta { text: String },
     /// A delta of reasoning text.
     ThinkingDelta { text: String },
+    /// Signature for the just-completed thinking block. Anthropic emits
+    /// these in `signature_delta` events; the signature must be passed
+    /// back verbatim on the next turn or the API rejects the request
+    /// with `messages.*.content.*.thinking.signature.str: Input should
+    /// be a valid string`. Stream consumers attach the signature to the
+    /// resulting `ContentBlock::Thinking`.
+    ThinkingSignature { signature: String },
     /// A tool call has started; partial input may follow as JSON deltas.
     ToolCallStart { id: String, name: String },
     /// JSON-string fragment of tool call input (Anthropic-style).

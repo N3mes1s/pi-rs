@@ -82,6 +82,18 @@ pub(super) fn handle_anthropic_event(
                         .to_string();
                     Some(StreamEventKind::ThinkingDelta { text: t })
                 }
+                Some("signature_delta") => {
+                    let signature = delta
+                        .get("signature")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if signature.is_empty() {
+                        None
+                    } else {
+                        Some(StreamEventKind::ThinkingSignature { signature })
+                    }
+                }
                 Some("input_json_delta") => {
                     let partial = delta
                         .get("partial_json")

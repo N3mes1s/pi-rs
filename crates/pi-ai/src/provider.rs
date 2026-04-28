@@ -62,10 +62,12 @@ pub trait Provider: Send + Sync {
         let mut finish = FinishReason::Stop;
         use crate::stream::StreamEventKind as K;
         use futures::StreamExt;
+        let mut thinking_signature: Option<String> = None;
         while let Some(ev) = stream.next().await {
             match ev?.kind {
                 K::TextDelta { text: t } => text.push_str(&t),
                 K::ThinkingDelta { text: t } => thinking.push_str(&t),
+                K::ThinkingSignature { signature } => thinking_signature = Some(signature),
                 K::ToolCallComplete { id, name, input } => {
                     tool_calls.push(ToolCall { id, name, input })
                 }
@@ -79,7 +81,7 @@ pub trait Provider: Send + Sync {
         if !thinking.is_empty() {
             content.push(crate::message::ContentBlock::Thinking {
                 text: thinking,
-                signature: None,
+                signature: thinking_signature,
             });
         }
         if !text.is_empty() {

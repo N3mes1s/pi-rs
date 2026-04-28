@@ -57,11 +57,25 @@ pub fn content_blocks_to_anthropic(blocks: &[ContentBlock]) -> Value {
     for b in blocks {
         match b {
             ContentBlock::Text { text } => out.push(json!({"type": "text", "text": text})),
-            ContentBlock::Thinking { text, signature } => out.push(json!({
-                "type": "thinking",
-                "thinking": text,
-                "signature": signature,
-            })),
+            ContentBlock::Thinking { text, signature } => {
+                // Anthropic rejects `thinking` blocks whose `signature`
+                // is null/missing with `messages.*.content.*.thinking
+                // .signature.str: Input should be a valid string`. The
+                // signature is only available when we received it from
+                // a fresh stream (signature_delta). For replayed
+                // sessions or any thinking we synthesised ourselves,
+                // skip the block entirely — the upstream model has not
+                // signed it, so it isn't sendable. Local renderers
+                // (flamegraph, picker) still see it on disk; only the
+                // outgoing request drops it.
+                if let Some(sig) = signature {
+                    out.push(json!({
+                        "type": "thinking",
+                        "thinking": text,
+                        "signature": sig,
+                    }));
+                }
+            }
             ContentBlock::ToolUse { id, name, input } => out.push(json!({
                 "type": "tool_use",
                 "id": id,
