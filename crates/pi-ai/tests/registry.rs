@@ -103,6 +103,7 @@ fn install_adds_provider_retrievable_via_get() {
             output_cost_per_mtok: 0.0,
             cache_read_cost_per_mtok: None,
             cache_write_cost_per_mtok: None,
+        api_kind: Default::default(),
         }],
     };
     reg.install(cfg);

@@ -158,6 +158,18 @@
     },
     {
       "provider": "openai",
+      "model": "gpt-5.4",
+      "input_cost_per_mtok": 1.25,
+      "output_cost_per_mtok": 10.0,
+      "cache_read_cost_per_mtok": 0.625,
+      "verified": "inherited",
+      "verified_at": "2026-04-28",
+      "sources": [
+        "https://www.metacto.com/blogs/unlocking-the-true-cost-of-openai-api-a-deep-dive-into-usage-integration-and-maintenance"
+      ]
+    },
+    {
+      "provider": "openai",
       "model": "gpt-5-mini",
       "input_cost_per_mtok": 0.25,
       "output_cost_per_mtok": 2.0,

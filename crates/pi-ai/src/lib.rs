@@ -32,7 +32,7 @@ pub use provider::{
     AnthropicProvider, AzureOpenAiProvider, BedrockAnthropicProvider, GenerateRequest,
     GenerateResponse, GoogleProvider, OpenAiCompatProvider, OpenAiProvider, Provider, ProviderKind,
 };
-pub use registry::{ModelInfo, ModelRegistry, ProviderConfig};
+pub use registry::{ApiKind, ModelInfo, ModelRegistry, ProviderConfig};
 pub use stream::{StreamEvent, StreamEventKind};
 pub use tool::{ToolCall, ToolResult, ToolSpec};
 

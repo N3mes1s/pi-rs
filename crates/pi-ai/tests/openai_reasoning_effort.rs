@@ -36,6 +36,7 @@ fn thinking_model() -> ModelInfo {
         output_cost_per_mtok: 0.0,
         cache_read_cost_per_mtok: None,
         cache_write_cost_per_mtok: None,
+        api_kind: Default::default(),
     }
 }
 
@@ -53,6 +54,7 @@ fn non_thinking_model() -> ModelInfo {
         output_cost_per_mtok: 0.0,
         cache_read_cost_per_mtok: None,
         cache_write_cost_per_mtok: None,
+        api_kind: Default::default(),
     }
 }
 
