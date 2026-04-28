@@ -32,6 +32,196 @@ use std::path::{Path, PathBuf};
 use super::benchmark::BenchmarkSummary;
 use super::tick::evolve_dir;
 
+// ─── Margin gate (RFD 0013) ────────────────────────────────────────────
+
+/// Outcome of comparing a candidate's per-rollout score vector against
+/// the current AGENTS.md's score vector. Used by the orchestrator to
+/// decide whether to atomically swap AGENTS.md.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApplyDecision {
+    pub apply: bool,
+    pub reason: String,
+    pub current_mean: f32,
+    pub candidate_mean: f32,
+    pub margin: f32,
+}
+
+fn finite_mean(xs: &[f32]) -> f32 {
+    let mut sum = 0.0_f64;
+    let mut n = 0_u64;
+    for &x in xs {
+        if x.is_finite() {
+            sum += x as f64;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        f32::NAN
+    } else {
+        (sum / n as f64) as f32
+    }
+}
+
+/// Pure margin gate: candidate must beat current by at least `min_margin`.
+///
+/// Empty / all-NaN inputs produce a `NaN` mean and refuse the apply
+/// (so an evolve tick that produced no scores can never silently swap).
+pub fn decide(current: &[f32], candidate: &[f32], min_margin: f32) -> ApplyDecision {
+    let cur = finite_mean(current);
+    let cand = finite_mean(candidate);
+    let margin = cand - cur;
+    let apply = cur.is_finite() && cand.is_finite() && margin >= min_margin;
+    let reason = if !cur.is_finite() {
+        "current mean is undefined (no finite samples); declined".to_string()
+    } else if !cand.is_finite() {
+        "candidate mean is undefined (no finite samples); declined".to_string()
+    } else if apply {
+        format!("candidate mean {cand:.3} ≥ current {cur:.3} + margin {min_margin}")
+    } else {
+        format!("candidate mean {cand:.3} < current {cur:.3} + margin {min_margin}; declined")
+    };
+    ApplyDecision {
+        apply,
+        reason,
+        current_mean: cur,
+        candidate_mean: cand,
+        margin,
+    }
+}
+
+// ─── history.jsonl atomic apply (RFD 0013) ─────────────────────────────
+
+/// One row in `~/.pi/agent/evolve/history.jsonl`. Captures both apply
+/// and rollback events so the rollback watchdog can reconstruct the
+/// previous AGENTS.md body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoryEntry {
+    pub ts: String,
+    pub action: String,
+    pub from_hash: String,
+    pub to_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_mean: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_mean_estimate: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_mean: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    /// Inline copy of the AGENTS.md body that was replaced. Lets the
+    /// rollback watchdog restore without a separate backup file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_body: Option<String>,
+}
+
+/// Append one JSON line to `history_path`, creating parents as needed.
+pub fn append_history(history_path: &Path, entry: &HistoryEntry) -> io::Result<()> {
+    if let Some(parent) = history_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(history_path)?;
+    let line = serde_json::to_string(entry)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    f.write_all(line.as_bytes())?;
+    f.write_all(b"\n")?;
+    Ok(())
+}
+
+/// Read the entire history file (best effort). Malformed lines are
+/// skipped silently.
+pub fn read_history(history_path: &Path) -> Vec<HistoryEntry> {
+    let Ok(txt) = fs::read_to_string(history_path) else {
+        return Vec::new();
+    };
+    txt.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+fn body_hash(body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(body.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// Atomically swap `agents_md_path`'s contents to `new_body` and append
+/// a matching `apply` entry to `history_path`. Order:
+///
+/// 1. Write `new_body` to a sibling tempfile.
+/// 2. Append history entry (containing the previous body for rollback).
+/// 3. `fs::rename` tempfile → `agents_md_path` (atomic on the same FS).
+///
+/// If any step fails, AGENTS.md is left unchanged.
+pub fn commit(
+    agents_md_path: &Path,
+    new_body: &str,
+    history_path: &Path,
+    decision: &ApplyDecision,
+) -> io::Result<HistoryEntry> {
+    let prev_body = if agents_md_path.exists() {
+        fs::read_to_string(agents_md_path)?
+    } else {
+        String::new()
+    };
+    let from_hash = body_hash(&prev_body);
+    let to_hash = body_hash(new_body);
+
+    let parent = agents_md_path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "AGENTS.md path has no parent")
+    })?;
+    fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        ".AGENTS.md.evolve.tmp.{}",
+        std::process::id()
+    ));
+    // Step 1: stage new body next to the destination.
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(new_body.as_bytes())?;
+        f.sync_all()?;
+    }
+
+    let entry = HistoryEntry {
+        ts: Utc::now().to_rfc3339(),
+        action: "apply".to_string(),
+        from_hash: from_hash.clone(),
+        to_hash: to_hash.clone(),
+        pre_mean: Some(decision.current_mean),
+        post_mean_estimate: Some(decision.candidate_mean),
+        margin: Some(decision.margin),
+        observed_mean: None,
+        trigger: None,
+        prev_body: Some(prev_body),
+    };
+
+    // Step 2: log the intent before swapping. If this fails, drop tempfile.
+    if let Err(e) = append_history(history_path, &entry) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // Step 3: atomic swap.
+    if let Err(e) = fs::rename(&tmp, agents_md_path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    Ok(entry)
+}
+
+/// Default location of the cross-cwd evolve history.jsonl
+/// (under `pi_coding_agent::context::agent_dir()`).
+pub fn default_history_path() -> PathBuf {
+    crate::context::agent_dir().join("evolve").join("history.jsonl")
+}
+
 // ─── Pareto frontier ───────────────────────────────────────────────────
 
 /// One candidate in the population. The summary is what `pareto_frontier`
