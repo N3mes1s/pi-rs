@@ -328,6 +328,30 @@ fn parse_thinking(value: &str) -> ThinkingLevel {
     }
 }
 
+/// Parse a TALE-EP `<budget>N</budget>` tag out of `prompt` and return
+/// the numeric token budget. Telemetry-only — the runtime emits this on
+/// the `hard` route's `RoutingDecision` session entry but never gates
+/// the dispatch on it. Tag matching is forgiving: leading/trailing
+/// whitespace inside the tag is tolerated; the first valid tag wins.
+pub fn parse_tale_ep_budget(prompt: &str) -> Option<u64> {
+    const OPEN: &str = "<budget>";
+    const CLOSE: &str = "</budget>";
+    let mut cursor = 0;
+    while let Some(rel_open) = prompt[cursor..].find(OPEN) {
+        let open = cursor + rel_open + OPEN.len();
+        let Some(rel_close) = prompt[open..].find(CLOSE) else {
+            return None;
+        };
+        let close = open + rel_close;
+        let inner = prompt[open..close].trim();
+        if let Ok(n) = inner.parse::<u64>() {
+            return Some(n);
+        }
+        cursor = close + CLOSE.len();
+    }
+    None
+}
+
 fn router_input(prompt: &str, history: &[Message], tools: &[ToolSpec]) -> String {
     let mut out = prompt.trim().to_string();
     if !history.is_empty() {

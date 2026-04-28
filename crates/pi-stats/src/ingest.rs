@@ -115,6 +115,33 @@ fn ingest_one(conn: &Connection, path: &Path) -> anyhow::Result<u64> {
                     last_assistant = None;
                 }
             }
+            SessionEntryKind::RoutingDecision {
+                route_id,
+                provider,
+                model,
+                thinking,
+                budget_tokens,
+            } => {
+                if let Some(meta) = &session_meta {
+                    let n = insert_routing_decision(
+                        conn,
+                        &path_key,
+                        &entry.id,
+                        &meta.folder,
+                        entry.timestamp,
+                        route_id,
+                        provider,
+                        model,
+                        thinking,
+                        *budget_tokens,
+                    )?;
+                    inserted += n;
+                }
+            }
+            // Forward-compatibility invariant: any future SessionEntryKind
+            // we don't recognise here is silently skipped, never errors.
+            // The serde::from_str above also returns Err on truly unknown
+            // tag values, which we already swallow with `Err(_) => continue`.
             _ => {}
         }
     }
@@ -168,6 +195,38 @@ fn insert_message(
             reasoning,
             total,
             cost,
+        ],
+    )?;
+    Ok(n as u64)
+}
+
+fn insert_routing_decision(
+    conn: &Connection,
+    session_file: &str,
+    entry_id: &str,
+    folder: &str,
+    timestamp_ms: i64,
+    route_id: &str,
+    provider: &str,
+    model: &str,
+    thinking: &str,
+    budget_tokens: Option<u64>,
+) -> rusqlite::Result<u64> {
+    let n = conn.execute(
+        "INSERT OR IGNORE INTO routing_decisions (
+            session_file, entry_id, folder, timestamp_ms,
+            route_id, provider, model, thinking, budget_tokens
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            session_file,
+            entry_id,
+            folder,
+            timestamp_ms,
+            route_id,
+            provider,
+            model,
+            thinking,
+            budget_tokens.map(|b| b as i64),
         ],
     )?;
     Ok(n as u64)

@@ -339,6 +339,25 @@ impl AgentSession {
             g.model = decision.model.clone();
             g.thinking = decision.thinking;
         }
+        // Telemetry: emit a `RoutingDecision` session entry so pi-stats can
+        // aggregate per-route metrics. TALE-EP `<budget>` is parsed only
+        // for the `hard` route — that's where heavy-thinking budgeting
+        // matters; the field stays `None` everywhere else.
+        let budget_tokens = if decision.route_id == "hard" {
+            crate::router::parse_tale_ep_budget(&last_user_text)
+        } else {
+            None
+        };
+        let _ = self.cfg.session_manager.append(
+            &self.id,
+            SessionEntryKind::RoutingDecision {
+                route_id: decision.route_id.clone(),
+                provider: decision.provider.clone(),
+                model: decision.model.clone(),
+                thinking: format_thinking(decision.thinking),
+                budget_tokens,
+            },
+        );
         Ok((decision.provider, decision.model, decision.thinking))
     }
 
@@ -923,6 +942,17 @@ impl AgentSession {
             });
         }
     }
+}
+
+fn format_thinking(level: ThinkingLevel) -> String {
+    match level {
+        ThinkingLevel::Off => "off",
+        ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::XHigh => "xhigh",
+    }
+    .to_string()
 }
 
 fn extract_message_text(message: &Message) -> String {

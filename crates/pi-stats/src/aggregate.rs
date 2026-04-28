@@ -62,6 +62,15 @@ pub struct DashboardStats {
     pub by_folder: Vec<FolderStats>,
     pub time_series: Vec<TimeSeriesPoint>,
     pub approvals: ApprovalStats,
+    pub by_route_id: Vec<RouteStats>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RouteStats {
+    pub route_id: String,
+    pub decisions: u64,
+    pub sessions: u64,
+    pub avg_budget_tokens: Option<f64>,
 }
 
 pub fn dashboard(conn: &Connection) -> rusqlite::Result<DashboardStats> {
@@ -71,7 +80,29 @@ pub fn dashboard(conn: &Connection) -> rusqlite::Result<DashboardStats> {
         by_folder: by_folder(conn)?,
         time_series: time_series_hourly(conn, 24)?,
         approvals: approval_breakdown(conn)?,
+        by_route_id: by_route_id(conn)?,
     })
+}
+
+pub fn by_route_id(c: &Connection) -> rusqlite::Result<Vec<RouteStats>> {
+    let mut stmt = c.prepare(
+        "SELECT route_id,
+                COUNT(*),
+                COUNT(DISTINCT session_file),
+                AVG(budget_tokens)
+           FROM routing_decisions
+          GROUP BY route_id
+          ORDER BY COUNT(*) DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(RouteStats {
+            route_id: r.get(0)?,
+            decisions: r.get::<_, i64>(1)? as u64,
+            sessions: r.get::<_, i64>(2)? as u64,
+            avg_budget_tokens: r.get::<_, Option<f64>>(3)?,
+        })
+    })?;
+    rows.collect()
 }
 
 pub fn overall(c: &Connection) -> rusqlite::Result<OverallStats> {
