@@ -241,6 +241,9 @@ fn entry_as_block(entry: &SessionEntry) -> Option<Block> {
         SessionEntryKind::EvolveMarker { generation, .. } => {
             ("meta", format!("evolve gen {generation}"), 0, None)
         }
+        SessionEntryKind::RoutingDecision { route_id, .. } => {
+            ("routing", format!("route → {route_id}"), 0, None)
+        }
     };
     Some(Block {
         kind: kind.into(),
@@ -451,6 +454,9 @@ fn render_block(entry: &SessionEntry, total_tokens: f64) -> Option<String> {
         }
         SessionEntryKind::EvolveMarker { generation, .. } => {
             ("meta", format!("evolve gen {generation}"), 1.0)
+        }
+        SessionEntryKind::RoutingDecision { route_id, .. } => {
+            ("routing", format!("route → {route_id}"), 1.0)
         }
     };
     let pct = (tokens / total_tokens * 100.0).max(0.05);

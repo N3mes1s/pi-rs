@@ -85,6 +85,14 @@ pub fn format_tree_entry(entry: &pi_agent_core::SessionEntry) -> String {
         SessionEntryKind::EvolveMarker { generation, .. } => {
             return format!("evolve_marker  gen={generation}");
         }
+        SessionEntryKind::RoutingDecision {
+            route_id,
+            provider,
+            model,
+            ..
+        } => {
+            return format!("routing  {route_id} → {provider}/{model}");
+        }
     };
 
     let snippet = short_text(&raw_text, 60);
