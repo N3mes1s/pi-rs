@@ -173,6 +173,12 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
                 m("openai", "gpt-5", Some("gpt-5"), 400_000, 100_000, true, true, 5.0, 20.0),
                 m("openai", "gpt-5-mini", Some("gpt-5-mini"), 400_000, 100_000, true, true, 0.5, 2.0),
                 m("openai", "gpt-5-nano", Some("gpt-5-nano"), 400_000, 100_000, true, true, 0.10, 0.40),
+                // gpt-5.4 = mid-2026 incremental ("4" denotes the dot-release, not a
+                // separate generation). Same 400k/100k window and Chat-Completions
+                // endpoint as gpt-5; pricing tracks the gpt-5 base rate at launch
+                // (1.25 / 10.0 per 1M input/output tok, audit RFD 0009 -> evolve when
+                // OpenAI publishes the rate card).
+                m("openai", "gpt-5.4", Some("gpt-5.4"), 400_000, 100_000, true, true, 1.25, 10.0),
             ],
         },
         ProviderConfig {
