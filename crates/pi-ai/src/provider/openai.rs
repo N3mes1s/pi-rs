@@ -5,7 +5,8 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::auth::AuthMethod;
-use crate::message::{ContentBlock, FinishReason, Role, ThinkingLevel, Usage};
+use crate::cost::UsageAcc;
+use crate::message::{ContentBlock, FinishReason, Role, ThinkingLevel};
 use crate::registry::{ModelInfo, ProviderConfig};
 use crate::stream::{StreamEvent, StreamEventKind};
 use crate::{AiError, GenerateRequest, Result};
@@ -209,7 +210,7 @@ impl Provider for OpenAiProvider {
         let acc: std::collections::HashMap<u64, (String, String, String)> =
             std::collections::HashMap::new();
 
-        let s = stream::unfold((event_stream, acc, false), move |(mut es, mut acc, mut done)| async move {
+        let s = stream::unfold((event_stream, acc, false, UsageAcc::default(), model.clone()), move |(mut es, mut acc, mut done, mut usage_running, model_owned)| async move {
             if done {
                 return None;
             }
@@ -221,7 +222,7 @@ impl Provider for OpenAiProvider {
                             Ok(StreamEvent::new(StreamEventKind::Error {
                                 message: e.to_string(),
                             })),
-                            (es, acc, true),
+                            (es, acc, true, usage_running, model_owned),
                         ))
                     }
                 };
@@ -237,7 +238,7 @@ impl Provider for OpenAiProvider {
                                 name,
                                 input,
                             })),
-                            (es, acc, true),
+                            (es, acc, true, usage_running, model_owned),
                         ));
                     }
                     done = true;
@@ -246,28 +247,43 @@ impl Provider for OpenAiProvider {
                         Ok(StreamEvent::new(StreamEventKind::Finish {
                             reason: FinishReason::Stop,
                         })),
-                        (es, acc, true),
+                        (es, acc, true, usage_running, model_owned),
                     ));
                 }
                 let data: Value = match serde_json::from_str(&ev.data) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                if let Some(usage) = data.get("usage") {
-                    let u = Usage {
-                        input_tokens: usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                        output_tokens: usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                        reasoning_tokens: usage
+                let choices_empty = data
+                    .get("choices")
+                    .and_then(|c| c.as_array())
+                    .map(|a| a.is_empty())
+                    .unwrap_or(false);
+                if choices_empty {
+                    if let Some(u) = data.get("usage") {
+                        usage_running.input_tokens =
+                            u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                        usage_running.output_tokens = u
+                            .get("completion_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        usage_running.cache_read_tok = u
+                            .get("prompt_tokens_details")
+                            .and_then(|d| d.get("cached_tokens"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        usage_running.reasoning_tok = u
                             .get("completion_tokens_details")
                             .and_then(|d| d.get("reasoning_tokens"))
                             .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                        ..Default::default()
-                    };
-                    return Some((
-                        Ok(StreamEvent::new(StreamEventKind::Usage { usage: u })),
-                        (es, acc, false),
-                    ));
+                            .unwrap_or(0);
+                        let usage = usage_running.into_usage(&model_owned);
+                        return Some((
+                            Ok(StreamEvent::new(StreamEventKind::Usage { usage })),
+                            (es, acc, false, usage_running, model_owned),
+                        ));
+                    }
+                    continue;
                 }
                 if let Some(choice) = data.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()) {
                     let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
@@ -277,7 +293,7 @@ impl Provider for OpenAiProvider {
                                 Ok(StreamEvent::new(StreamEventKind::TextDelta {
                                     text: text.to_string(),
                                 })),
-                                (es, acc, false),
+                                (es, acc, false, usage_running, model_owned),
                             ));
                         }
                     }
@@ -287,7 +303,7 @@ impl Provider for OpenAiProvider {
                                 Ok(StreamEvent::new(StreamEventKind::ThinkingDelta {
                                     text: reasoning.to_string(),
                                 })),
-                                (es, acc, false),
+                                (es, acc, false, usage_running, model_owned),
                             ));
                         }
                     }
@@ -316,7 +332,7 @@ impl Provider for OpenAiProvider {
                                                 id: entry.0.clone(),
                                                 partial_json: args.to_string(),
                                             })),
-                                            (es, acc, false),
+                                            (es, acc, false, usage_running, model_owned),
                                         ));
                                     }
                                 }
@@ -343,12 +359,12 @@ impl Provider for OpenAiProvider {
                                     name,
                                     input,
                                 })),
-                                (es, acc, false),
+                                (es, acc, false, usage_running, model_owned),
                             ));
                         }
                         return Some((
                             Ok(StreamEvent::new(StreamEventKind::Finish { reason: r })),
-                            (es, acc, false),
+                            (es, acc, false, usage_running, model_owned),
                         ));
                     }
                 }

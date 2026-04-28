@@ -125,6 +125,7 @@ pub trait Provider: Send + Sync {
 }
 
 pub mod anthropic;
+pub mod anthropic_stream;
 pub mod azure;
 pub mod bedrock;
 pub mod discover;

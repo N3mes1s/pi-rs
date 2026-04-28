@@ -185,3 +185,54 @@ fn google_message_to_parts_handles_all_block_types() {
     assert_eq!(parts[3]["functionResponse"]["name"], "c1");
     assert_eq!(parts[4]["inline_data"]["mime_type"], "image/png");
 }
+
+// --- RFD 0015: cumulative usageMetadata + single terminal Usage event ─
+
+#[tokio::test]
+async fn google_emits_single_cumulative_usage_at_terminal_chunk() {
+    let server = MockServer::start().await;
+    let mut body = String::new();
+    // Chunk 1: text + partial usage.
+    body.push_str(
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi \"}]}}],\
+\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":1}}\n\n",
+    );
+    // Chunk 2: more text + larger usage (cumulative).
+    body.push_str(
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"there\"}]}}],\
+\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":3,\"cachedContentTokenCount\":4}}\n\n",
+    );
+    // Chunk 3: terminal — finishReason set, final cumulative usage.
+    body.push_str(
+        "data: {\"candidates\":[{\"finishReason\":\"STOP\"}],\
+\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":7,\"cachedContentTokenCount\":4,\"thoughtsTokenCount\":2}}\n\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/gemini-test:streamGenerateContent"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+
+    let provider =
+        GoogleProvider::new(cfg(server.uri()), AuthMethod::ApiKey { value: "k".into() });
+    let mut s = provider.stream(req(), &model()).await.expect("ok");
+    let mut usages = Vec::new();
+    while let Some(ev) = s.next().await {
+        if let Ok(e) = ev {
+            if let StreamEventKind::Usage { usage } = e.kind {
+                usages.push(usage);
+            }
+        }
+    }
+    assert_eq!(usages.len(), 1, "expected exactly one Usage event");
+    let u = &usages[0];
+    assert_eq!(u.input_tokens, 10);
+    assert_eq!(u.output_tokens, 7);
+    assert_eq!(u.cache_read_tokens, 4);
+    assert_eq!(u.reasoning_tokens, 2);
+}

@@ -5,7 +5,8 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::auth::AuthMethod;
-use crate::message::{ContentBlock, FinishReason, Role, Usage};
+use crate::cost::UsageAcc;
+use crate::message::{ContentBlock, FinishReason, Role};
 use crate::registry::{ModelInfo, ProviderConfig};
 use crate::stream::{StreamEvent, StreamEventKind};
 use crate::{AiError, GenerateRequest, Result};
@@ -157,97 +158,132 @@ impl Provider for GoogleProvider {
         }
 
         let event_stream = resp.bytes_stream().eventsource();
-        let s = stream::unfold(event_stream, move |mut es| async move {
-            while let Some(item) = es.next().await {
-                let ev = match item {
-                    Ok(ev) => ev,
-                    Err(e) => {
+        let model_owned = model.clone();
+        let s = stream::unfold(
+            (event_stream, UsageAcc::default(), None::<FinishReason>, model_owned),
+            move |(mut es, mut usage_running, mut pending_finish, model_owned)| async move {
+                // If we deferred a Finish from the previous chunk (after emitting
+                // Usage), surface it now.
+                if let Some(reason) = pending_finish.take() {
+                    return Some((
+                        Ok(StreamEvent::new(StreamEventKind::Finish { reason })),
+                        (es, usage_running, None, model_owned),
+                    ));
+                }
+                while let Some(item) = es.next().await {
+                    let ev = match item {
+                        Ok(ev) => ev,
+                        Err(e) => {
+                            return Some((
+                                Ok(StreamEvent::new(StreamEventKind::Error {
+                                    message: e.to_string(),
+                                })),
+                                (es, usage_running, None, model_owned),
+                            ));
+                        }
+                    };
+                    let data: Value = match serde_json::from_str(&ev.data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    // Update cumulative usage on every chunk that carries it.
+                    let has_meta = data.get("usageMetadata").is_some();
+                    if let Some(meta) = data.get("usageMetadata") {
+                        usage_running.input_tokens = meta
+                            .get("promptTokenCount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(usage_running.input_tokens);
+                        usage_running.output_tokens = meta
+                            .get("candidatesTokenCount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(usage_running.output_tokens);
+                        usage_running.cache_read_tok = meta
+                            .get("cachedContentTokenCount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(usage_running.cache_read_tok);
+                        usage_running.reasoning_tok = meta
+                            .get("thoughtsTokenCount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(usage_running.reasoning_tok);
+                    }
+                    let has_candidates = data
+                        .get("candidates")
+                        .and_then(|v| v.as_array())
+                        .map(|a| !a.is_empty())
+                        .unwrap_or(false);
+                    // Standalone-usageMetadata chunk (no candidates):
+                    // emit Usage now. Real Gemini puts cumulative metadata
+                    // on every chunk including the terminal one, but some
+                    // wire variants ship a trailing metadata-only chunk.
+                    if has_meta && !has_candidates {
+                        let usage = usage_running.into_usage(&model_owned);
                         return Some((
-                            Ok(StreamEvent::new(StreamEventKind::Error {
-                                message: e.to_string(),
-                            })),
-                            es,
+                            Ok(StreamEvent::new(StreamEventKind::Usage { usage })),
+                            (es, usage_running, pending_finish, model_owned),
                         ));
                     }
-                };
-                let data: Value = match serde_json::from_str(&ev.data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if let Some(candidates) = data.get("candidates").and_then(|v| v.as_array()) {
-                    if let Some(c) = candidates.first() {
-                        if let Some(parts) = c
-                            .get("content")
-                            .and_then(|c| c.get("parts"))
-                            .and_then(|p| p.as_array())
-                        {
-                            for part in parts {
-                                if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                                    if !text.is_empty() {
+                    if let Some(candidates) = data.get("candidates").and_then(|v| v.as_array()) {
+                        if let Some(c) = candidates.first() {
+                            if let Some(parts) = c
+                                .get("content")
+                                .and_then(|c| c.get("parts"))
+                                .and_then(|p| p.as_array())
+                            {
+                                for part in parts {
+                                    if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                                        if !text.is_empty() {
+                                            return Some((
+                                                Ok(StreamEvent::new(StreamEventKind::TextDelta {
+                                                    text: text.to_string(),
+                                                })),
+                                                (es, usage_running, pending_finish, model_owned),
+                                            ));
+                                        }
+                                    }
+                                    if let Some(fc) = part.get("functionCall") {
+                                        let name = fc
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        let args = fc.get("args").cloned().unwrap_or(Value::Null);
+                                        let id = format!("call_{}", call_id_seed(&name));
                                         return Some((
-                                            Ok(StreamEvent::new(StreamEventKind::TextDelta {
-                                                text: text.to_string(),
-                                            })),
-                                            es,
+                                            Ok(StreamEvent::new(
+                                                StreamEventKind::ToolCallComplete {
+                                                    id,
+                                                    name,
+                                                    input: args,
+                                                },
+                                            )),
+                                            (es, usage_running, pending_finish, model_owned),
                                         ));
                                     }
                                 }
-                                if let Some(fc) = part.get("functionCall") {
-                                    let name = fc
-                                        .get("name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    let args = fc.get("args").cloned().unwrap_or(Value::Null);
-                                    let id = format!("call_{}", call_id_seed(&name));
-                                    return Some((
-                                        Ok(StreamEvent::new(
-                                            StreamEventKind::ToolCallComplete {
-                                                id,
-                                                name,
-                                                input: args,
-                                            },
-                                        )),
-                                        es,
-                                    ));
-                                }
                             }
-                        }
-                        if let Some(reason) = c.get("finishReason").and_then(|v| v.as_str()) {
-                            let r = match reason {
-                                "STOP" => FinishReason::Stop,
-                                "MAX_TOKENS" => FinishReason::Length,
-                                "SAFETY" | "RECITATION" => FinishReason::Refusal,
-                                "TOOL_USE" | "TOOL_CALL" => FinishReason::ToolUse,
-                                _ => FinishReason::Other,
-                            };
-                            return Some((
-                                Ok(StreamEvent::new(StreamEventKind::Finish { reason: r })),
-                                es,
-                            ));
+                            if let Some(reason) = c.get("finishReason").and_then(|v| v.as_str()) {
+                                let r = match reason {
+                                    "STOP" => FinishReason::Stop,
+                                    "MAX_TOKENS" => FinishReason::Length,
+                                    "SAFETY" | "RECITATION" => FinishReason::Refusal,
+                                    "TOOL_USE" | "TOOL_CALL" => FinishReason::ToolUse,
+                                    _ => FinishReason::Other,
+                                };
+                                // Terminal chunk: emit one Usage event built from
+                                // the cumulative `usage_running`, then defer the
+                                // Finish to the next poll.
+                                let usage = usage_running.into_usage(&model_owned);
+                                return Some((
+                                    Ok(StreamEvent::new(StreamEventKind::Usage { usage })),
+                                    (es, usage_running, Some(r), model_owned),
+                                ));
+                            }
                         }
                     }
                 }
-                if let Some(usage_meta) = data.get("usageMetadata") {
-                    let usage = Usage {
-                        input_tokens: usage_meta
-                            .get("promptTokenCount")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                        output_tokens: usage_meta
-                            .get("candidatesTokenCount")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                        ..Default::default()
-                    };
-                    return Some((
-                        Ok(StreamEvent::new(StreamEventKind::Usage { usage })),
-                        es,
-                    ));
-                }
-            }
-            None
-        });
+                None
+            },
+        );
         Ok(Box::pin(s))
     }
 }
