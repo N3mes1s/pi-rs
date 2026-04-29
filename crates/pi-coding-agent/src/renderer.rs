@@ -513,21 +513,91 @@ fn wrap_line(s: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![s.to_string()];
     }
-    let mut out = Vec::new();
+    // Word-boundary wrap. Walk runs of "non-space" then "space" (one
+    // character class transition at a time). Pack each non-space word
+    // onto the current line if it fits; flush+start-new if not.
+    // Words wider than `width` themselves fall back to grapheme split
+    // so they still appear (truncated across lines), since the
+    // alternative is silently dropping them.
+    //
+    // Earlier behaviour was a pure grapheme wrap — splitting mid-word
+    // produced "container" → "c" / "ontainer" in assistant output,
+    // which the user flagged as "the messages from the agent should be
+    // clearer". This fix is the narrowest answer to that.
+    let mut out: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut current_w = 0usize;
-    for g in s.graphemes(true) {
-        let gw = UnicodeWidthStr::width(g);
-        if current_w + gw > width && !current.is_empty() {
-            out.push(std::mem::take(&mut current));
-            current_w = 0;
+    let push_line = |out: &mut Vec<String>, line: &mut String, w: &mut usize| {
+        if !line.is_empty() {
+            out.push(std::mem::take(line));
+            *w = 0;
         }
-        current.push_str(g);
-        current_w += gw;
+    };
+    let mut chars: Vec<&str> = s.graphemes(true).collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let g = chars[i];
+        if g == " " || g == "\t" {
+            // Whitespace: append if it fits, else swallow into the
+            // line break so we don't waste a leading column.
+            let gw = UnicodeWidthStr::width(g);
+            if current_w + gw > width {
+                push_line(&mut out, &mut current, &mut current_w);
+            } else {
+                current.push_str(g);
+                current_w += gw;
+            }
+            i += 1;
+            continue;
+        }
+        // Non-space: scan ahead to the end of the word.
+        let mut j = i;
+        let mut word_w = 0usize;
+        while j < chars.len() {
+            let c = chars[j];
+            if c == " " || c == "\t" {
+                break;
+            }
+            word_w += UnicodeWidthStr::width(c);
+            j += 1;
+        }
+        let word: String = chars[i..j].concat();
+        if word_w <= width {
+            // Whole word fits. Wrap before it if needed.
+            if current_w + word_w > width {
+                // Trim trailing space before wrapping for cleanliness.
+                while current.ends_with(' ') {
+                    current.pop();
+                    if current_w > 0 {
+                        current_w -= 1;
+                    }
+                }
+                push_line(&mut out, &mut current, &mut current_w);
+            }
+            current.push_str(&word);
+            current_w += word_w;
+        } else {
+            // Word longer than full line. Flush whatever's already
+            // there, then split the word across grapheme boundaries.
+            push_line(&mut out, &mut current, &mut current_w);
+            for c in &chars[i..j] {
+                let cw = UnicodeWidthStr::width(*c);
+                if current_w + cw > width && !current.is_empty() {
+                    push_line(&mut out, &mut current, &mut current_w);
+                }
+                current.push_str(c);
+                current_w += cw;
+            }
+        }
+        i = j;
     }
     if !current.is_empty() {
         out.push(current);
     }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    let _ = chars; // silence unused warning if rustc loses the loop
     out
 }
 
