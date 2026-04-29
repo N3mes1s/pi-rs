@@ -121,6 +121,7 @@ fn parse_thinking(s: &str) -> ThinkingLevel {
         "low" => ThinkingLevel::Low,
         "medium" => ThinkingLevel::Medium,
         "high" => ThinkingLevel::High,
+        "xhigh" | "x-high" => ThinkingLevel::XHigh,
         _ => ThinkingLevel::Off,
     }
 }
