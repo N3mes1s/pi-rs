@@ -1,0 +1,13 @@
+//! `pi-sandbox` — isolation boundary abstraction for tool execution.
+//!
+//! The `SandboxProvider` trait lets tool invocations cross a boundary
+//! (local subprocess, container, VM, remote service) rather than executing
+//! inline in the agent process. Implementations handle the actual execution
+//! and return a result tuple (stdout, stderr, exit_status) that the agent
+//! converts back into a standard `ToolResult`.
+
+pub mod provider;
+pub mod local;
+
+pub use provider::{SandboxProvider, SandboxExecution, SandboxError};
+pub use local::LocalProcessProvider;
