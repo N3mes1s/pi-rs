@@ -204,14 +204,53 @@ impl AgentSessionRuntime {
         let cfg = self.config.clone();
         let meta = cfg.session_manager.open_existing(id_or_path)?;
         let history = cfg.session_manager.current_branch(&meta.id);
+
+        // Reassemble the message stream preserving the original
+        // interleaving. Tool results land in the user message that
+        // *immediately* follows their assistant tool_use turn — that
+        // ordering is what the Anthropic API checks (and rejects with
+        // 400 `tool_use ids were found without tool_result blocks
+        // immediately after` if violated).
+        //
+        // The previous implementation coalesced *all* tool_results
+        // into a single trailing user message at the very end, which
+        // broke the contract on any session that had >1 tool-call
+        // turn. It also did no sanitisation, so an interrupted run
+        // (Ctrl+C / panic / `/quit` mid-tool) left an orphaned
+        // tool_use whose missing tool_result poisoned every
+        // subsequent prompt the user sent on the resumed session.
+        //
+        // Rebuilt loop: flush any accumulated tool_results into a
+        // user message *before* writing the next User/Assistant
+        // entry. After the entries are reassembled, do a second pass
+        // that scans for assistant turns whose tool_use ids aren't
+        // covered by the next user message's tool_results and
+        // injects synthetic `[interrupted]` results so the API
+        // accepts the request and the user sees the missing results
+        // as such in the transcript.
         let mut messages: Vec<Message> = Vec::new();
-        let mut pending_tool_results: Vec<ContentBlock> = Vec::new();
+        let mut current_tool_results: Vec<ContentBlock> = Vec::new();
+        let flush =
+            |msgs: &mut Vec<Message>, results: &mut Vec<ContentBlock>| {
+                if !results.is_empty() {
+                    msgs.push(Message {
+                        role: Role::User,
+                        content: std::mem::take(results),
+                    });
+                }
+            };
         for entry in history {
             match entry.kind {
-                SessionEntryKind::User { message } => messages.push(message),
-                SessionEntryKind::Assistant { message } => messages.push(message),
+                SessionEntryKind::User { message } => {
+                    flush(&mut messages, &mut current_tool_results);
+                    messages.push(message);
+                }
+                SessionEntryKind::Assistant { message } => {
+                    flush(&mut messages, &mut current_tool_results);
+                    messages.push(message);
+                }
                 SessionEntryKind::ToolResult { result } => {
-                    pending_tool_results.push(ContentBlock::ToolResult {
+                    current_tool_results.push(ContentBlock::ToolResult {
                         tool_use_id: result.tool_use_id,
                         content: result.model_output,
                         is_error: result.is_error,
@@ -220,12 +259,81 @@ impl AgentSessionRuntime {
                 _ => {}
             }
         }
-        if !pending_tool_results.is_empty() {
-            messages.push(Message {
-                role: Role::User,
-                content: pending_tool_results,
-            });
+        flush(&mut messages, &mut current_tool_results);
+
+        // Sanitise orphaned tool_use blocks. Walk the assembled
+        // messages; for each assistant message containing tool_use
+        // ids, ensure the *next* message is a user message whose
+        // tool_result blocks cover every id. Inject synthetic
+        // is_error tool_results for any that are missing.
+        let mut sanitised: Vec<Message> = Vec::with_capacity(messages.len());
+        let mut iter = messages.into_iter().peekable();
+        while let Some(msg) = iter.next() {
+            let required_ids: Vec<String> = if matches!(msg.role, Role::Assistant) {
+                msg.content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            sanitised.push(msg);
+            if required_ids.is_empty() {
+                continue;
+            }
+            // Inspect the next message (if any user message follows).
+            let provided: std::collections::HashSet<String> = match iter.peek() {
+                Some(m) if matches!(m.role, Role::User) => m
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolResult { tool_use_id, .. } => {
+                            Some(tool_use_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Default::default(),
+            };
+            let missing: Vec<String> = required_ids
+                .into_iter()
+                .filter(|id| !provided.contains(id))
+                .collect();
+            if missing.is_empty() {
+                continue;
+            }
+            let synthetic: Vec<ContentBlock> = missing
+                .into_iter()
+                .map(|id| ContentBlock::ToolResult {
+                    tool_use_id: id,
+                    content:
+                        "[tool call interrupted before completing; no result was recorded]"
+                            .to_string(),
+                    is_error: true,
+                })
+                .collect();
+            // Either prepend to the existing next user message, or
+            // insert a fresh user message carrying just the
+            // synthetic results.
+            if matches!(iter.peek(), Some(m) if matches!(m.role, Role::User)) {
+                let mut next = iter.next().expect("peeked Some");
+                let mut combined = synthetic;
+                combined.extend(next.content.drain(..));
+                sanitised.push(Message {
+                    role: Role::User,
+                    content: combined,
+                });
+            } else {
+                sanitised.push(Message {
+                    role: Role::User,
+                    content: synthetic,
+                });
+            }
         }
+        let messages = sanitised;
         Ok(AgentSession {
             id: meta.id,
             inner: Arc::new(Mutex::new(AgentSessionInner {
