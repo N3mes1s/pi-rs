@@ -7,7 +7,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(feature = "onnx-inference")]
-use ort::session::Session;
+use tract_onnx::prelude::*;
+
+#[cfg(feature = "onnx-inference")]
+type OnnxModel = tract_onnx::prelude::RunnableModel<
+    TypedFact,
+    Box<dyn TypedOp>,
+    tract_onnx::prelude::Graph<TypedFact, Box<dyn TypedOp>>,
+>;
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -443,7 +450,7 @@ fn load_tokenizer_from_path(path: &Path) -> Result<tokenizers::Tokenizer, Router
 /// hashed Stage-1 shim unless the feature is explicitly enabled.
 pub struct OnnxRealEngine {
     cache: Mutex<HashMap<String, Vec<f32>>>,
-    session: Mutex<Session>,
+    model: OnnxModel,
     tokenizer: OnceLock<tokenizers::Tokenizer>,
     tokenizer_path: PathBuf,
 }
@@ -451,13 +458,16 @@ pub struct OnnxRealEngine {
 #[cfg(feature = "onnx-inference")]
 impl OnnxRealEngine {
     pub fn new(path: PathBuf) -> Result<Self, RouterError> {
-        let session = Session::builder()
-            .map_err(|e| RouterError::Inference(format!("failed to create ONNX session builder: {e}")))?
-            .commit_from_file(&path)
-            .map_err(|e| RouterError::Inference(format!("failed to load ONNX model from {}: {e}", path.display())))?;
+        let model = tract_onnx::onnx()
+            .model_for_path(&path)
+            .map_err(|e| RouterError::Inference(format!("failed to parse ONNX model at {}: {e}", path.display())))?
+            .into_optimized()
+            .map_err(|e| RouterError::Inference(format!("failed to optimize ONNX model: {e}")))?
+            .into_runnable()
+            .map_err(|e| RouterError::Inference(format!("failed to make ONNX model runnable: {e}")))?;
         Ok(Self {
             cache: Mutex::new(HashMap::new()),
-            session: Mutex::new(session),
+            model,
             tokenizer: OnceLock::new(),
             tokenizer_path: resolve_tokenizer_path(&path),
         })
@@ -538,42 +548,30 @@ impl EmbeddingEngine for OnnxRealEngine {
                 ndarray::Array2::zeros((1, seq_len))
             };
 
-            let hidden_states = {
-                let mut session = self
-                    .session
-                    .lock()
-                    .map_err(|_| RouterError::Inference("session poisoned".into()))?;
-                let input_ids_val = ort::value::Value::from_array(input_ids)
-                    .map_err(|e| RouterError::Inference(format!("failed to create input_ids value: {e}")))?;
-                let attn_mask_val = ort::value::Value::from_array(attention_mask.clone())
-                    .map_err(|e| RouterError::Inference(format!("failed to create attention_mask value: {e}")))?;
-                let type_ids_val = ort::value::Value::from_array(token_type_ids)
-                    .map_err(|e| RouterError::Inference(format!("failed to create token_type_ids value: {e}")))?;
-                let outputs = session
-                    .run(vec![
-                        ("input_ids", input_ids_val),
-                        ("attention_mask", attn_mask_val),
-                        ("token_type_ids", type_ids_val),
-                    ])
-                    .map_err(|e| RouterError::Inference(format!("ONNX inference failed: {e}")))?;
-                let (out_shape, out_data) = outputs[0]
-                    .try_extract_tensor::<f32>()
-                    .map_err(|e| RouterError::Inference(format!("failed to extract ONNX output tensor: {e}")))?;
-                // Reconstruct [batch=1, seq_len, hidden_dim] from flat slice
-                if out_shape.len() != 3 {
-                    return Err(RouterError::Inference(format!(
-                        "unexpected ONNX output rank: {}; expected 3 (batch, seq_len, hidden_dim)",
-                        out_shape.len()
-                    )));
-                }
-                let hidden_dim = out_shape[2] as usize;
-                // Convert (out_shape, &[f32]) → Array3
-                ndarray::Array3::from_shape_vec(
-                    (out_shape[0] as usize, out_shape[1] as usize, hidden_dim),
-                    out_data.to_vec(),
-                )
-                .map_err(|e| RouterError::Inference(format!("failed to reshape ONNX output tensor: {e}")))?
-            };
+            // tract takes Tensor inputs positionally in the order the model
+            // declares them. For BERT-family ONNX exports that's
+            // (input_ids, attention_mask, token_type_ids).
+            let attention_mask_for_pool = attention_mask.clone();
+            let outputs = self
+                .model
+                .run(tvec![
+                    input_ids.into_tensor().into_tvalue(),
+                    attention_mask.into_tensor().into_tvalue(),
+                    token_type_ids.into_tensor().into_tvalue(),
+                ])
+                .map_err(|e| RouterError::Inference(format!("ONNX inference failed: {e}")))?;
+            let view = outputs[0]
+                .to_array_view::<f32>()
+                .map_err(|e| RouterError::Inference(format!("failed to extract ONNX output tensor: {e}")))?;
+            if view.shape().len() != 3 {
+                return Err(RouterError::Inference(format!(
+                    "unexpected ONNX output rank: {}; expected 3 (batch, seq_len, hidden_dim)",
+                    view.shape().len()
+                )));
+            }
+            let hidden_states = view.to_owned().into_dimensionality::<ndarray::Ix3>()
+                .map_err(|e| RouterError::Inference(format!("failed to reshape ONNX output tensor: {e}")))?;
+            let attention_mask = attention_mask_for_pool;
 
             if hidden_states.shape().len() != 3 || hidden_states.shape()[2] != 384 {
                 return Err(RouterError::Inference(format!(

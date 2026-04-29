@@ -26,14 +26,16 @@ dirs.workspace = true
 walkdir.workspace = true
 sha2.workspace = true
 reqwest.workspace = true
-ndarray = "0.17.2"
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24"] }
+ndarray = "0.16"
 toml = "0.8"
 tokenizers = { version = "0.20", default-features = false, features = ["onig"], optional = true }
+tract-onnx = { version = "0.21", optional = true }
 
 # Optional real gte-small inference for the autonomous router.
-# Keep this feature off on musl-static production builds: `ort::Session::builder()`
-# is known to deadlock there. When enabled on glibc-linked builds, the router
-# loads the ONNX session and tokenizer and replaces the Stage-1 hashed shim.
+# Uses tract-onnx (pure Rust, no system dependency on libonnxruntime)
+# so the feature is portable across glibc / musl-static and works on
+# any machine without an ONNX Runtime install. When enabled, the
+# router loads the gte-small model + tokenizer and replaces the
+# Stage-1 hashed shim.
 [features]
-onnx-inference = ["tokenizers"]
+onnx-inference = ["tokenizers", "tract-onnx"]
