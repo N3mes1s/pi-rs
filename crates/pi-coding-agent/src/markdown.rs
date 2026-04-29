@@ -103,17 +103,27 @@ pub fn parse_and_render_markdown(
                 } else {
                     None
                 };
-                let chunks = crate::renderer::wrap_line_pub(&text, wrap_width);
-                for (i, chunk) in chunks.iter().enumerate() {
-                    if i > 0 {
-                        flush_line(&mut result, &mut current_spans);
-                    }
-                    let span = match color {
-                        Some(c) => Span::coloured(chunk.clone(), c),
-                        None => Span::plain(chunk.clone()),
-                    };
-                    current_spans.push(span);
-                }
+                // DO NOT call wrap_line on this fragment. The wrap
+                // helper trims leading/trailing whitespace at line
+                // boundaries, which is right for FULL lines but wrong
+                // for sub-fragments that pulldown-cmark splits at
+                // emphasis boundaries. Concretely: input `"are
+                // **wrap** ("` parses as Text("are "), Start(Strong),
+                // Text("wrap"), End(Strong), Text(" ("). Wrapping
+                // each Text individually returns ["are"] / ["wrap"]
+                // / ["("] — the space-only boundaries are dropped,
+                // and the rendered line reads "arewrap(" instead of
+                // "are wrap (". Push the text verbatim into a Span;
+                // paragraph-level word-wrap is handled by the wrap
+                // pass over the assembled line if/when long lines
+                // need breaking. Long fully-styled lines may overflow
+                // the viewport for now — tracked as a follow-up; the
+                // visible space-eating bug is the user-impacting one.
+                let span = match color {
+                    Some(c) => Span::coloured(text.into_string(), c),
+                    None => Span::plain(text.into_string()),
+                };
+                current_spans.push(span);
             }
 
             // ── Soft/hard breaks ───────────────────────────────────────────
