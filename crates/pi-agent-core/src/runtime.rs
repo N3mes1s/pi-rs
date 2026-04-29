@@ -261,79 +261,7 @@ impl AgentSessionRuntime {
         }
         flush(&mut messages, &mut current_tool_results);
 
-        // Sanitise orphaned tool_use blocks. Walk the assembled
-        // messages; for each assistant message containing tool_use
-        // ids, ensure the *next* message is a user message whose
-        // tool_result blocks cover every id. Inject synthetic
-        // is_error tool_results for any that are missing.
-        let mut sanitised: Vec<Message> = Vec::with_capacity(messages.len());
-        let mut iter = messages.into_iter().peekable();
-        while let Some(msg) = iter.next() {
-            let required_ids: Vec<String> = if matches!(msg.role, Role::Assistant) {
-                msg.content
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::ToolUse { id, .. } => Some(id.clone()),
-                        _ => None,
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            sanitised.push(msg);
-            if required_ids.is_empty() {
-                continue;
-            }
-            // Inspect the next message (if any user message follows).
-            let provided: std::collections::HashSet<String> = match iter.peek() {
-                Some(m) if matches!(m.role, Role::User) => m
-                    .content
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::ToolResult { tool_use_id, .. } => {
-                            Some(tool_use_id.clone())
-                        }
-                        _ => None,
-                    })
-                    .collect(),
-                _ => Default::default(),
-            };
-            let missing: Vec<String> = required_ids
-                .into_iter()
-                .filter(|id| !provided.contains(id))
-                .collect();
-            if missing.is_empty() {
-                continue;
-            }
-            let synthetic: Vec<ContentBlock> = missing
-                .into_iter()
-                .map(|id| ContentBlock::ToolResult {
-                    tool_use_id: id,
-                    content:
-                        "[tool call interrupted before completing; no result was recorded]"
-                            .to_string(),
-                    is_error: true,
-                })
-                .collect();
-            // Either prepend to the existing next user message, or
-            // insert a fresh user message carrying just the
-            // synthetic results.
-            if matches!(iter.peek(), Some(m) if matches!(m.role, Role::User)) {
-                let mut next = iter.next().expect("peeked Some");
-                let mut combined = synthetic;
-                combined.extend(next.content.drain(..));
-                sanitised.push(Message {
-                    role: Role::User,
-                    content: combined,
-                });
-            } else {
-                sanitised.push(Message {
-                    role: Role::User,
-                    content: synthetic,
-                });
-            }
-        }
-        let messages = sanitised;
+        let messages = sanitise_session_messages(messages);
         Ok(AgentSession {
             id: meta.id,
             inner: Arc::new(Mutex::new(AgentSessionInner {
@@ -352,6 +280,140 @@ impl AgentSessionRuntime {
             cfg,
         })
     }
+}
+
+/// Two-pass session sanitiser invoked when resuming a session
+/// (`pi -r <id>`, `pi -c`, `--fork`, etc).
+///
+/// **Pass 1 — orphan tool_use → synthetic tool_result.** For any
+/// assistant message that emits `tool_use` blocks, ensure the next
+/// message in the stream is a user message whose `tool_result`s
+/// cover every `tool_use_id`. Missing ids get a synthetic
+/// `is_error: true` result with the body
+/// `[tool call interrupted before completing; no result was recorded]`.
+/// Without this, a Ctrl-C / panic / `/quit` mid-tool poisons every
+/// subsequent prompt against the Anthropic API
+/// (`tool_use ids were found without tool_result blocks
+/// immediately after`). Original fix: `8b921e7`.
+///
+/// **Pass 2 — orphan tool_result → drop.** The mirror case: a
+/// user message with `tool_result` blocks whose `tool_use_id`s
+/// don't match the *immediately preceding* assistant message's
+/// tool_use ids. Encountered with the OpenAI Responses API as
+/// `No tool call found for function call output with call_id ...`
+/// when a session log somehow keeps a tool_result whose tool_use
+/// was lost upstream. Defence in depth: the tracked id-set is
+/// cleared after each user message, so a tool_result that *appears
+/// not immediately following* an assistant tool_use (e.g. two user
+/// messages in a row, or a tool_result block at a turn boundary)
+/// is treated as orphan and dropped. Empty user messages produced
+/// by this pruning are dropped too.
+///
+/// Pure transformation — no I/O, deterministic. Safe to call from
+/// tests directly.
+pub(crate) fn sanitise_session_messages(messages: Vec<Message>) -> Vec<Message> {
+    // Pass 1: orphan tool_use → inject synthetic tool_result.
+    let mut sanitised: Vec<Message> = Vec::with_capacity(messages.len());
+    let mut iter = messages.into_iter().peekable();
+    while let Some(msg) = iter.next() {
+        let required_ids: Vec<String> = if matches!(msg.role, Role::Assistant) {
+            msg.content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        sanitised.push(msg);
+        if required_ids.is_empty() {
+            continue;
+        }
+        let provided: std::collections::HashSet<String> = match iter.peek() {
+            Some(m) if matches!(m.role, Role::User) => m
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Default::default(),
+        };
+        let missing: Vec<String> = required_ids
+            .into_iter()
+            .filter(|id| !provided.contains(id))
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        let synthetic: Vec<ContentBlock> = missing
+            .into_iter()
+            .map(|id| ContentBlock::ToolResult {
+                tool_use_id: id,
+                content: "[tool call interrupted before completing; no result was recorded]"
+                    .to_string(),
+                is_error: true,
+            })
+            .collect();
+        if matches!(iter.peek(), Some(m) if matches!(m.role, Role::User)) {
+            let mut next = iter.next().expect("peeked Some");
+            let mut combined = synthetic;
+            combined.extend(next.content.drain(..));
+            sanitised.push(Message {
+                role: Role::User,
+                content: combined,
+            });
+        } else {
+            sanitised.push(Message {
+                role: Role::User,
+                content: synthetic,
+            });
+        }
+    }
+
+    // Pass 2: orphan tool_result → drop.
+    let mut sanitised2: Vec<Message> = Vec::with_capacity(sanitised.len());
+    let mut last_assistant_tool_use_ids: std::collections::HashSet<String> = Default::default();
+    for msg in sanitised {
+        if matches!(msg.role, Role::Assistant) {
+            last_assistant_tool_use_ids = msg
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
+            sanitised2.push(msg);
+            continue;
+        }
+        let kept: Vec<ContentBlock> = msg
+            .content
+            .into_iter()
+            .filter(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => {
+                    last_assistant_tool_use_ids.contains(tool_use_id)
+                }
+                _ => true,
+            })
+            .collect();
+        // Once the user message paired with the prior assistant turn is
+        // consumed, the tracked set is exhausted — any LATER user-msg
+        // tool_results would be orphans relative to nothing.
+        last_assistant_tool_use_ids.clear();
+        if kept.is_empty() {
+            // Pure-orphan-tool_result user message: drop entirely.
+            continue;
+        }
+        sanitised2.push(Message {
+            role: Role::User,
+            content: kept,
+        });
+    }
+    sanitised2
 }
 
 /// One conversation thread.
@@ -1124,4 +1186,188 @@ pub fn create_agent_session(
     let runtime = AgentSessionRuntime::new(config);
     let session = runtime.create_session(sender)?;
     Ok((runtime, session))
+}
+
+#[cfg(test)]
+mod sanitise_tests {
+    //! Lock the two-pass session sanitiser invoked when resuming a
+    //! session. Pass 1 (orphan tool_use → synthetic tool_result) was
+    //! introduced in `8b921e7`; pass 2 (orphan tool_result → drop)
+    //! mirrors it for the OpenAI Responses-side bug.
+
+    use super::sanitise_session_messages;
+    use pi_ai::{ContentBlock, Message, Role};
+
+    fn user(blocks: Vec<ContentBlock>) -> Message {
+        Message {
+            role: Role::User,
+            content: blocks,
+        }
+    }
+    fn assistant(blocks: Vec<ContentBlock>) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: blocks,
+        }
+    }
+    fn text(s: &str) -> ContentBlock {
+        ContentBlock::Text { text: s.into() }
+    }
+    fn tool_use(id: &str, name: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input: serde_json::json!({}),
+        }
+    }
+    fn tool_result(id: &str, body: &str) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: id.into(),
+            content: body.into(),
+            is_error: false,
+        }
+    }
+    fn tool_use_ids(msg: &Message) -> Vec<String> {
+        msg.content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+    fn tool_result_ids(msg: &Message) -> Vec<String> {
+        msg.content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // ─── pass 1 ─────────────────────────────────────────────
+
+    #[test]
+    fn pass1_clean_session_passes_through_unchanged() {
+        let input = vec![
+            user(vec![text("hi")]),
+            assistant(vec![text("ok"), tool_use("call_a", "bash")]),
+            user(vec![tool_result("call_a", "done")]),
+            assistant(vec![text("good")]),
+        ];
+        let output = sanitise_session_messages(input);
+        assert_eq!(output.len(), 4);
+        assert_eq!(tool_use_ids(&output[1]), vec!["call_a"]);
+        assert_eq!(tool_result_ids(&output[2]), vec!["call_a"]);
+    }
+
+    #[test]
+    fn pass1_orphan_tool_use_at_eof_gets_synthetic_result() {
+        let input = vec![
+            user(vec![text("do it")]),
+            assistant(vec![tool_use("call_x", "bash")]),
+        ];
+        let output = sanitise_session_messages(input);
+        assert_eq!(output.len(), 3);
+        assert!(matches!(output[2].role, Role::User));
+        assert_eq!(tool_result_ids(&output[2]), vec!["call_x"]);
+        let body = match &output[2].content[0] {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(is_error);
+                content.clone()
+            }
+            _ => panic!("expected ToolResult"),
+        };
+        assert!(body.contains("interrupted"));
+    }
+
+    #[test]
+    fn pass1_partial_coverage_only_missing_ids_get_synthetic() {
+        let input = vec![
+            assistant(vec![
+                tool_use("a", "bash"),
+                tool_use("b", "bash"),
+                tool_use("c", "bash"),
+            ]),
+            user(vec![tool_result("a", "ok-a"), tool_result("c", "ok-c")]),
+        ];
+        let output = sanitise_session_messages(input);
+        assert_eq!(output.len(), 2);
+        let mut ids = tool_result_ids(&output[1]);
+        ids.sort();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    // ─── pass 2 ─────────────────────────────────────────────
+
+    #[test]
+    fn pass2_drops_tool_result_with_no_matching_prior_tool_use() {
+        // The exact bug we hit today: a user message carries a
+        // tool_result whose tool_use_id has no matching tool_use in
+        // the immediately preceding assistant turn (the tool_use was
+        // lost upstream). Pass 2 drops the result; the user message
+        // becomes empty → user message itself is dropped.
+        let input = vec![
+            user(vec![text("do it")]),
+            assistant(vec![text("ok")]),
+            user(vec![tool_result("orphan_id", "should be dropped")]),
+        ];
+        let output = sanitise_session_messages(input);
+        assert_eq!(output.len(), 2);
+        assert!(matches!(output[0].role, Role::User));
+        assert!(matches!(output[1].role, Role::Assistant));
+    }
+
+    #[test]
+    fn pass2_keeps_text_blocks_around_orphan_tool_results() {
+        let input = vec![
+            user(vec![text("do it")]),
+            assistant(vec![text("ok")]),
+            user(vec![
+                text("real follow-up question"),
+                tool_result("orphan_id", "should be dropped"),
+            ]),
+        ];
+        let output = sanitise_session_messages(input);
+        assert_eq!(output.len(), 3);
+        let last = &output[2];
+        assert!(matches!(last.role, Role::User));
+        assert_eq!(last.content.len(), 1);
+        assert!(matches!(last.content[0], ContentBlock::Text { .. }));
+    }
+
+    #[test]
+    fn pass2_id_set_clears_after_first_consumer() {
+        // Two consecutive user messages after a tool-call turn: the
+        // second one's tool_result is an orphan because the prior
+        // user already consumed the matching tool_use_id set.
+        let input = vec![
+            assistant(vec![tool_use("call_x", "bash")]),
+            user(vec![tool_result("call_x", "first consumer")]),
+            user(vec![tool_result("call_x", "second consumer")]),
+        ];
+        let output = sanitise_session_messages(input);
+        assert_eq!(output.len(), 2);
+        assert_eq!(tool_result_ids(&output[1]), vec!["call_x"]);
+    }
+
+    // ─── pass 1 + pass 2 interaction ────────────────────────
+
+    #[test]
+    fn passes_interact_synthetic_survives_pass2() {
+        // Pass 1 injects a synthetic tool_result. Pass 2 must keep
+        // it — it matches the prior assistant tool_use.
+        let input = vec![assistant(vec![tool_use("call_y", "bash")])];
+        let output = sanitise_session_messages(input);
+        assert_eq!(output.len(), 2);
+        assert_eq!(tool_result_ids(&output[1]), vec!["call_y"]);
+    }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        assert_eq!(sanitise_session_messages(Vec::new()).len(), 0);
+    }
 }
