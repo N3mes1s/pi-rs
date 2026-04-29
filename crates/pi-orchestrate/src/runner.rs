@@ -3,26 +3,39 @@
 //! Walks the topologically-ordered campaign milestones. For each
 //! eligible milestone (all `depends_on` reached `MERGED`):
 //!
-//!   1. Dispatch implementer subagent (v1 dispatch is subprocess-based
-//!      via [`crate::dispatch::Dispatch`]).
-//!   2. Dispatch reviewer subagent on the resulting branch.
-//!   3. Parse `Merge readiness:` line from reviewer's output.
-//!   4. On `READY_TO_MERGE`: cherry-pick the branch onto target_branch.
-//!      → `MERGED`. (`BLOCKED_ON_CONFLICT` if the cherry-pick fails.)
-//!   5. On `NEEDS_FIX`: re-dispatch implementer with reviewer text
-//!      appended, fix-loop counter ticks. Up to `fix_loop_max`
-//!      iterations; exhaustion → `FAILED`.
-//!   6. On `DO_NOT_MERGE` or unparseable verdict: `FAILED`.
+//!   1. `git checkout m.branch` (so dispatch sees the right tree).
+//!   2. Dispatch implementer subagent (subprocess-based via
+//!      [`crate::dispatch::Dispatch`]; the agent definition at
+//!      `<repo>/.pi/agents/<name>.md` supplies model + thinking +
+//!      system prompt).
+//!   3. Capture review snapshot (`branch_sha_at_review`,
+//!      `target_head_at_review`) per RFD §"Review snapshot".
+//!   4. Dispatch reviewer subagent.
+//!   5. Parse the FINAL line of the reviewer output for
+//!      `Merge readiness: …`.
+//!   6. On `READY_TO_MERGE`: re-rev-parse target_branch; if it has
+//!      moved since the snapshot, transition to
+//!      `BLOCKED_ON_REVIEW_STALE`. Otherwise cherry-pick the
+//!      snapshotted `branch_sha_at_review` onto target_branch
+//!      (success → `MERGED`, conflict → `BLOCKED_ON_CONFLICT`).
+//!   7. On `NEEDS_FIX` or unparseable verdict: re-dispatch
+//!      implementer with reviewer text appended, fix-loop counter
+//!      ticks. Up to `fix_loop_max` iterations; exhaustion →
+//!      `FAILED`.
+//!   8. On `DO_NOT_MERGE`: `FAILED` immediately.
 //!
 //! Every transition is appended to
 //! `<state-root>/<campaign>/state.jsonl` (one event per line). On
-//! resume the snapshot is rebuilt by replaying the log.
+//! resume the snapshot is rebuilt by replaying the log; the replay
+//! tolerates a truncated final line (the only partial-write shape
+//! that's reachable from append-only writes).
 //!
 //! v1 does NOT implement: parallel execution, worktree-per-milestone,
-//! override-rule forwarding, structured Concerns extraction, retry
-//! policy, BLOCKED_ON_REVIEW_STALE detection, MERGE-REPORT writer.
-//! Each is called out in the lib-level `dispatch` / `merge` / `verdict`
-//! module docs and in the v0→v1→v2 roadmap on RFD 0021.
+//! override-rule forwarding, structured Concerns extraction beyond
+//! the verdict line, retry policy on transient provider errors, the
+//! MERGE-REPORT writer, or full resume (replay reads the log but
+//! the runner doesn't yet skip already-MERGED milestones on a
+//! second invocation). Each is on the v2 roadmap in RFD 0021.
 
 use crate::dispatch::{agent_for, Dispatch, DispatchRole};
 use crate::merge::{cherry_pick_to_target, git_checkout, rev_parse, MergeOutcome};
@@ -543,27 +556,48 @@ fn now_ms() -> u64 {
 }
 
 /// Replay an existing `state.jsonl` into the in-memory event list.
-/// Skips a truncated trailing line (RFD 0021 §"Persisted state layout":
-/// a partial write must not corrupt the snapshot).
+///
+/// Tolerates a single truncated/malformed final line (the only
+/// partial-write shape reachable from append-only writes — a crash
+/// mid-`write_event` leaves at most one half-written line at EOF,
+/// per RFD §"Persisted state layout"). Earlier malformed lines are
+/// surfaced as `InvalidData` errors with the line number; concern
+/// C2 from the v1 review noted that the previous implementation
+/// silently `break`-ed on ANY deserialisation error, hiding all
+/// later valid events when corruption appeared earlier in the log.
+/// That hid bugs and made debugging impossible.
 pub fn replay(state_path: &Path) -> std::io::Result<Vec<StateEvent>> {
     let text = match fs::read_to_string(state_path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let mut events = Vec::new();
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
+    // Treat the LAST non-empty line specially. If it fails to parse
+    // we assume a truncated final line (the partial-write case).
+    // A failure on any earlier line is real corruption and gets
+    // surfaced, not silently dropped.
+    let nonempty: Vec<(usize, &str)> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .collect();
+    let mut events = Vec::with_capacity(nonempty.len());
+    let last_idx = nonempty.len().saturating_sub(1);
+    for (i, (line_no, line)) in nonempty.iter().enumerate() {
         match serde_json::from_str::<StateEvent>(line) {
             Ok(e) => events.push(e),
-            Err(_) => {
-                // Truncated final line: stop replay here without
-                // erroring. RFD §"Persisted state layout" — partial
-                // writes can never corrupt state; resume drops the
-                // truncated line.
-                break;
+            Err(err) => {
+                if i == last_idx {
+                    // Truncated final line: drop it silently.
+                    break;
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "state.jsonl corrupt at line {} (mid-stream, not truncated final): {err}",
+                        line_no + 1
+                    ),
+                ));
             }
         }
     }

@@ -27,6 +27,12 @@ struct FakeDispatch {
     /// can assert that B2 checked out the right branch before
     /// dispatching.
     branches_seen: Mutex<Vec<String>>,
+    /// Records each dispatch as `(role, agent_name, assignment_text)`
+    /// so tests can assert ordering / forwarding-text invariants.
+    /// Concern C4 in the v1 review: the previous FakeDispatch only
+    /// recorded role+agent, so reviewer-input construction and
+    /// fix-loop forwarding text were untestable.
+    calls: Mutex<Vec<(DispatchRole, String, String)>>,
     /// If set, a closure run before returning each canned outcome.
     /// Used by the B3 test to simulate a target-branch move between
     /// review snapshot and merge.
@@ -38,6 +44,7 @@ impl FakeDispatch {
         Self {
             canned: Mutex::new(canned),
             branches_seen: Mutex::new(Vec::new()),
+            calls: Mutex::new(Vec::new()),
             side_effect: Mutex::new(None),
         }
     }
@@ -48,24 +55,33 @@ impl FakeDispatch {
         Self {
             canned: Mutex::new(canned),
             branches_seen: Mutex::new(Vec::new()),
+            calls: Mutex::new(Vec::new()),
             side_effect: Mutex::new(Some(f)),
         }
     }
     fn branches_seen(&self) -> Vec<String> {
         self.branches_seen.lock().unwrap().clone()
     }
+    fn calls(&self) -> Vec<(DispatchRole, String, String)> {
+        self.calls.lock().unwrap().clone()
+    }
 }
 
 impl Dispatch for FakeDispatch {
     fn dispatch(
         &self,
-        _role: DispatchRole,
-        _agent_name: &str,
-        _assignment: &str,
+        role: DispatchRole,
+        agent_name: &str,
+        assignment: &str,
         cwd: &Path,
     ) -> std::io::Result<DispatchOutcome> {
         let head = current_branch(cwd);
         self.branches_seen.lock().unwrap().push(head);
+        self.calls.lock().unwrap().push((
+            role,
+            agent_name.to_string(),
+            assignment.to_string(),
+        ));
         if let Some(f) = self.side_effect.lock().unwrap().as_mut() {
             f(cwd);
         }
@@ -255,4 +271,185 @@ fn parse_and_validate(toml: &str) -> pi_orchestrate::Campaign {
     let c = parse_campaign(toml).unwrap();
     validate(&c).unwrap();
     c
+}
+
+// ─── C3: cherry-pick conflict path ──────────────────────────────
+
+/// Build a repo where two milestone branches both modify the SAME
+/// line of the same file. Cherry-picking the second after the first
+/// has merged onto target_branch will conflict — exercising the
+/// `MergeOutcome::Conflict` path the reviewer flagged as untested.
+fn make_repo_with_conflict() -> tempfile::TempDir {
+    let dir = tempdir().unwrap();
+    let p = dir.path();
+    fn run(p: &Path, args: &[&str]) {
+        let out = Command::new("git").args(args).current_dir(p).output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    run(p, &["init", "-q", "-b", "main"]);
+    run(p, &["config", "user.email", "test@example.com"]);
+    run(p, &["config", "user.name", "Test"]);
+    run(p, &["config", "commit.gpgsign", "false"]);
+    run(p, &["config", "tag.gpgsign", "false"]);
+    std::fs::write(p.join("shared.txt"), "original\n").unwrap();
+    run(p, &["add", "shared.txt"]);
+    run(p, &["commit", "-q", "-m", "base"]);
+
+    // Both branches modify the same line. After alpha lands, beta
+    // can't apply.
+    for (b, content) in &[("feat/alpha", "alpha edit\n"), ("feat/beta", "beta edit\n")] {
+        run(p, &["checkout", "-q", "-b", b]);
+        std::fs::write(p.join("shared.txt"), content).unwrap();
+        run(p, &["add", "shared.txt"]);
+        run(p, &["commit", "-q", "-m", &format!("touch shared on {b}")]);
+        run(p, &["checkout", "-q", "main"]);
+    }
+    dir
+}
+
+#[test]
+fn c3_cherry_pick_conflict_marks_blocked_on_conflict_and_cleans_tree() {
+    let repo = make_repo_with_conflict();
+    let dispatcher = FakeDispatch::new(vec![
+        ok("alpha imp"),
+        ok("Merge readiness: READY_TO_MERGE"),
+        ok("beta imp"),
+        ok("Merge readiness: READY_TO_MERGE"),
+    ]);
+    let state_root = tempdir().unwrap();
+    let summary = run_with(
+        &parse_and_validate(TWO_MS_TOML),
+        state_root.path(),
+        &dispatcher,
+        repo.path(),
+    )
+    .unwrap();
+
+    // Alpha cherry-picks cleanly; beta conflicts. Exit 3 because at
+    // least one milestone is blocked.
+    assert_eq!(summary.exit_code, 3);
+    let alpha = summary.outcomes.iter().find(|o| o.id == "alpha").unwrap();
+    let beta = summary.outcomes.iter().find(|o| o.id == "beta").unwrap();
+    assert_eq!(alpha.final_state, "MERGED");
+    assert_eq!(beta.final_state, "BLOCKED_ON_CONFLICT");
+
+    // Tree must be clean — no in-flight cherry-pick state, no
+    // unstaged residue from the failed merge. The runner's abort
+    // logic (merge::cherry_pick_to_target) is responsible.
+    let status_out = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    let dirty = String::from_utf8_lossy(&status_out.stdout);
+    assert!(
+        dirty.trim().is_empty(),
+        "working tree must be clean after BLOCKED_ON_CONFLICT, got: {dirty}"
+    );
+    let cherry_pick_head = repo.path().join(".git").join("CHERRY_PICK_HEAD");
+    assert!(
+        !cherry_pick_head.exists(),
+        ".git/CHERRY_PICK_HEAD must be cleared by the abort"
+    );
+}
+
+// ─── C4: FakeDispatch can now assert reviewer-assignment content ──
+
+#[test]
+fn c4_reviewer_assignment_includes_implementer_output_and_target_branch() {
+    let repo = make_repo("main", &["feat/alpha"]);
+    let toml = r#"
+name = "reviewer-input-test"
+target_branch = "main"
+
+[[milestones]]
+id = "alpha"
+branch = "feat/alpha"
+implementer = "router-implementer"
+assignment = "do alpha"
+"#;
+    let dispatcher = FakeDispatch::new(vec![
+        ok("IMPLEMENTER_OUTPUT_SENTINEL_42"),
+        ok("Merge readiness: READY_TO_MERGE"),
+    ]);
+    let state_root = tempdir().unwrap();
+    run_with(
+        &parse_and_validate(toml),
+        state_root.path(),
+        &dispatcher,
+        repo.path(),
+    )
+    .unwrap();
+
+    let calls = dispatcher.calls();
+    assert_eq!(calls.len(), 2);
+    // Reviewer call (second) — its assignment text must include the
+    // implementer's output (so the reviewer can read it) and the
+    // campaign target_branch in the diff command (concern C1, fixed
+    // for free in f5f329a).
+    let (_role, _agent, reviewer_assignment) = &calls[1];
+    assert!(
+        reviewer_assignment.contains("IMPLEMENTER_OUTPUT_SENTINEL_42"),
+        "reviewer must see implementer output: {reviewer_assignment}"
+    );
+    assert!(
+        reviewer_assignment.contains("git diff main...feat/alpha"),
+        "reviewer's diff command must reference the campaign's target_branch: \
+         {reviewer_assignment}"
+    );
+}
+
+// ─── C2: replay distinguishes truncated final from mid-stream corruption ──
+
+#[test]
+fn c2_replay_errors_on_mid_stream_corruption_not_just_truncated_final() {
+    use pi_orchestrate::replay;
+    let dir = tempdir().unwrap();
+    let p = dir.path().join("state.jsonl");
+    // Two valid events, one corrupt line in the MIDDLE, one valid
+    // event after. The previous "stop on first error" replay would
+    // silently return only the first 2 events, hiding the corruption
+    // and the events after it.
+    let valid1 = r#"{"milestone":"a","from":"PENDING","to":"DISPATCHED","ts":1}"#;
+    let valid2 = r#"{"milestone":"a","from":"DISPATCHED","to":"REVIEWED","ts":2}"#;
+    let corrupt = r#"{"milestone":"a","from":...this is not json"#;
+    let valid3 = r#"{"milestone":"a","from":"REVIEWED","to":"MERGED","ts":3}"#;
+    let body = format!("{valid1}\n{valid2}\n{corrupt}\n{valid3}\n");
+    std::fs::write(&p, body).unwrap();
+
+    let result = replay(&p);
+    assert!(
+        result.is_err(),
+        "mid-stream corruption must be surfaced, not silently masked"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("line 3") || err_msg.contains("mid-stream"),
+        "error must point to the corrupt line: {err_msg}"
+    );
+}
+
+#[test]
+fn c2_replay_tolerates_truncated_final_line() {
+    use pi_orchestrate::replay;
+    let dir = tempdir().unwrap();
+    let p = dir.path().join("state.jsonl");
+    // Two valid events + one truncated final (mid-write crash).
+    let valid1 = r#"{"milestone":"a","from":"PENDING","to":"DISPATCHED","ts":1}"#;
+    let valid2 = r#"{"milestone":"a","from":"DISPATCHED","to":"REVIEWED","ts":2}"#;
+    let truncated = r#"{"milestone":"a","from":"REVIEW"#; // half-written
+    let body = format!("{valid1}\n{valid2}\n{truncated}");
+    std::fs::write(&p, body).unwrap();
+
+    let events = replay(&p).expect("truncated final must NOT error");
+    assert_eq!(
+        events.len(),
+        2,
+        "replay should yield the 2 valid events and silently drop the truncated one"
+    );
 }

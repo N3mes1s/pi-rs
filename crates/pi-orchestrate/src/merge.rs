@@ -5,14 +5,18 @@
 //!   * primitive is `git cherry-pick reviewed_branch_sha`
 //!   * staleness check: compare current `git rev-parse <target>` to
 //!     the `reviewed_target_head_sha` snapshot taken at review time;
-//!     mismatch → `BLOCKED_ON_REVIEW_STALE` (v3, not v1)
+//!     mismatch → `BLOCKED_ON_REVIEW_STALE`
 //!
-//! v1 implements the simple cherry-pick + conflict-detection path.
-//! Staleness detection is wired in (we already capture
-//! reviewed_target_head_sha in the state event), but on mismatch v1
-//! still attempts the cherry-pick — Git itself will produce a conflict
-//! if the bases diverged enough to matter. v3 will lift the staleness
-//! guard before the cherry-pick.
+//! v1 implements all three. The staleness check happens in the
+//! runner (`runner::run_with`), so this module is invoked only after
+//! the runner has confirmed `target_head` hasn't moved since the
+//! review snapshot. Cherry-pick failures are categorised by parsing
+//! `git cherry-pick`'s stderr: a conflict (string `CONFLICT` /
+//! `could not apply`) → `MergeOutcome::Conflict`; anything else
+//! (e.g. unknown ref, missing object) → `MergeOutcome::GitError`.
+//! On any non-success path the cherry-pick is aborted; if `--abort`
+//! itself fails, that's surfaced as a `GitError` so the operator
+//! sees a dirty tree rather than silently moving on.
 
 use std::path::Path;
 use std::process::Command;
@@ -102,14 +106,41 @@ pub fn cherry_pick_to_target(
         return MergeOutcome::Merged;
     }
 
-    // 3. Cherry-pick failed — likely a merge conflict. Abort it so
-    //    the working tree returns to a clean state. The campaign
-    //    flags this milestone as BLOCKED_ON_CONFLICT and continues
-    //    with downstream milestones whose dependencies are still
-    //    satisfiable. Recovery is manual (RFD §"Operator recovery").
-    let _ = Command::new("git")
+    // 3. Cherry-pick failed. Categorise: conflict vs other git error.
+    //    Concern C3 from the v1 review: previously every failure was
+    //    treated as Conflict, which misreports state when the actual
+    //    cause is e.g. an unknown ref or a corrupted object.
+    //    `git cherry-pick`'s stderr contains "CONFLICT" or
+    //    "could not apply" on a real merge conflict; anything else
+    //    bubbles up as GitError so the operator sees the real cause.
+    let stderr = String::from_utf8_lossy(&cp.stderr);
+    let is_conflict = stderr.contains("CONFLICT") || stderr.contains("could not apply");
+
+    // 4. Abort the in-progress cherry-pick to clean the tree. If
+    //    the abort itself fails, surface that as GitError — leaving
+    //    a dirty tree and returning Conflict would silently break
+    //    the next milestone's `git checkout`.
+    let abort = Command::new("git")
         .args(["cherry-pick", "--abort"])
         .current_dir(repo_root)
         .output();
-    MergeOutcome::Conflict
+    if let Ok(a) = &abort {
+        if !a.status.success() {
+            return MergeOutcome::GitError(format!(
+                "cherry-pick failed AND --abort failed: cp_stderr={} abort_stderr={}",
+                stderr.trim(),
+                String::from_utf8_lossy(&a.stderr).trim()
+            ));
+        }
+    } else {
+        return MergeOutcome::GitError(
+            "cherry-pick failed AND `git cherry-pick --abort` could not be spawned".into(),
+        );
+    }
+
+    if is_conflict {
+        MergeOutcome::Conflict
+    } else {
+        MergeOutcome::GitError(format!("git cherry-pick failed: {}", stderr.trim()))
+    }
 }
