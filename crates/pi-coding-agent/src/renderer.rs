@@ -7,7 +7,7 @@
 //! diff renderer in `pi-tui` actually useful.
 
 use crossterm::style::Color;
-use pi_agent_core::{AgentEvent, AgentEventKind};
+use pi_agent_core::{AgentEvent, AgentEventKind, RouteMode};
 use pi_ai::{ContentBlock, Role, Usage};
 use pi_tui::{Frame, Line, Span, Theme};
 
@@ -319,70 +319,119 @@ impl Transcript {
         }
     }
 
-    /// Powerline-style footer used by the interactive TUI. Format:
+    /// Powerline-style footer used by the interactive TUI when the terminal
+    /// advertises 256 colours. Format:
     ///
     /// ```text
-    ///  model ▶ cwd ▶ git: branch ●S+M ▶ in:N out:N $X.XXXX ▶ ctx:N%
+    ///  model ▶ cwd ▶ git: branch ●S+M ▶ route:auto ▶ $X.XXXX ▶ ctx:N%
     /// ```
     ///
-    /// Sections that don't apply (no git repo, no `context_window`)
-    /// are skipped. The ▶ separator is rendered in the muted theme
-    /// colour; segment text uses the accent / muted palette.
+    /// When 256-colour support is unavailable the function degrades to the
+    /// legacy dim-line footer instead of emitting styled background segments.
     pub fn footer_powerline(
         &self,
         theme: &Theme,
         model: &str,
         cwd: &std::path::Path,
         git: Option<&crate::footer::GitStatus>,
+        route_mode: RouteMode,
+        context_window: Option<u32>,
+        available_colors: Option<u16>,
+    ) -> Line {
+        if available_colors.unwrap_or_else(crossterm::style::available_color_count) < 256 {
+            return self.footer_powerline_fallback(theme, model, cwd, git, route_mode, context_window);
+        }
+
+        let mut spans: Vec<Span> = vec![Span::plain(" ")];
+        let text_fg = theme.fg.to_crossterm();
+        let muted_fg = theme.muted.to_crossterm();
+        let accent_fg = theme.accent.to_crossterm();
+        let segment_bgs = [
+            theme.accent.to_crossterm(),
+            theme.user.to_crossterm(),
+            theme.tool.to_crossterm(),
+            theme.assistant.to_crossterm(),
+            theme.error.to_crossterm(),
+            theme.muted.to_crossterm(),
+        ];
+        let divider_fg = theme.bg.to_crossterm();
+
+        let mut segment_index = 0usize;
+        let push_segment = |spans: &mut Vec<Span>, label: String, fg: Color, bg: Color, next_bg: Option<Color>| {
+            spans.push(Span::styled(format!(" {label} "), fg, bg));
+            match next_bg {
+                Some(next) => spans.push(Span::styled("", bg, next)),
+                None => spans.push(Span::styled("", bg, divider_fg)),
+            }
+        };
+
+        let cwd_display = cwd
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| compact_cwd(cwd));
+        let mut segments: Vec<(String, Color)> = vec![
+            (model.to_string(), text_fg),
+            (cwd_display, accent_fg),
+        ];
+        if let Some(g) = git {
+            segments.push((crate::footer::format_git(g), text_fg));
+        }
+        segments.push((format!("route:{}", route_mode_label(route_mode)), text_fg));
+        segments.push((format!("${:.4}", self.usage_total.cost_usd), text_fg));
+        if let Some(cw) = context_window {
+            if cw > 0 {
+                let pct = (self.usage_total.input_tokens as f64 / cw as f64) * 100.0;
+                segments.push((format!("ctx:{:.0}%", pct.clamp(0.0, 100.0)), muted_fg));
+            }
+        }
+
+        for (idx, (label, fg)) in segments.iter().enumerate() {
+            let bg = segment_bgs[segment_index % segment_bgs.len()];
+            let next_bg = segments.get(idx + 1).map(|_| segment_bgs[(segment_index + 1) % segment_bgs.len()]);
+            push_segment(&mut spans, label.clone(), *fg, bg, next_bg);
+            segment_index += 1;
+        }
+
+        Line { spans }
+    }
+
+    fn footer_powerline_fallback(
+        &self,
+        theme: &Theme,
+        model: &str,
+        cwd: &std::path::Path,
+        git: Option<&crate::footer::GitStatus>,
+        route_mode: RouteMode,
         context_window: Option<u32>,
     ) -> Line {
         let muted = theme.muted.to_crossterm();
         let accent = theme.accent.to_crossterm();
         let mut spans: Vec<Span> = Vec::new();
-        // leading space so the first arrow doesn't kiss the edge
         spans.push(Span::plain(" ".to_string()));
 
         let push_sep = |spans: &mut Vec<Span>| {
             spans.push(Span::coloured(" ▶ ".to_string(), muted));
         };
 
-        // 1. model
         spans.push(Span::coloured(model.to_string(), accent));
-
-        // 2. cwd (compact: replace $HOME with ~)
-        let cwd_display = compact_cwd(cwd);
         push_sep(&mut spans);
-        spans.push(Span::coloured(cwd_display, muted));
-
-        // 3. git
+        spans.push(Span::coloured(compact_cwd(cwd), muted));
         if let Some(g) = git {
             push_sep(&mut spans);
             spans.push(Span::coloured(crate::footer::format_git(g), muted));
         }
-
-        // 4. usage
         push_sep(&mut spans);
-        spans.push(Span::coloured(
-            format!(
-                "in:{} out:{} ${:.4}",
-                self.usage_total.input_tokens,
-                self.usage_total.output_tokens,
-                self.usage_total.cost_usd,
-            ),
-            muted,
-        ));
-
-        // 5. ctx percentage (input-tokens / context_window)
+        spans.push(Span::coloured(format!("route:{}", route_mode_label(route_mode)), muted));
+        push_sep(&mut spans);
+        spans.push(Span::coloured(format!("${:.4}", self.usage_total.cost_usd), muted));
         if let Some(cw) = context_window {
             if cw > 0 {
                 let pct = (self.usage_total.input_tokens as f64 / cw as f64) * 100.0;
-                let pct = pct.clamp(0.0, 100.0);
                 push_sep(&mut spans);
-                spans.push(Span::coloured(format!("ctx:{:.0}%", pct), muted));
+                spans.push(Span::coloured(format!("ctx:{:.0}%", pct.clamp(0.0, 100.0)), muted));
             }
         }
-
-        // trailing space so the closing edge breathes
         spans.push(Span::plain(" ".to_string()));
         Line { spans }
     }
@@ -563,4 +612,13 @@ fn compact_cwd(cwd: &std::path::Path) -> String {
         }
     }
     cwd.display().to_string()
+}
+
+fn route_mode_label(mode: RouteMode) -> &'static str {
+    match mode {
+        RouteMode::Off => "off",
+        RouteMode::Static => "static",
+        RouteMode::Auto => "auto",
+        RouteMode::Learned => "learned",
+    }
 }

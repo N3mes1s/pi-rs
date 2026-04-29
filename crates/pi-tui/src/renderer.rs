@@ -6,10 +6,17 @@ use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
 use std::io::Write;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpanStyle {
+    pub fg: Color,
+    pub bg: Color,
+}
+
 #[derive(Debug, Clone)]
 pub struct Span {
     pub text: String,
     pub color: Option<Color>,
+    pub style: Option<SpanStyle>,
 }
 
 impl Span {
@@ -17,6 +24,7 @@ impl Span {
         Self {
             text: s.into(),
             color: None,
+            style: None,
         }
     }
 
@@ -24,6 +32,15 @@ impl Span {
         Self {
             text: s.into(),
             color: Some(c),
+            style: None,
+        }
+    }
+
+    pub fn styled(s: impl Into<String>, fg: Color, bg: Color) -> Self {
+        Self {
+            text: s.into(),
+            color: Some(fg),
+            style: Some(SpanStyle { fg, bg }),
         }
     }
 }
@@ -94,9 +111,15 @@ impl<W: Write> DiffRenderer<W> {
                         .spans
                         .iter()
                         .map(|span| {
-                            let style = match span.color {
-                                Some(color) => Style::default().fg(to_ratatui_color(color)),
-                                None => Style::default(),
+                            let style = if let Some(style) = span.style {
+                                Style::default()
+                                    .fg(to_ratatui_color(style.fg))
+                                    .bg(to_ratatui_color(style.bg))
+                            } else {
+                                match span.color {
+                                    Some(color) => Style::default().fg(to_ratatui_color(color)),
+                                    None => Style::default(),
+                                }
                             };
                             RtSpan::styled(span.text.clone(), style)
                         })

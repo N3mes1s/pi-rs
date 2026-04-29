@@ -1,5 +1,6 @@
 //! Tests for the powerline footer + git-status cache.
 
+use pi_agent_core::RouteMode;
 use pi_coding_agent::footer::{format_git, GitStatus, GitStatusCache};
 use pi_coding_agent::renderer::Transcript;
 use pi_tui::{ColorSpec, NamedColor, Theme};
@@ -120,15 +121,17 @@ fn footer_powerline_basic_segments() {
         "claude-test",
         Path::new("/tmp/here"),
         None,
+        RouteMode::Static,
         Some(200_000),
+        Some(8),
     );
     let joined: String = line.spans.iter().map(|s| s.text.clone()).collect();
     assert!(joined.contains("claude-test"));
     assert!(joined.contains("/tmp/here"));
     // No git segment.
     assert!(!joined.contains("git:"));
-    assert!(joined.contains("in:100 out:50 $0.0123"));
-    // 100/200000 ≈ 0% — formatted to nearest integer.
+    assert!(joined.contains("$0.0123"));
+    assert!(joined.contains("route:static"));
     assert!(joined.contains("ctx:0%"));
     // Powerline arrows separate every visible segment.
     assert!(joined.matches('▶').count() >= 3);
@@ -142,7 +145,15 @@ fn footer_powerline_includes_git_segment_when_status_provided() {
         staged: 1,
         modified: 0,
     };
-    let line = t.footer_powerline(&theme(), "m", Path::new("/tmp"), Some(&g), None);
+    let line = t.footer_powerline(
+        &theme(),
+        "m",
+        Path::new("/tmp"),
+        Some(&g),
+        RouteMode::Static,
+        None,
+        Some(8),
+    );
     let joined: String = line.spans.iter().map(|s| s.text.clone()).collect();
     assert!(joined.contains("git: trunk ●1+0"));
     // No context_window → no ctx segment.
@@ -153,7 +164,15 @@ fn footer_powerline_includes_git_segment_when_status_provided() {
 fn footer_powerline_ctx_caps_at_one_hundred() {
     let mut t = Transcript::default();
     t.usage_total.input_tokens = 999_999_999;
-    let line = t.footer_powerline(&theme(), "m", Path::new("/tmp"), None, Some(1_000));
+    let line = t.footer_powerline(
+        &theme(),
+        "m",
+        Path::new("/tmp"),
+        None,
+        RouteMode::Static,
+        Some(1_000),
+        Some(8),
+    );
     let joined: String = line.spans.iter().map(|s| s.text.clone()).collect();
     assert!(joined.contains("ctx:100%"));
 }
@@ -161,7 +180,15 @@ fn footer_powerline_ctx_caps_at_one_hundred() {
 #[test]
 fn footer_powerline_ctx_segment_skipped_when_window_zero() {
     let t = Transcript::default();
-    let line = t.footer_powerline(&theme(), "m", Path::new("/tmp"), None, Some(0));
+    let line = t.footer_powerline(
+        &theme(),
+        "m",
+        Path::new("/tmp"),
+        None,
+        RouteMode::Static,
+        Some(0),
+        Some(8),
+    );
     let joined: String = line.spans.iter().map(|s| s.text.clone()).collect();
     assert!(!joined.contains("ctx:"));
 }

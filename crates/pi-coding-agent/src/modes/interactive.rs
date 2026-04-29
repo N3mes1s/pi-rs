@@ -11,13 +11,13 @@ use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event as CtEvent, EventStream, KeyCode, KeyEvent,
     KeyModifiers,
 };
-use crossterm::style::{Color, ResetColor, SetForegroundColor};
+use crossterm::style::{available_color_count, Color, ResetColor, SetForegroundColor};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::{cursor, execute, queue, style::Print};
 use futures::StreamExt;
-use pi_agent_core::{settings::ThinkingSetting, AgentEvent, AgentEventKind};
+use pi_agent_core::{settings::ThinkingSetting, AgentEvent, AgentEventKind, RouteMode};
 use pi_tui::{DiffRenderer, Editor, EditorEvent, Frame, Line, Span, Theme};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -151,6 +151,8 @@ pub struct View {
     pub context_window: Option<u32>,
     /// Current theme name (updated by /theme command).
     pub current_theme_name: String,
+    /// Active route mode shown in the footer powerline.
+    pub route_mode: RouteMode,
     /// Accepted slash-autocomplete candidates for repeated Tab / Shift-Tab
     /// cycling after the first accept.
     pub slash_ac_cycle_suggestions: Vec<String>,
@@ -205,6 +207,7 @@ impl View {
             git_status_cache: std::sync::Arc::new(crate::footer::GitStatusCache::default()),
             context_window: None,
             current_theme_name: String::new(),
+            route_mode: RouteMode::Static,
             slash_ac_cycle_suggestions: Vec::new(),
             slash_ac_cycle_index: 0,
             slash_ac_accepted_range: None,
@@ -1133,8 +1136,15 @@ pub(crate) fn build_frame(
     // Footer (powerline-style: model ▶ cwd ▶ git ▶ usage ▶ ctx).
     let git = view.git_status_cache.get(cwd);
     let mut footer =
-        view.transcript
-            .footer_powerline(theme, model, cwd, git.as_ref(), view.context_window);
+        view.transcript.footer_powerline(
+            theme,
+            model,
+            cwd,
+            git.as_ref(),
+            view.route_mode,
+            view.context_window,
+            Some(available_color_count()),
+        );
     if view.scoped_models {
         // Highlight that model changes will only apply to the next message.
         footer.spans.push(Span::coloured(
@@ -1302,6 +1312,7 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
     let mut view = View::new(startup.keymap.clone(), startup.settings.thinking);
     sync_slash_registry(&mut view, &slash);
     view.current_theme_name = theme.name.clone();
+    view.route_mode = startup.settings.route;
     view.scoped_models = startup.settings.scoped_models;
     // Resolve context_window for the active model so the footer can
     // render ctx:N%. Falls back to None when the model isn't in the
