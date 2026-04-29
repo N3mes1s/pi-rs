@@ -54,7 +54,20 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
                     );
                 }
                 AgentEventKind::Error { message } => {
+                    // Terminal: an error event means the agent loop
+                    // is unwinding. Without `break` here the printer
+                    // task waits forever for a TurnComplete that
+                    // will never fire, because the EventSender lives
+                    // on the AgentSession held by this function and
+                    // doesn't get dropped until AFTER `printer.await`
+                    // — chicken-and-egg hang. Same reasoning for
+                    // Aborted below.
                     eprintln!("\n[error] {message}");
+                    break;
+                }
+                AgentEventKind::Aborted => {
+                    eprintln!("\n[aborted]");
+                    break;
                 }
                 AgentEventKind::TurnComplete => {
                     println!();

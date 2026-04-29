@@ -798,7 +798,26 @@ impl AgentSession {
                     self.emit(AgentEventKind::Aborted).await;
                     return Err(RuntimeError::Aborted);
                 }
-                let ev = ev.map_err(|e| RuntimeError::Provider(e.to_string()))?;
+                let ev = match ev {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        // Stream-level error mid-turn (transport
+                        // drop, decode failure, etc). Surface to
+                        // listeners FIRST — otherwise -p / --json
+                        // mode printers hang on the channel waiting
+                        // for a TurnComplete that will never fire,
+                        // and the operator sees a wedged process
+                        // with no diagnostic. This mirrors the
+                        // initial-stream() failure path above.
+                        let message = e.to_string();
+                        self.emit(AgentEventKind::Error {
+                            message: message.clone(),
+                        })
+                        .await;
+                        self.emit(AgentEventKind::Aborted).await;
+                        return Err(RuntimeError::Provider(message));
+                    }
+                };
                 use pi_ai::StreamEventKind as K;
                 match ev.kind {
                     K::TextDelta { text } => {
