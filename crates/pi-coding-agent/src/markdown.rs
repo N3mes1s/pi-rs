@@ -10,6 +10,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Render markdown text into pi-tui `Line`s with proper wrapping and styling.
 ///
@@ -31,38 +32,38 @@ pub fn parse_and_render_markdown(
     let mut result: Vec<Line> = Vec::new();
     let mut current_spans: Vec<Span> = Vec::new();
 
-    // Style stacks
     let mut bold_depth = 0u32;
     let mut italic_depth = 0u32;
 
-    // Code block state
     let mut in_code_block = false;
     let mut code_lang = String::new();
     let mut code_body = String::new();
 
-    let flush_line = |result: &mut Vec<Line>, current: &mut Vec<Span>| {
-        if !current.is_empty() {
-            result.push(Line {
-                spans: std::mem::take(current),
-            });
-        }
-    };
+    let flush_wrapped_paragraph =
+        |result: &mut Vec<Line>, current: &mut Vec<Span>| {
+            if current.is_empty() {
+                return;
+            }
+            result.extend(wrap_spans(std::mem::take(current), wrap_width));
+        };
 
     for event in parser {
         match event {
-            // ── Block start tags ───────────────────────────────────────────
             Event::Start(Tag::CodeBlock(kind)) => {
-                flush_line(&mut result, &mut current_spans);
+                flush_wrapped_paragraph(&mut result, &mut current_spans);
                 in_code_block = true;
                 code_lang = match kind {
-                    CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or("").to_owned(),
+                    CodeBlockKind::Fenced(info) => info
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_owned(),
                     CodeBlockKind::Indented => String::new(),
                 };
                 code_body.clear();
             }
             Event::Start(Tag::Paragraph) => {}
 
-            // ── Block end tags ────────────────────────────────────────────
             Event::End(Tag::CodeBlock(_)) => {
                 in_code_block = false;
                 result.push(Line::default());
@@ -70,25 +71,16 @@ pub fn parse_and_render_markdown(
                 result.push(Line::default());
             }
             Event::End(Tag::Paragraph) => {
-                flush_line(&mut result, &mut current_spans);
+                flush_wrapped_paragraph(&mut result, &mut current_spans);
                 result.push(Line::default());
             }
 
-            // ── Inline style tags (start) ──────────────────────────────────
             Event::Start(Tag::Strong) => bold_depth += 1,
             Event::Start(Tag::Emphasis) => italic_depth += 1,
-
-            // ── Inline style tags (end) ────────────────────────────────────
             Event::End(Tag::Strong) => bold_depth = bold_depth.saturating_sub(1),
             Event::End(Tag::Emphasis) => italic_depth = italic_depth.saturating_sub(1),
 
-            // ── Inline code (backtick) ─────────────────────────────────────
-            // In pulldown-cmark 0.9, inline code spans produce Event::Code(_)
-            // directly rather than Start/End tags.
-
-            // ── Text content ───────────────────────────────────────────────
             Event::Code(text) => {
-                // Inline `code` — never produces literal backticks
                 current_spans.push(Span::coloured(text.into_string(), Color::Cyan));
             }
             Event::Text(text) => {
@@ -103,22 +95,6 @@ pub fn parse_and_render_markdown(
                 } else {
                     None
                 };
-                // DO NOT call wrap_line on this fragment. The wrap
-                // helper trims leading/trailing whitespace at line
-                // boundaries, which is right for FULL lines but wrong
-                // for sub-fragments that pulldown-cmark splits at
-                // emphasis boundaries. Concretely: input `"are
-                // **wrap** ("` parses as Text("are "), Start(Strong),
-                // Text("wrap"), End(Strong), Text(" ("). Wrapping
-                // each Text individually returns ["are"] / ["wrap"]
-                // / ["("] — the space-only boundaries are dropped,
-                // and the rendered line reads "arewrap(" instead of
-                // "are wrap (". Push the text verbatim into a Span;
-                // paragraph-level word-wrap is handled by the wrap
-                // pass over the assembled line if/when long lines
-                // need breaking. Long fully-styled lines may overflow
-                // the viewport for now — tracked as a follow-up; the
-                // visible space-eating bug is the user-impacting one.
                 let span = match color {
                     Some(c) => Span::coloured(text.into_string(), c),
                     None => Span::plain(text.into_string()),
@@ -126,18 +102,16 @@ pub fn parse_and_render_markdown(
                 current_spans.push(span);
             }
 
-            // ── Soft/hard breaks ───────────────────────────────────────────
             Event::SoftBreak | Event::HardBreak => {
-                flush_line(&mut result, &mut current_spans);
+                flush_wrapped_paragraph(&mut result, &mut current_spans);
             }
 
             _ => {}
         }
     }
 
-    flush_line(&mut result, &mut current_spans);
+    flush_wrapped_paragraph(&mut result, &mut current_spans);
 
-    // Remove trailing empty lines
     while result.last().map(|l| l.spans.is_empty()).unwrap_or(false) {
         result.pop();
     }
@@ -149,6 +123,109 @@ pub fn parse_and_render_markdown(
     result
 }
 
+fn wrap_spans(spans: Vec<Span>, width: usize) -> Vec<Line> {
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    if width == 0 {
+        return vec![Line { spans }];
+    }
+
+    let mut out: Vec<Line> = Vec::new();
+    let mut current: Vec<Span> = Vec::new();
+    let mut current_width = 0usize;
+
+    for span in spans {
+        let mut remaining = span.text.as_str();
+        while !remaining.is_empty() {
+            if current.is_empty() {
+                remaining = remaining.trim_start_matches(char::is_whitespace);
+                if remaining.is_empty() {
+                    break;
+                }
+            }
+
+            if current_width >= width {
+                out.push(Line {
+                    spans: std::mem::take(&mut current),
+                });
+                current_width = 0;
+            }
+
+            let available = width.saturating_sub(current_width);
+            if available == 0 {
+                out.push(Line {
+                    spans: std::mem::take(&mut current),
+                });
+                current_width = 0;
+                continue;
+            }
+
+            let (take, rest) = split_for_wrap(remaining, available);
+            if take.is_empty() {
+                if !current.is_empty() {
+                    out.push(Line {
+                        spans: std::mem::take(&mut current),
+                    });
+                    current_width = 0;
+                    continue;
+                }
+                break;
+            }
+
+            let mut piece = span.clone();
+            piece.text = take.to_string();
+            current_width += UnicodeWidthStr::width(piece.text.as_str());
+            current.push(piece);
+            remaining = rest;
+
+            if !remaining.is_empty() {
+                out.push(Line {
+                    spans: std::mem::take(&mut current),
+                });
+                current_width = 0;
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        out.push(Line { spans: current });
+    }
+
+    out
+}
+
+fn split_for_wrap(text: &str, available: usize) -> (&str, &str) {
+    if text.is_empty() {
+        return ("", "");
+    }
+    if available == 0 {
+        return ("", text);
+    }
+
+    let mut width = 0usize;
+    let mut last_whitespace_end = None;
+    for (idx, ch) in text.char_indices() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > available {
+            if let Some(split) = last_whitespace_end {
+                return (&text[..split], &text[split..]);
+            }
+            if idx == 0 {
+                let next = idx + ch.len_utf8();
+                return (&text[..next], &text[next..]);
+            }
+            return (&text[..idx], &text[idx..]);
+        }
+        width += ch_width;
+        if ch.is_whitespace() {
+            last_whitespace_end = Some(idx);
+        }
+    }
+
+    (text, "")
+}
+
 /// Render a fenced code block with syntect syntax highlighting.
 ///
 /// Returns a `Vec<Line>` with:
@@ -158,7 +235,6 @@ pub fn parse_and_render_markdown(
 pub fn render_code_block(lang: &str, code: &str, _viewport_cols: u16) -> Vec<Line> {
     let mut lines: Vec<Line> = Vec::new();
 
-    // Language label header
     let lang_label = if lang.is_empty() { "code" } else { lang };
     lines.push(Line {
         spans: vec![Span::coloured(
@@ -167,7 +243,6 @@ pub fn render_code_block(lang: &str, code: &str, _viewport_cols: u16) -> Vec<Lin
         )],
     });
 
-    // Load syntect defaults (bundled via the `parsing` feature)
     let ss = SyntaxSet::load_defaults_newlines();
     let ts = ThemeSet::load_defaults();
     let theme = ts
@@ -216,7 +291,6 @@ pub fn render_code_block(lang: &str, code: &str, _viewport_cols: u16) -> Vec<Lin
         }
     }
 
-    // Closing border line
     lines.push(Line {
         spans: vec![Span::coloured("  ╰─".to_string(), Color::DarkGrey)],
     });

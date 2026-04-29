@@ -100,3 +100,24 @@ fn word_wrap_preserves_all_content() {
         assert!(all_text.contains(word), "word '{}' missing from output: {}", word, all_text);
     }
 }
+
+#[test]
+fn word_wrap_reflows_styled_paragraphs_without_eating_spaces() {
+    let text = "alpha **bravo** charlie delta echo foxtrot golf";
+    let result = parse_and_render_markdown(text, Color::Cyan, Color::DarkGrey, 18);
+
+    assert!(result.len() > 1, "expected wrapped output, got {result:?}");
+
+    let joined = result
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.text.as_str()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(joined.contains("alpha bravo charlie"), "lost spacing: {joined}");
+
+    for (i, line) in result.iter().enumerate() {
+        let line_text: String = line.spans.iter().map(|s| s.text.as_str()).collect();
+        let width = UnicodeWidthStr::width(line_text.as_str());
+        assert!(width <= 18, "line {} exceeds 18 cols (width={}): {:?}", i, width, line_text);
+    }
+}
