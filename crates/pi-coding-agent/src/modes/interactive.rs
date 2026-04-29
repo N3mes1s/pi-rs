@@ -1519,13 +1519,13 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                         renderer.resize(cols);
                         view.dirty = true;
                     }
-                    CtEvent::Paste(text) => {
+                    CtEvent::Paste(text)
                         // Bracketed-paste payload — insert verbatim into the
                         // editor instead of letting each char/newline turn
                         // into a separate KeyEvent (which would submit early
                         // on the first '\n'). Newlines stay in the buffer
                         // so the user can review + edit before sending.
-                        if view.picker.is_none() {
+                        if view.picker.is_none() => {
                             // Many terminals (and tmux's `paste-buffer -p`)
                             // send '\r' as the line separator inside the
                             // bracketed-paste payload — translate to '\n' so
@@ -1549,7 +1549,6 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                             reset_slash_autocomplete_after_typed_char(&mut view);
                             view.dirty = true;
                         }
-                    }
                     _ => {}
                 }
             }

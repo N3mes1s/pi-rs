@@ -34,7 +34,7 @@ pub fn sync_all(conn: &mut Connection, sessions_root: &Path) -> anyhow::Result<S
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| {
-            e.file_type().is_file() && e.path().extension().map_or(false, |ext| ext == "jsonl")
+            e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "jsonl")
         })
     {
         let path = entry.path();

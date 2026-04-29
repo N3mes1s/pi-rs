@@ -39,8 +39,7 @@ pub fn git_checkout(repo_root: &Path, branch: &str) -> std::io::Result<()> {
         .current_dir(repo_root)
         .output()?;
     if !out.status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(std::io::Error::other(
             format!(
                 "git checkout {branch} failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -57,8 +56,7 @@ pub fn rev_parse(repo_root: &Path, refname: &str) -> std::io::Result<String> {
         .current_dir(repo_root)
         .output()?;
     if !out.status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(std::io::Error::other(
             format!(
                 "git rev-parse {refname} failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()

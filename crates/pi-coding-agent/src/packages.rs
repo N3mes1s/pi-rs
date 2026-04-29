@@ -150,8 +150,7 @@ pub fn install(spec: &str, package_dir: &Path) -> std::io::Result<InstalledPacka
             match status {
                 Ok(s) if s.success() => {}
                 Ok(s) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(std::io::Error::other(
                         format!("npm install failed: {}", s),
                     ))
                 }
@@ -172,8 +171,7 @@ pub fn install(spec: &str, package_dir: &Path) -> std::io::Result<InstalledPacka
             match status {
                 Ok(s) if s.success() => {}
                 Ok(s) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(std::io::Error::other(
                         format!("git clone failed: {}", s),
                     ))
                 }

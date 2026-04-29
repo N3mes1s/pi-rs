@@ -169,7 +169,7 @@ impl Transcript {
                         if first {
                             // Prefix first line with "pi>"
                             let mut prefixed_spans = vec![Span::coloured(
-                                format!("pi> "),
+                                "pi> ".to_string(),
                                 theme.assistant.to_crossterm(),
                             )];
                             prefixed_spans.extend(line.spans);

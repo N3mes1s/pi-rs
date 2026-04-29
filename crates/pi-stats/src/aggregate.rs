@@ -400,5 +400,5 @@ pub fn request_detail(c: &Connection, id: i64) -> rusqlite::Result<Option<Recent
             stop_reason: r.get(8)?,
         })
     })?;
-    Ok(rows.next().transpose()?)
+    rows.next().transpose()
 }

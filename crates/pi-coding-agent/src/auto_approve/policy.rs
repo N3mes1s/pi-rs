@@ -116,17 +116,14 @@ impl ToolRule {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum DefaultDecision {
     Approve,
     Reject,
+    #[default]
     Ask,
 }
 
-impl Default for DefaultDecision {
-    fn default() -> Self {
-        Self::Ask
-    }
-}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Policy {

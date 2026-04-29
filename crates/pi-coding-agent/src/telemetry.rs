@@ -10,7 +10,6 @@ pub fn enabled() -> bool {
 
 pub fn record_event(_name: &str, _props: serde_json::Value) {
     if !enabled() {
-        return;
     }
     // No-op: we deliberately don't ship a network endpoint.
 }

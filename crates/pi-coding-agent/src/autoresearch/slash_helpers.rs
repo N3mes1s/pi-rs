@@ -49,11 +49,10 @@ pub fn clear_artefacts(cwd: &Path) -> Vec<std::path::PathBuf> {
     let mut removed = Vec::new();
     for name in &names {
         let p = cwd.join(name);
-        if p.exists() {
-            if std::fs::remove_file(&p).is_ok() {
+        if p.exists()
+            && std::fs::remove_file(&p).is_ok() {
                 removed.push(p);
             }
-        }
     }
     removed
 }

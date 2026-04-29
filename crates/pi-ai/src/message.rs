@@ -11,7 +11,9 @@ pub enum Role {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ThinkingLevel {
+    #[default]
     Off,
     Low,
     Medium,
@@ -22,11 +24,6 @@ pub enum ThinkingLevel {
     XHigh,
 }
 
-impl Default for ThinkingLevel {
-    fn default() -> Self {
-        Self::Off
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

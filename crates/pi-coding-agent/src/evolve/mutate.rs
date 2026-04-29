@@ -299,7 +299,7 @@ fn strip_code_fences(s: &str) -> String {
     let lines: Vec<&str> = t.lines().collect();
     if lines.len() >= 2
         && lines[0].trim_start().starts_with("```")
-        && lines.last().map_or(false, |l| l.trim() == "```")
+        && lines.last().is_some_and(|l| l.trim() == "```")
     {
         return lines[1..lines.len() - 1].join("\n");
     }
@@ -325,7 +325,7 @@ fn trim_blank_lines(s: &str) -> String {
         if last.ends_with('\n') {
             // count back through trailing blank lines
             let lines: Vec<&str> = last.lines().collect();
-            if lines.last().map_or(false, |l| l.trim().is_empty()) {
+            if lines.last().is_some_and(|l| l.trim().is_empty()) {
                 end = last.rfind('\n').unwrap_or(0);
                 continue;
             }

@@ -9,18 +9,15 @@ use serde::{Deserialize, Serialize};
 /// Lifecycle states a task can be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TaskState {
+    #[default]
     Pending,
     InProgress,
     Completed,
     Abandoned,
 }
 
-impl Default for TaskState {
-    fn default() -> Self {
-        TaskState::Pending
-    }
-}
 
 impl TaskState {
     pub fn parse(s: &str) -> Option<Self> {

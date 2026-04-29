@@ -45,8 +45,10 @@ pub use policy::{Decision, Policy, PolicyError, ToolRule};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum Mode {
     /// Every tool call requires user confirmation.
+    #[default]
     Ask,
     /// Policy decides; `Ask` falls through to interactive confirmation.
     AutoPolicy,
@@ -56,11 +58,6 @@ pub enum Mode {
     Yolo,
 }
 
-impl Default for Mode {
-    fn default() -> Self {
-        Self::Ask
-    }
-}
 
 impl Mode {
     pub fn parse(s: &str) -> Option<Self> {

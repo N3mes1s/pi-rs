@@ -274,7 +274,7 @@ impl Cli {
     pub fn at_files(&self) -> Vec<PathBuf> {
         self.positionals
             .iter()
-            .filter_map(|p| p.strip_prefix('@').map(|s| PathBuf::from(s)))
+            .filter_map(|p| p.strip_prefix('@').map(PathBuf::from))
             .collect()
     }
 

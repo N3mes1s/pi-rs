@@ -106,7 +106,7 @@ pub fn format_tree_entry(entry: &pi_agent_core::SessionEntry) -> String {
 /// Truncate `text` to at most `max_chars` Unicode scalar values, replacing
 /// newlines with spaces first.
 fn short_text(text: &str, max_chars: usize) -> String {
-    let flat: String = text.replace('\n', " ").replace('\r', " ");
+    let flat: String = text.replace(['\n', '\r'], " ");
     flat.chars().take(max_chars).collect()
 }
 

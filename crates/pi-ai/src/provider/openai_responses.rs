@@ -93,14 +93,13 @@ pub fn messages_to_responses_input(msgs: &[crate::message::Message]) -> Vec<Valu
                 let mut user_content: Vec<Value> = Vec::new();
                 for c in &m.content {
                     match c {
-                        ContentBlock::Text { text } => {
-                            if !text.is_empty() {
+                        ContentBlock::Text { text }
+                            if !text.is_empty() => {
                                 user_content.push(json!({
                                     "type": "input_text",
                                     "text": text,
                                 }));
                             }
-                        }
                         ContentBlock::Attachment { attachment } => {
                             if let crate::message::AttachmentKind::Image { mime, base64 } =
                                 &attachment.kind
@@ -139,14 +138,13 @@ pub fn messages_to_responses_input(msgs: &[crate::message::Message]) -> Vec<Valu
                 let mut msg_content: Vec<Value> = Vec::new();
                 for c in &m.content {
                     match c {
-                        ContentBlock::Text { text } => {
-                            if !text.is_empty() {
+                        ContentBlock::Text { text }
+                            if !text.is_empty() => {
                                 msg_content.push(json!({
                                     "type": "output_text",
                                     "text": text,
                                 }));
                             }
-                        }
                         ContentBlock::ToolUse { id, name, input } => {
                             // Flush any accumulated text first so item
                             // order matches the original conversation.

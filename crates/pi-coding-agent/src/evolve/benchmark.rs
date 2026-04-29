@@ -458,8 +458,8 @@ fn mine_session_dir(dir: &Path) -> Option<MinedSession> {
                     score,
                     notes,
                     ..
-                } => {
-                    if entry.timestamp >= latest_outcome_ts {
+                }
+                    if entry.timestamp >= latest_outcome_ts => {
                         latest_outcome_ts = entry.timestamp;
                         acc.outcome = Some(MinedOutcome {
                             success: *success,
@@ -467,7 +467,6 @@ fn mine_session_dir(dir: &Path) -> Option<MinedSession> {
                             notes: notes.clone(),
                         });
                     }
-                }
                 _ => {}
             }
         }

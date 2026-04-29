@@ -50,9 +50,7 @@ pub fn patches_root() -> PathBuf {
 pub fn encode_repo(repo_root: &Path) -> String {
     let s = repo_root
         .to_string_lossy()
-        .replace('/', "-")
-        .replace(':', "-")
-        .replace('\\', "-");
+        .replace(['/', ':', '\\'], "-");
     format!("--{}--", s.trim_matches('-'))
 }
 

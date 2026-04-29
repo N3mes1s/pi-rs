@@ -119,7 +119,7 @@ pub fn compute(samples: &[f64], baseline: f64, direction: MetricDirection) -> Co
 /// Median of a **pre-sorted** slice (panics on empty input).
 fn median_of_sorted(sorted: &[f64]) -> f64 {
     let n = sorted.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]

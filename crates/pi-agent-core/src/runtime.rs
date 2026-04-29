@@ -360,7 +360,7 @@ pub(crate) fn sanitise_session_messages(messages: Vec<Message>) -> Vec<Message> 
         if matches!(iter.peek(), Some(m) if matches!(m.role, Role::User)) {
             let mut next = iter.next().expect("peeked Some");
             let mut combined = synthetic;
-            combined.extend(next.content.drain(..));
+            combined.append(&mut next.content);
             sanitised.push(Message {
                 role: Role::User,
                 content: combined,

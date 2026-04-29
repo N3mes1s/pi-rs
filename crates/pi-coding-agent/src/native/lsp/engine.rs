@@ -130,14 +130,14 @@ impl LspEngine {
         // Determine argv: per-language override wins, else catalogue.
         let owned: Vec<String>;
         let argv: Vec<&str> = if let Some(o) = self.config.command_override(language) {
-            owned = o.iter().cloned().collect();
+            owned = o.to_vec();
             owned.iter().map(|s| s.as_str()).collect()
         } else {
             let entry = DEFAULT_CATALOGUE
                 .iter()
                 .find(|e| e.language == language)
                 .ok_or_else(|| EngineError::UnknownLanguage(language.into()))?;
-            entry.command.iter().copied().collect()
+            entry.command.to_vec()
         };
         let client = LspClient::spawn(&argv)
             .await

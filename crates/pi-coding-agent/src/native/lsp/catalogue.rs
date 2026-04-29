@@ -81,7 +81,7 @@ pub fn language_for_extension(ext: &str) -> Option<&'static LanguageEntry> {
     let ext = ext.trim_start_matches('.').to_ascii_lowercase();
     DEFAULT_CATALOGUE
         .iter()
-        .find(|e| e.extensions.iter().any(|x| *x == ext.as_str()))
+        .find(|e| e.extensions.contains(&ext.as_str()))
 }
 
 #[cfg(test)]

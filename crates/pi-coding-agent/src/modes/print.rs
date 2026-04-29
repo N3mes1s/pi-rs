@@ -41,11 +41,10 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
                 }
-                AgentEventKind::ToolResult { result } => {
-                    if result.is_error {
+                AgentEventKind::ToolResult { result }
+                    if result.is_error => {
                         eprintln!("\n[tool error] {}", result.model_output);
                     }
-                }
                 AgentEventKind::AssistantToolCall { call } => {
                     eprintln!(
                         "\n[tool {}] {}",

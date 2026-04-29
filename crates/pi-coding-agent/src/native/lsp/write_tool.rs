@@ -130,11 +130,7 @@ impl Tool for LspWriteTool {
             if let Ok(reply) = engine.diagnostics(&path).await {
                 let items = if reply.is_array() {
                     Some(reply)
-                } else if let Some(items) = reply.get("items") {
-                    Some(items.clone())
-                } else {
-                    None
-                };
+                } else { reply.get("items").map(|items| items.clone()) };
                 if let Some(items) = items {
                     display.insert("diagnostics".into(), items);
                 }

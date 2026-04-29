@@ -493,5 +493,5 @@ impl SessionManager {
 }
 
 fn io_lock<E>(_: E) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, "session lock poisoned")
+    std::io::Error::other("session lock poisoned")
 }

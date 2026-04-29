@@ -112,6 +112,12 @@ pub struct Pkce {
     pub method: &'static str,
 }
 
+impl Default for Pkce {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Pkce {
     pub fn new() -> Self {
         let mut bytes = [0u8; 32];

@@ -471,7 +471,7 @@ fn total_tokens(branch: &[SessionEntry]) -> u64 {
     let mut from_usage = 0u64;
     for e in branch {
         if let SessionEntryKind::Usage { usage } = &e.kind {
-            from_usage += usage.input_tokens as u64 + usage.output_tokens as u64;
+            from_usage += usage.input_tokens + usage.output_tokens;
         }
     }
     if from_usage > 0 {
