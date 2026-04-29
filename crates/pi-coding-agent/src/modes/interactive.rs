@@ -151,6 +151,17 @@ pub struct View {
     pub context_window: Option<u32>,
     /// Current theme name (updated by /theme command).
     pub current_theme_name: String,
+    /// Accepted slash-autocomplete candidates for repeated Tab / Shift-Tab
+    /// cycling after the first accept.
+    pub slash_ac_cycle_suggestions: Vec<String>,
+    /// Index into `slash_ac_cycle_suggestions` of the currently accepted item.
+    pub slash_ac_cycle_index: usize,
+    /// Byte range of the accepted `/<command>` token (excluding the trailing
+    /// space that acceptance inserts).
+    pub slash_ac_accepted_range: Option<(usize, usize)>,
+    /// Suppress the autocomplete dropdown until the user types another
+    /// character or pastes text.
+    pub slash_ac_hidden_until_char: bool,
 }
 
 /// How the autoresearch dashboard should be rendered above the editor.
@@ -194,6 +205,10 @@ impl View {
             git_status_cache: std::sync::Arc::new(crate::footer::GitStatusCache::default()),
             context_window: None,
             current_theme_name: String::new(),
+            slash_ac_cycle_suggestions: Vec::new(),
+            slash_ac_cycle_index: 0,
+            slash_ac_accepted_range: None,
+            slash_ac_hidden_until_char: false,
         }
     }
 }
@@ -240,6 +255,13 @@ pub enum KeyOutcome {
 /// collapse flags, quit-confirm timer).
 pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
     view.dirty = true;
+
+    if try_handle_slash_autocomplete_key(view, ev) {
+        return KeyOutcome::None;
+    }
+    if view.slash_ac_accepted_range.is_some() {
+        clear_slash_autocomplete_state(view);
+    }
 
     // If a picker is open, route everything through it first.
     if let Some(overlay) = view.picker.as_mut() {
@@ -526,6 +548,8 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
     // No mapping — fall back to raw editing.
     match (ev.code, ev.modifiers) {
         (KeyCode::Char('@'), m) if !m.contains(KeyModifiers::CONTROL) => {
+            reset_slash_dropdown_suppression(view);
+            clear_slash_autocomplete_state(view);
             // Insert '@' into the editor first, then open the @-completion picker.
             let cursor_before = view.editor.cursor;
             view.editor.insert('@');
@@ -548,11 +572,16 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
             view.last_quit = None;
         }
         (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
+            reset_slash_autocomplete_after_typed_char(view);
             view.editor.insert(c);
             view.last_quit = None;
         }
-        (KeyCode::Backspace, _) => view.editor.backspace(),
+        (KeyCode::Backspace, _) => {
+            clear_slash_autocomplete_state(view);
+            view.editor.backspace()
+        }
         (KeyCode::Delete, _) => {
+            clear_slash_autocomplete_state(view);
             if view.editor.cursor < view.editor.text.len() {
                 let mut end = view.editor.cursor + 1;
                 while end < view.editor.text.len() && !view.editor.text.is_char_boundary(end) {
@@ -562,6 +591,7 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
             }
         }
         (KeyCode::Left, _) => {
+            clear_slash_autocomplete_state(view);
             if view.editor.cursor > 0 {
                 let mut new = view.editor.cursor - 1;
                 while new > 0 && !view.editor.text.is_char_boundary(new) {
@@ -571,6 +601,7 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
             }
         }
         (KeyCode::Right, _) => {
+            clear_slash_autocomplete_state(view);
             if view.editor.cursor < view.editor.text.len() {
                 let mut new = view.editor.cursor + 1;
                 while new < view.editor.text.len() && !view.editor.text.is_char_boundary(new) {
@@ -580,6 +611,7 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
             }
         }
         (KeyCode::Home, _) => {
+            clear_slash_autocomplete_state(view);
             // Go to start of current visual line.
             let cur = view.editor.cursor;
             let line_start = view.editor.text[..cur]
@@ -589,6 +621,7 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
             view.editor.cursor = line_start;
         }
         (KeyCode::End, _) => {
+            clear_slash_autocomplete_state(view);
             let cur = view.editor.cursor;
             let nl = view.editor.text[cur..]
                 .find('\n')
@@ -617,6 +650,7 @@ fn history_prev(view: &mut View) {
     view.history_idx = Some(new_idx);
     view.editor.text = view.history[new_idx].clone();
     view.editor.cursor = view.editor.text.len();
+    clear_slash_autocomplete_state(view);
 }
 
 fn history_next(view: &mut View) {
@@ -632,6 +666,207 @@ fn history_next(view: &mut View) {
         view.editor.text = view.history[i + 1].clone();
         view.editor.cursor = view.editor.text.len();
     }
+    clear_slash_autocomplete_state(view);
+}
+
+fn try_handle_slash_autocomplete_key(view: &mut View, ev: &KeyEvent) -> bool {
+    if view.picker.is_some() {
+        return false;
+    }
+
+    match ev.code {
+        KeyCode::Tab => cycle_or_accept_slash_autocomplete(view, true),
+        KeyCode::BackTab => cycle_or_accept_slash_autocomplete(view, false),
+        KeyCode::Right if cursor_at_current_line_end(&view.editor.text, view.editor.cursor) => {
+            accept_top_slash_autocomplete(view)
+        }
+        _ => false,
+    }
+}
+
+fn accept_top_slash_autocomplete(view: &mut View) -> bool {
+    let suggestions = slash_command_suggestions_for(view);
+    if suggestions.is_empty() {
+        return false;
+    }
+    view.slash_ac_cycle_suggestions = suggestions.clone();
+    view.slash_ac_cycle_index = 0;
+    apply_slash_autocomplete_accept(view, &suggestions[0]);
+    true
+}
+
+fn cycle_or_accept_slash_autocomplete(view: &mut View, forward: bool) -> bool {
+    let suggestions = if let Some((start, end)) = view.slash_ac_accepted_range {
+        if accepted_slash_token_still_matches(view, start, end)
+            && !view.slash_ac_cycle_suggestions.is_empty()
+        {
+            view.slash_ac_cycle_suggestions.clone()
+        } else {
+            slash_command_suggestions_for(view)
+        }
+    } else {
+        slash_command_suggestions_for(view)
+    };
+
+    if suggestions.is_empty() {
+        return false;
+    }
+
+    if view.slash_ac_accepted_range.is_none() || view.slash_ac_cycle_suggestions != suggestions {
+        view.slash_ac_cycle_suggestions = suggestions.clone();
+        view.slash_ac_cycle_index = if forward || suggestions.len() == 1 {
+            0
+        } else {
+            suggestions.len() - 1
+        };
+    } else if suggestions.len() > 1 {
+        let len = suggestions.len();
+        if forward {
+            view.slash_ac_cycle_index = (view.slash_ac_cycle_index + 1) % len;
+        } else {
+            view.slash_ac_cycle_index = (view.slash_ac_cycle_index + len - 1) % len;
+        }
+    }
+
+    let chosen = view.slash_ac_cycle_suggestions[view.slash_ac_cycle_index].clone();
+    apply_slash_autocomplete_accept(view, &chosen);
+    true
+}
+
+fn slash_command_suggestions_for(view: &View) -> Vec<String> {
+    let registry = SlashRegistry::new();
+    slash_command_suggestions_for_with_registry(view, &registry)
+}
+
+fn slash_command_suggestions_for_with_registry(
+    view: &View,
+    slash_registry: &SlashRegistry,
+) -> Vec<String> {
+    let Some(token) = current_slash_token(&view.editor.text, view.editor.cursor) else {
+        return Vec::new();
+    };
+    let Some(query) = token.strip_prefix('/') else {
+        return Vec::new();
+    };
+    slash_registry
+        .iter()
+        .filter(|cmd| cmd.name.starts_with(query))
+        .map(|cmd| cmd.name.clone())
+        .take(5)
+        .collect::<Vec<_>>()
+}
+
+fn current_slash_token(text: &str, cursor: usize) -> Option<&str> {
+    if text.is_empty() || cursor > text.len() || !text.is_char_boundary(cursor) {
+        return None;
+    }
+    let before_cursor = &text[..cursor];
+    let token_start = before_cursor
+        .rfind(char::is_whitespace)
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let after_cursor = &text[cursor..];
+    let token_end = after_cursor
+        .find(char::is_whitespace)
+        .map(|idx| cursor + idx)
+        .unwrap_or(text.len());
+    let token = &text[token_start..token_end];
+    if token.starts_with('/') {
+        Some(token)
+    } else {
+        None
+    }
+}
+
+fn current_slash_token_range(text: &str, cursor: usize) -> Option<(usize, usize)> {
+    if text.is_empty() || cursor > text.len() || !text.is_char_boundary(cursor) {
+        return None;
+    }
+    let before_cursor = &text[..cursor];
+    let token_start = before_cursor
+        .rfind(char::is_whitespace)
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let after_cursor = &text[cursor..];
+    let token_end = after_cursor
+        .find(char::is_whitespace)
+        .map(|idx| cursor + idx)
+        .unwrap_or(text.len());
+    let token = &text[token_start..token_end];
+    if token.starts_with('/') {
+        Some((token_start, token_end))
+    } else {
+        None
+    }
+}
+
+fn cursor_at_current_line_end(text: &str, cursor: usize) -> bool {
+    if cursor > text.len() || !text.is_char_boundary(cursor) {
+        return false;
+    }
+    text[cursor..].starts_with('\n') || cursor == text.len()
+}
+
+fn apply_slash_autocomplete_accept(view: &mut View, command_name: &str) {
+    let Some((start, end)) = slash_token_replace_range(view) else {
+        return;
+    };
+    let replacement = format!("/{command_name} ");
+    let cursor = start + replacement.len();
+    view.editor.text.replace_range(start..end, &replacement);
+    let accepted_end = cursor.saturating_sub(1);
+    view.editor.cursor = cursor;
+    view.slash_ac_accepted_range = Some((start, accepted_end));
+    view.slash_ac_hidden_until_char = true;
+}
+
+fn slash_token_replace_range(view: &View) -> Option<(usize, usize)> {
+    let (start, end) = current_slash_token_range(&view.editor.text, view.editor.cursor)
+        .or(view.slash_ac_accepted_range)?;
+    let replace_end = if view.editor.text.as_bytes().get(end) == Some(&b' ') {
+        end + 1
+    } else {
+        end
+    };
+    Some((start, replace_end))
+}
+
+fn accepted_slash_token_still_matches(view: &View, start: usize, end: usize) -> bool {
+    if start >= end
+        || end > view.editor.text.len()
+        || !view.editor.text.is_char_boundary(start)
+        || !view.editor.text.is_char_boundary(end)
+    {
+        return false;
+    }
+    let expected = format!(
+        "/{}",
+        view.slash_ac_cycle_suggestions
+            .get(view.slash_ac_cycle_index)
+            .cloned()
+            .unwrap_or_default()
+    );
+    !expected.is_empty()
+        && view.editor.text.get(start..end) == Some(expected.as_str())
+        && view.editor.cursor == view.editor.text.len()
+        && view.editor.text.as_bytes().get(end) == Some(&b' ')
+}
+
+fn clear_slash_autocomplete_state(view: &mut View) {
+    view.slash_ac_cycle_suggestions.clear();
+    view.slash_ac_cycle_index = 0;
+    view.slash_ac_accepted_range = None;
+}
+
+fn reset_slash_autocomplete_after_typed_char(view: &mut View) {
+    reset_slash_dropdown_suppression(view);
+    clear_slash_autocomplete_state(view);
+}
+
+fn sync_slash_registry(_view: &mut View, _slash_registry: &SlashRegistry) {}
+
+fn reset_slash_dropdown_suppression(view: &mut View) {
+    view.slash_ac_hidden_until_char = false;
 }
 
 fn picker_outcome(kind: PickerKind, value: String) -> KeyOutcome {
@@ -852,19 +1087,29 @@ pub(crate) fn build_frame(
             });
         }
 
-        // Slash-command autocomplete dropdown: if the current editor text starts
-        // with `/`, show matching commands below the editor. Match by prefix.
-        if !view.editor.text.is_empty() && view.editor.text.starts_with('/') {
-            let query = view.editor.text.trim_start_matches('/');
-            if !query.is_empty() {
-                let matches: Vec<_> = slash_registry
-                    .iter()
-                    .filter(|cmd| cmd.name.starts_with(query))
-                    .take(5)
-                    .collect();
+        // Slash-command autocomplete dropdown: if the current editor text contains
+        // a slash token at the cursor, show matching commands below the editor.
+        if let Some((token_start, token_end)) =
+            current_slash_token_range(&view.editor.text, view.editor.cursor)
+        {
+            let accepted_same_token = view
+                .slash_ac_accepted_range
+                .map(|(accepted_start, accepted_end)| {
+                    accepted_start == token_start && accepted_end == token_end
+                })
+                .unwrap_or(false);
+            if !view.slash_ac_hidden_until_char && !accepted_same_token {
+                let matches: Vec<_> =
+                    slash_command_suggestions_for_with_registry(view, slash_registry)
+                        .into_iter()
+                        .take(5)
+                        .collect();
                 if !matches.is_empty() {
                     frame.lines.push(Line::default());
-                    for (i, cmd) in matches.iter().enumerate() {
+                    for (i, name) in matches.iter().enumerate() {
+                        let Some(cmd) = slash_registry.get(name) else {
+                            continue;
+                        };
                         let prefix = if i == 0 { "▸ " } else { "  " };
                         let name_color = if i == 0 {
                             theme.accent.to_crossterm()
@@ -1055,6 +1300,7 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
         .unwrap_or_else(|| pi_tui::ThemeRegistry::new().get("dark").cloned().unwrap());
 
     let mut view = View::new(startup.keymap.clone(), startup.settings.thinking);
+    sync_slash_registry(&mut view, &slash);
     view.current_theme_name = theme.name.clone();
     view.scoped_models = startup.settings.scoped_models;
     // Resolve context_window for the active model so the footer can
@@ -1274,6 +1520,7 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                                 }
                             }
                             view.editor.insert_str(&cleaned);
+                            reset_slash_autocomplete_after_typed_char(&mut view);
                             view.dirty = true;
                         }
                     }
@@ -1544,15 +1791,17 @@ async fn handle_slash(
                     startup.settings.theme = theme_name.to_string();
                     let path = crate::context::settings_paths().0;
                     let _ = startup.settings.save(&path);
-                    
+
                     // Update view so next render uses new theme
                     view.current_theme_name = theme_name.to_string();
                     view.dirty = true;
-                    
-                    view.transcript.blocks.push(crate::renderer::Block::Note(format!(
-                        "[theme set to {}]",
-                        theme_name
-                    )));
+
+                    view.transcript
+                        .blocks
+                        .push(crate::renderer::Block::Note(format!(
+                            "[theme set to {}]",
+                            theme_name
+                        )));
                 } else {
                     let names = startup.themes.names();
                     let mut body = String::from("Theme not found. Available themes:\n");
@@ -2071,11 +2320,7 @@ async fn handle_slash(
             // trailing newline. Use the first whitespace-delimited
             // token as the session id (handles both id-only and
             // "id  cwd  …" picker label formats).
-            let session_id = args
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_string();
+            let session_id = args.split_whitespace().next().unwrap_or("").to_string();
             if session_id.is_empty() {
                 view.transcript.blocks.push(crate::renderer::Block::Error(
                     "/resume: empty session id from picker".into(),
@@ -2136,7 +2381,9 @@ async fn handle_slash(
                 let names = startup.skills.names();
                 let mut body = String::from("usage: /skill:<name> [args]\n");
                 if names.is_empty() {
-                    body.push_str("(no skills registered — drop one in ~/.pi/agent/skills/<name>/SKILL.md)");
+                    body.push_str(
+                        "(no skills registered — drop one in ~/.pi/agent/skills/<name>/SKILL.md)",
+                    );
                 } else {
                     body.push_str("registered skills:\n");
                     for n in names {
@@ -3118,7 +3365,15 @@ mod tests {
         }
         let theme = theme_for_test();
         // 6 rows means very few transcript lines survive.
-        let frame = build_frame(&v, &theme, 80, 6, "x/y", std::path::Path::new("/"), &SlashRegistry::new());
+        let frame = build_frame(
+            &v,
+            &theme,
+            80,
+            6,
+            "x/y",
+            std::path::Path::new("/"),
+            &SlashRegistry::new(),
+        );
         assert!(frame.lines.len() <= 12, "got {} lines", frame.lines.len());
     }
 
@@ -3463,7 +3718,15 @@ mod tests {
             runs: vec![],
         });
         let theme = pi_tui::ThemeRegistry::new().get("dark").cloned().unwrap();
-        let frame = build_frame(&v, &theme, 80, 24, "m", std::path::Path::new("/tmp"), &SlashRegistry::new());
+        let frame = build_frame(
+            &v,
+            &theme,
+            80,
+            24,
+            "m",
+            std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
+        );
         let dump = frame
             .lines
             .iter()
@@ -3567,7 +3830,15 @@ mod tests {
         v.editor.cursor = 3;
 
         let theme = theme_for_test();
-        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"), &SlashRegistry::new());
+        let frame = build_frame(
+            &v,
+            &theme,
+            80,
+            24,
+            "claude-3.5-sonnet",
+            std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
+        );
 
         let dump: String = frame
             .lines
@@ -3577,7 +3848,11 @@ mod tests {
             .join("|");
 
         // Should contain /help (matches "/he")
-        assert!(dump.contains("/help"), "should show /help suggestion: {}", dump);
+        assert!(
+            dump.contains("/help"),
+            "should show /help suggestion: {}",
+            dump
+        );
     }
 
     #[test]
@@ -3587,7 +3862,15 @@ mod tests {
         v.editor.cursor = 15;
 
         let theme = theme_for_test();
-        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"), &SlashRegistry::new());
+        let frame = build_frame(
+            &v,
+            &theme,
+            80,
+            24,
+            "claude-3.5-sonnet",
+            std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
+        );
 
         let dump: String = frame
             .lines
@@ -3610,7 +3893,15 @@ mod tests {
         v.editor.cursor = 2;
 
         let theme = theme_for_test();
-        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"), &SlashRegistry::new());
+        let frame = build_frame(
+            &v,
+            &theme,
+            80,
+            24,
+            "claude-3.5-sonnet",
+            std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
+        );
 
         let dump: String = frame
             .lines
@@ -3620,7 +3911,10 @@ mod tests {
             .join("|");
 
         // Should show /model with first one marked with ▸
-        assert!(dump.contains("▸ "), "first match should be highlighted with ▸");
+        assert!(
+            dump.contains("▸ "),
+            "first match should be highlighted with ▸"
+        );
     }
 
     #[test]
@@ -3630,7 +3924,15 @@ mod tests {
         v.editor.cursor = 0;
 
         let theme = theme_for_test();
-        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"), &SlashRegistry::new());
+        let frame = build_frame(
+            &v,
+            &theme,
+            80,
+            24,
+            "claude-3.5-sonnet",
+            std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
+        );
 
         let dump: String = frame
             .lines
@@ -3640,7 +3942,10 @@ mod tests {
             .join("|");
 
         // Empty editor should not show suggestions
-        assert!(!dump.contains("▸ /"), "empty editor should not trigger dropdown");
+        assert!(
+            !dump.contains("▸ /"),
+            "empty editor should not trigger dropdown"
+        );
     }
 
     #[test]
@@ -3650,14 +3955,26 @@ mod tests {
         v.editor.cursor = 1;
 
         let theme = theme_for_test();
-        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"), &SlashRegistry::new());
+        let frame = build_frame(
+            &v,
+            &theme,
+            80,
+            24,
+            "claude-3.5-sonnet",
+            std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
+        );
 
         // Count suggestion lines (those with "/" in them after editor lines)
         let suggestion_lines: Vec<_> = frame
             .lines
             .iter()
             .filter(|line| {
-                let joined = line.spans.iter().map(|s| s.text.as_str()).collect::<String>();
+                let joined = line
+                    .spans
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<String>();
                 joined.contains("/") && joined.contains("▸ ") || joined.contains("  /")
             })
             .collect();
