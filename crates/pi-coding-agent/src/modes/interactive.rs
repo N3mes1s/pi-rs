@@ -1042,6 +1042,11 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
 
     let _guard = RawGuard::enter()?;
     let mut renderer = DiffRenderer::new(std::io::stdout());
+    // Set when an in-session `/resume` picker selection requests a
+    // session swap. After the agent loop exits, the binary execs
+    // itself with `pi -r <id>` so the user lands inside the resumed
+    // session without manually retyping anything.
+    let mut respawn_session_id: Option<String> = None;
 
     let (mut cols, mut rows) = crossterm::terminal::size().unwrap_or((80, 24));
     renderer.resize(cols);
@@ -1111,6 +1116,10 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                                         let s = session.clone();
                                         tokio::spawn(async move { let _ = s.prompt(text).await; });
                                     }
+                                    SlashOutcome::Respawn(session_id) => {
+                                        respawn_session_id = Some(session_id);
+                                        break 'outer;
+                                    }
                                 }
                             }
                             KeyOutcome::CycleThinking => {
@@ -1142,6 +1151,10 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                                         view.turn_in_progress = true;
                                         let s = session.clone();
                                         tokio::spawn(async move { let _ = s.prompt(text).await; });
+                                    }
+                                    SlashOutcome::Respawn(session_id) => {
+                                        respawn_session_id = Some(session_id);
+                                        break 'outer;
                                     }
                                 }
                             }
@@ -1262,6 +1275,29 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
         &session_id,
     )
     .await;
+
+    if let Some(target_id) = respawn_session_id {
+        // The user picked a session in the in-session `/resume`
+        // overlay. Re-exec the same `pi` binary with `-r <id>`. Use
+        // the original argv0 so symlink-installed `pi` keeps
+        // resolving to the same binary, but replace any pre-existing
+        // `-r`/`--session`/`-c` flag with the new selection.
+        let exe = std::env::current_exe().ok();
+        let mut cmd = match exe {
+            Some(p) => std::process::Command::new(p),
+            None => std::process::Command::new("pi"),
+        };
+        cmd.arg("-r").arg(&target_id);
+        // Replace this process so the user sees the resumed session
+        // immediately, not a stacked subshell.
+        use std::os::unix::process::CommandExt;
+        let err = cmd.exec();
+        // exec() returns only on failure; fall through to the
+        // standard resume hint with a descriptive note.
+        eprintln!("failed to re-exec for resume: {err}");
+        eprintln!("run manually:  pi -r {target_id}");
+        return Ok(());
+    }
 
     eprintln!();
     eprintln!("To resume this session, run:");
@@ -1395,6 +1431,13 @@ enum SlashOutcome {
     Quit,
     Continue,
     Submit(String),
+    /// Tear down the current TUI cleanly, then re-exec the same `pi`
+    /// binary with `-r <session_id>` so the user lands directly in
+    /// the resumed session. Used by the in-session `/resume` picker
+    /// because the agent loop is built around a single AgentSession
+    /// lifetime; in-process session swap would require a much bigger
+    /// refactor of the run loop.
+    Respawn(String),
 }
 
 async fn handle_slash(
@@ -1925,10 +1968,29 @@ async fn handle_slash(
         }
         // Internal slash names produced by picker resolution.
         "__resume_pick" => {
-            view.transcript
-                .blocks
-                .push(crate::renderer::Block::Note(format!("[resume {}]", args)));
-            SlashOutcome::Continue
+            // Strip whitespace from the picker value; the value lands
+            // here as the raw label which sometimes carries a
+            // trailing newline. Use the first whitespace-delimited
+            // token as the session id (handles both id-only and
+            // "id  cwd  …" picker label formats).
+            let session_id = args
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            if session_id.is_empty() {
+                view.transcript.blocks.push(crate::renderer::Block::Error(
+                    "/resume: empty session id from picker".into(),
+                ));
+                SlashOutcome::Continue
+            } else {
+                view.transcript
+                    .blocks
+                    .push(crate::renderer::Block::Note(format!(
+                        "[resuming session {session_id} — re-launching pi -r ...]"
+                    )));
+                SlashOutcome::Respawn(session_id)
+            }
         }
         "__tree_pick" => {
             view.transcript
