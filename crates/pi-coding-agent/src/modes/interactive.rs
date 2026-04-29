@@ -242,8 +242,19 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
     if let Some(overlay) = view.picker.as_mut() {
         match ev.code {
             KeyCode::Esc => {
-                // If this is an @-completion picker, keep the literal @<query>
-                // text but clear the picker state.
+                // Cancel the picker AND the input that triggered it. For an
+                // @-completion overlay, strip the literal `@<query>` text the
+                // user typed to summon the picker — otherwise pressing Escape
+                // leaves a stale `@README` etc. in the editor that the user
+                // didn't ask for and gets concatenated into the next prompt.
+                // Matches upstream pi-mono and oh-my-pi UX (Escape = "abandon
+                // this whole input attempt").
+                if let Some(start) = view.at_query_start {
+                    if start <= view.editor.text.len() {
+                        view.editor.text.truncate(start);
+                        view.editor.cursor = start;
+                    }
+                }
                 view.at_active = false;
                 view.at_query_start = None;
                 view.picker = None;
