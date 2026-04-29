@@ -39,6 +39,7 @@ fn render_writes_hello() {
             lines: vec![Line {
                 spans: vec![Span::plain("hello")],
             }],
+            cursor_at: None,
         };
         r.render(&frame).unwrap();
     }
@@ -73,6 +74,7 @@ fn render_then_render_diff_only_redraws_changed_lines() {
                     spans: vec![Span::plain("line-b")],
                 },
             ],
+            cursor_at: None,
         };
         r.render(&f1).unwrap();
         let after_first = buf.len();

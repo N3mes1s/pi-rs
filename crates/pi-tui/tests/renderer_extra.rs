@@ -58,6 +58,7 @@ fn render_emits_sgr_escape_sequences_for_coloured_spans() {
             lines: vec![Line {
                 spans: vec![Span::plain("plain "), Span::coloured("red", Color::Red)],
             }],
+            cursor_at: None,
         };
         r.render(&frame).unwrap();
     }
@@ -83,7 +84,8 @@ fn second_render_of_unchanged_frame_writes_fewer_bytes() {
                 spans: vec![Span::coloured("beta", Color::Magenta)],
             },
         ],
-    };
+            cursor_at: None,
+        };
     let w = SharedWriter::default();
     let mut r = DiffRenderer::new(w.clone());
     r.render(&frame).unwrap();
@@ -114,10 +116,12 @@ fn shrinking_frame_clears_leftover_lines_from_previous_frame() {
     let mut r = DiffRenderer::new(w.clone());
     let big = Frame {
         lines: vec![Line::plain("one"), Line::plain("two"), Line::plain("three")],
-    };
+            cursor_at: None,
+        };
     let small = Frame {
         lines: vec![Line::plain("one"), Line::plain("two")],
-    };
+            cursor_at: None,
+        };
     r.render(&big).unwrap();
     let mid = w.snapshot().len();
     r.render(&small).unwrap();
@@ -133,6 +137,7 @@ fn render_with_sync_writes_dec2026_begin_end_markers() {
         let mut r = DiffRenderer::new(w.clone());
         r.render(&Frame {
             lines: vec![Line::plain("synced")],
+            cursor_at: None,
         })
         .unwrap();
     }
@@ -157,7 +162,8 @@ fn resize_changes_width_and_render_still_succeeds() {
     r.resize(40);
     r.render(&Frame {
         lines: vec![Line::plain("xx")],
-    })
+            cursor_at: None,
+        })
     .unwrap();
     r.resize(120);
 }

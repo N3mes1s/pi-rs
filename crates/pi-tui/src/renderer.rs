@@ -102,11 +102,24 @@ impl<W: Write> DiffRenderer<W> {
             self.out.write_all(b"\x1b[?2026h")?;
         }
 
-        // Move cursor to top of our output region.
-        queue!(self.out, cursor::MoveToColumn(0))?;
-        if !self.last.is_empty() {
-            queue!(self.out, cursor::MoveUp(self.last.len() as u16))?;
-        }
+        // Absolute anchoring. The whole alt-screen is ours: paint
+        // every frame starting at (col=0, row=0). This is what
+        // ratatui / blessed.js / Ink all do; relative MoveUp/MoveDown
+        // off the previous render's cursor position is too fragile
+        // because:
+        //   * a hardware-cursor target on a mid-frame line leaves the
+        //     OS cursor away from the frame's bottom;
+        //   * `\n` written at the last terminal row triggers scroll
+        //     instead of moving the cursor down, but the cursor
+        //     position itself stays put — so MoveUp(N) afterwards
+        //     undershoots by 1.
+        //
+        // With absolute MoveTo(0,0) the position is unambiguous and
+        // every frame paints over the previous one in place.
+        // Diff-rendering still applies per-line (we only emit Clear+
+        // text for changed lines) so the wire cost is unchanged for
+        // the common "edit one row" case.
+        queue!(self.out, cursor::MoveTo(0, 0))?;
 
         for (i, line) in frame.lines.iter().enumerate() {
             let raw_line = raw.get(i).cloned().unwrap_or_default();
@@ -127,26 +140,28 @@ impl<W: Write> DiffRenderer<W> {
                     }
                 }
             }
+            // Move to start of next row instead of writing a literal
+            // `\n`: at the bottom-most row a `\n` would scroll the
+            // alt-screen. Absolute MoveTo never scrolls.
             if i + 1 < frame.lines.len() {
-                self.out.write_all(b"\n")?;
+                queue!(self.out, cursor::MoveTo(0, (i + 1) as u16))?;
             }
         }
 
-        // Clear leftover lines from previous frame.
-        let leftover = self.last.len().saturating_sub(frame.lines.len());
-        for _ in 0..leftover {
-            self.out.write_all(b"\n")?;
-            queue!(self.out, terminal::Clear(terminal::ClearType::CurrentLine))?;
-        }
-        // Restore cursor invariant: at end of render, the cursor sits on the
-        // last line of the (new, shorter) frame. The leftover-clear loop
-        // moved it `leftover` rows further down; without this MoveUp, the
-        // next render's `cursor::MoveUp(self.last.len())` lands `leftover`
-        // rows too low, so the new frame paints over old picker rows that
-        // we just blanked. Visible symptom: rows from a tall picker linger
-        // when transitioning to a shorter overlay.
-        if leftover > 0 {
-            queue!(self.out, cursor::MoveUp(leftover as u16), cursor::MoveToColumn(0))?;
+        // Clear leftover lines from previous frame: rows
+        // `frame.lines.len() .. last.len()` need to be blanked out
+        // because they may contain text from a taller previous frame
+        // (e.g. picker overlay closed, transcript shrunk).
+        let new_len = frame.lines.len();
+        let old_len = self.last.len();
+        if old_len > new_len {
+            for row in new_len..old_len {
+                queue!(
+                    self.out,
+                    cursor::MoveTo(0, row as u16),
+                    terminal::Clear(terminal::ClearType::CurrentLine)
+                )?;
+            }
         }
 
         // Hardware cursor placement (RFD-style): if the frame named a
@@ -156,10 +171,13 @@ impl<W: Write> DiffRenderer<W> {
         if let Some((target_line, target_col)) = frame.cursor_at {
             let cur_line = frame.lines.len().saturating_sub(1) as u16;
             let target_line = target_line.min(cur_line);
-            if cur_line > target_line {
-                queue!(self.out, cursor::MoveUp(cur_line - target_line))?;
-            }
-            queue!(self.out, cursor::MoveToColumn(target_col), cursor::Show)?;
+            // Absolute placement — works regardless of where the
+            // line-rendering loop left the cursor.
+            queue!(
+                self.out,
+                cursor::MoveTo(target_col, target_line),
+                cursor::Show
+            )?;
         } else {
             queue!(self.out, cursor::Hide)?;
         }
