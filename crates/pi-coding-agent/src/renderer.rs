@@ -140,12 +140,15 @@ impl Transcript {
 
     pub fn render(&self, theme: &Theme, viewport_cols: u16) -> Frame {
         let mut lines: Vec<Line> = Vec::new();
-        // Empty transcript → render the welcome banner instead. The
-        // banner is suppressed the moment any real block lands so it
-        // never overlaps streaming output.
-        if self.blocks.is_empty() {
-            push_welcome_banner(&mut lines, theme, viewport_cols, &self.model_label);
-        }
+        // Welcome banner is ALWAYS the first transcript prelude — it
+        // sits above the first user message and scrolls up with the
+        // conversation just like terminal MOTD output. Earlier
+        // behaviour gated this on `self.blocks.is_empty()` which made
+        // the logo disappear in a jarring jump on the first message;
+        // with the banner as a permanent prelude there's no jump and
+        // the banner naturally scrolls out of frame once the
+        // transcript grows past `max_transcript` rows in build_frame.
+        push_welcome_banner(&mut lines, theme, viewport_cols, &self.model_label);
         for b in &self.blocks {
             match b {
                 Block::User(t) => render_block(
