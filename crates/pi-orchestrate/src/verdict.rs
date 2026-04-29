@@ -32,34 +32,35 @@ impl MergeReadiness {
     }
 }
 
-/// Parse the reviewer's verdict text. Returns `None` if no
-/// `Merge readiness:` line is found (RFD's "fallback mode" trigger:
-/// caller should treat as NeedsFix to be safe — we never silently
-/// promote to Ready).
+/// Parse the reviewer's verdict text per RFD 0021 §"Reviewer parser
+/// contract": **the final non-empty line must match
+/// `^Merge readiness:\s*(READY_TO_MERGE|NEEDS_FIX|DO_NOT_MERGE)\s*$`**.
+/// Anything else is fallback mode, returning `None`. Callers MUST
+/// treat fallback as NeedsFix — we never silently promote to Ready.
 ///
-/// Match: case-sensitive, last-line-wins (so a reviewer that mentions
-/// "Merge readiness: NEEDS_FIX" in prose context but ends with the
-/// real verdict still parses correctly). Whitespace tolerated around
-/// the verdict word.
+/// Why "final line" not "last matching line": a reviewer whose actual
+/// verdict line is missing or unparseable but whose prose mentions
+/// the phrase earlier (e.g. "the spec says the reviewer ends with
+/// `Merge readiness: READY_TO_MERGE`") would have promoted under the
+/// previous "last matching line wins" parser. That's the RFD-spec
+/// violation flagged in the orchestrator v1 review (B4).
 pub fn parse_verdict(text: &str) -> Option<MergeReadiness> {
-    let mut last: Option<MergeReadiness> = None;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        let Some(rest) = trimmed.strip_prefix("Merge readiness:") else {
-            continue;
-        };
-        let word = rest.trim();
-        let parsed = match word {
-            "READY_TO_MERGE" => Some(MergeReadiness::Ready),
-            "NEEDS_FIX" => Some(MergeReadiness::NeedsFix),
-            "DO_NOT_MERGE" => Some(MergeReadiness::DoNotMerge),
-            _ => None,
-        };
-        if parsed.is_some() {
-            last = parsed;
+    // Find the final non-empty trimmed line.
+    let final_line = text.lines().rev().find_map(|l| {
+        let t = l.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
         }
+    })?;
+    let rest = final_line.strip_prefix("Merge readiness:")?;
+    match rest.trim() {
+        "READY_TO_MERGE" => Some(MergeReadiness::Ready),
+        "NEEDS_FIX" => Some(MergeReadiness::NeedsFix),
+        "DO_NOT_MERGE" => Some(MergeReadiness::DoNotMerge),
+        _ => None,
     }
-    last
 }
 
 #[cfg(test)]
@@ -91,12 +92,31 @@ mod tests {
     }
 
     #[test]
-    fn last_line_wins_when_repeated() {
+    fn final_line_is_authoritative_even_with_earlier_prose_mention() {
         // A reviewer that mentions the phrase in prose context, then
-        // gives the real final verdict, must parse as the LAST
-        // occurrence.
+        // gives the real final verdict, parses to the FINAL line.
         let v = "earlier I said 'Merge readiness: NEEDS_FIX' but actually\n\
                  Merge readiness: READY_TO_MERGE\n";
+        assert_eq!(parse_verdict(v), Some(MergeReadiness::Ready));
+    }
+
+    #[test]
+    fn prose_mention_without_final_verdict_returns_none() {
+        // Regression for B4 in the v1 review: the previous parser
+        // ("last matching line wins") would have wrongly promoted
+        // this to Ready because it found the phrase mid-text. The
+        // RFD says the FINAL non-empty line must be the verdict —
+        // anything else is fallback mode. Returning None here forces
+        // the caller (runner) to treat as NeedsFix and bump the
+        // fix-loop counter, which is the correct behaviour.
+        let v = "I'd normally say 'Merge readiness: READY_TO_MERGE' here, but\n\
+                 there are concerns I haven't finished writing up below.\n";
+        assert_eq!(parse_verdict(v), None);
+    }
+
+    #[test]
+    fn trailing_blank_lines_dont_confuse_parser() {
+        let v = "Merge readiness: READY_TO_MERGE\n\n\n   \n";
         assert_eq!(parse_verdict(v), Some(MergeReadiness::Ready));
     }
 
