@@ -149,6 +149,8 @@ pub struct View {
     /// the `ctx:N%` segment in the powerline footer. `None` skips the
     /// segment.
     pub context_window: Option<u32>,
+    /// Current theme name (updated by /theme command).
+    pub current_theme_name: String,
 }
 
 /// How the autoresearch dashboard should be rendered above the editor.
@@ -191,6 +193,7 @@ impl View {
             dashboard_snapshot: None,
             git_status_cache: std::sync::Arc::new(crate::footer::GitStatusCache::default()),
             context_window: None,
+            current_theme_name: String::new(),
         }
     }
 }
@@ -719,9 +722,9 @@ pub(crate) fn build_frame(
     rows: u16,
     model: &str,
     cwd: &std::path::Path,
+    slash_registry: &SlashRegistry,
 ) -> Frame {
     let mut frame = view.transcript.render(theme, cols);
-    let slash_registry = SlashRegistry::new();
 
     // Autoresearch dashboard widget (Ctrl+Shift+T toggles).
     let dashboard_lines: Vec<Line> = match (view.dashboard_mode, view.dashboard_snapshot.as_ref()) {
@@ -1052,6 +1055,7 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
         .unwrap_or_else(|| pi_tui::ThemeRegistry::new().get("dark").cloned().unwrap());
 
     let mut view = View::new(startup.keymap.clone(), startup.settings.thinking);
+    view.current_theme_name = theme.name.clone();
     view.scoped_models = startup.settings.scoped_models;
     // Resolve context_window for the active model so the footer can
     // render ctx:N%. Falls back to None when the model isn't in the
@@ -1282,24 +1286,33 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                 view.dirty = true;
             }
             _ = tick.tick() => {
-                // Poll for hot-reloaded theme on every tick.
-                if let Some(new_theme) = startup
-                    .themes_handle
-                    .as_ref()
-                    .and_then(|h| {
-                        let snap = h.snapshot();
-                        snap.get(&startup.settings.theme)
-                            .cloned()
-                            .or_else(|| snap.get("dark").cloned())
-                    })
-                {
-                    if new_theme != theme {
-                        theme = new_theme;
-                        view.dirty = true;
+                // Poll for hot-reloaded theme on every tick; also
+                // re-apply if /theme was just dispatched (settings.theme changed).
+                let new_theme_name = &startup.settings.theme;
+                if let Some(ht) = startup.themes_handle.as_ref() {
+                    let snap = ht.snapshot();
+                    if let Some(new_theme_from_disk) = snap.get(new_theme_name)
+                        .cloned()
+                        .or_else(|| snap.get("dark").cloned())
+                    {
+                        if new_theme_from_disk != theme {
+                            theme = new_theme_from_disk;
+                            view.dirty = true;
+                        }
+                    }
+                } else {
+                    // No hot-reload handle: theme lookup is from the in-memory registry.
+                    if theme.name != *new_theme_name {
+                        if let Some(new_theme) = startup.themes.get(new_theme_name).cloned()
+                            .or_else(|| startup.themes.get("dark").cloned())
+                        {
+                            theme = new_theme;
+                            view.dirty = true;
+                        }
                     }
                 }
                 if view.dirty {
-                    let frame = build_frame(&view, &theme, cols, rows, &current_model, &cwd);
+                    let frame = build_frame(&view, &theme, cols, rows, &current_model, &cwd, &slash);
                     let _ = renderer.render(&frame);
                     view.dirty = false;
                 }
@@ -1510,6 +1523,47 @@ async fn handle_slash(
             view.transcript
                 .blocks
                 .push(crate::renderer::Block::Note(body));
+            SlashOutcome::Continue
+        }
+        "theme" => {
+            let theme_name = args.trim();
+            if theme_name.is_empty() {
+                // List installed themes
+                let names = startup.themes.names();
+                let mut body = String::from("Installed themes:\n");
+                for name in names {
+                    body.push_str(&format!("  {}\n", name));
+                }
+                view.transcript
+                    .blocks
+                    .push(crate::renderer::Block::Note(body));
+            } else {
+                // Look up the theme by name
+                if let Some(_theme) = startup.themes.get(theme_name) {
+                    // Update the settings so it persists
+                    startup.settings.theme = theme_name.to_string();
+                    let path = crate::context::settings_paths().0;
+                    let _ = startup.settings.save(&path);
+                    
+                    // Update view so next render uses new theme
+                    view.current_theme_name = theme_name.to_string();
+                    view.dirty = true;
+                    
+                    view.transcript.blocks.push(crate::renderer::Block::Note(format!(
+                        "[theme set to {}]",
+                        theme_name
+                    )));
+                } else {
+                    let names = startup.themes.names();
+                    let mut body = String::from("Theme not found. Available themes:\n");
+                    for name in names {
+                        body.push_str(&format!("  {}\n", name));
+                    }
+                    view.transcript
+                        .blocks
+                        .push(crate::renderer::Block::Error(body));
+                }
+            }
             SlashOutcome::Continue
         }
         "compact" => {
@@ -2966,6 +3020,7 @@ mod tests {
             12,
             "anthropic/sonnet",
             std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
         );
         // Must have at least: separator + editor placeholder + footer.
         assert!(frame.lines.len() >= 3);
@@ -2998,6 +3053,7 @@ mod tests {
             12,
             "openai/gpt-4o",
             std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
         );
         let dump: String = frame
             .lines
@@ -3037,6 +3093,7 @@ mod tests {
             12,
             "openai/gpt-4o",
             std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
         );
         let dump: String = frame
             .lines
@@ -3061,7 +3118,7 @@ mod tests {
         }
         let theme = theme_for_test();
         // 6 rows means very few transcript lines survive.
-        let frame = build_frame(&v, &theme, 80, 6, "x/y", std::path::Path::new("/"));
+        let frame = build_frame(&v, &theme, 80, 6, "x/y", std::path::Path::new("/"), &SlashRegistry::new());
         assert!(frame.lines.len() <= 12, "got {} lines", frame.lines.len());
     }
 
@@ -3367,6 +3424,7 @@ mod tests {
             24,
             "openai/gpt-4o",
             std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
         );
         let dump = frame
             .lines
@@ -3405,7 +3463,7 @@ mod tests {
             runs: vec![],
         });
         let theme = pi_tui::ThemeRegistry::new().get("dark").cloned().unwrap();
-        let frame = build_frame(&v, &theme, 80, 24, "m", std::path::Path::new("/tmp"));
+        let frame = build_frame(&v, &theme, 80, 24, "m", std::path::Path::new("/tmp"), &SlashRegistry::new());
         let dump = frame
             .lines
             .iter()
@@ -3509,7 +3567,7 @@ mod tests {
         v.editor.cursor = 3;
 
         let theme = theme_for_test();
-        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"));
+        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"), &SlashRegistry::new());
 
         let dump: String = frame
             .lines
@@ -3529,7 +3587,7 @@ mod tests {
         v.editor.cursor = 15;
 
         let theme = theme_for_test();
-        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"));
+        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"), &SlashRegistry::new());
 
         let dump: String = frame
             .lines
@@ -3552,7 +3610,7 @@ mod tests {
         v.editor.cursor = 2;
 
         let theme = theme_for_test();
-        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"));
+        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"), &SlashRegistry::new());
 
         let dump: String = frame
             .lines
@@ -3572,7 +3630,7 @@ mod tests {
         v.editor.cursor = 0;
 
         let theme = theme_for_test();
-        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"));
+        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"), &SlashRegistry::new());
 
         let dump: String = frame
             .lines
@@ -3592,7 +3650,7 @@ mod tests {
         v.editor.cursor = 1;
 
         let theme = theme_for_test();
-        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"));
+        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"), &SlashRegistry::new());
 
         // Count suggestion lines (those with "/" in them after editor lines)
         let suggestion_lines: Vec<_> = frame

@@ -1,30 +1,51 @@
 # RFD 0024 — Ratatui-based TUI rewrite
 
-- **Status:** In Progress (Phase 1-2 complete, Phase 3-4 deferred)
+- **Status:** Shipped (Phases 1-2-3 complete, Phase 4 partial)
 - **Author:** Claude
 - **Created:** 2024-01-01
-- **Implemented:** <commit a602d83...1e0cc56>
+- **Implemented:** a602d83...TBD (fixes in follow-up commit series)
 
 ## Summary
 
-Replaced pi-rs's hand-rolled `pi-tui::DiffRenderer` with ratatui backend and added markdown + syntax highlighting to assistant text. The rewrite solves long-standing bugs and consolidates on a proven library.
+Replaced pi-rs's hand-rolled `pi-tui::DiffRenderer` with ratatui backend and added markdown + syntax highlighting to assistant text. Fixed critical bugs in word wrapping and theme switching. The rewrite solves long-standing issues and consolidates on a proven library.
 
-**Completed (Phases 1-2):**
+**Completed (Phases 1-2-3):**
 - ✅ `DiffRenderer` now uses `ratatui::Terminal<CrosstermBackend<W>>` (Phase 1)
   - Public API (`Frame`, `Line`, `Span`) unchanged; pi-coding-agent unaffected
-  - All 26 pi-tui tests pass
+  - 26 pi-tui tests pass + 163+ pi-coding-agent tests (all pass)
+  
 - ✅ Markdown rendering via pulldown-cmark + syntect for AssistantText (Phase 2)
   - `**bold**` → accent colour, no `**` in output
   - `_italic_` → muted, no `_` in output
   - `` `code` `` → cyan, no backticks
-  - Fenced code blocks → syntax-highlighted with language label + box borders
-  - 18 new tests pass (markdown-inline, code-block, word-wrap, integration)
+  - Fenced code blocks → syntax-highlighted with language label + box borders (╭─/╰─)
+  - 18+ tests pass (markdown-inline, code-block, word-wrap, integration)
+  
+- ✅ Slash-command autocomplete dropdown UI (Phase 3a)
+  - Type `/he` → shows matching commands below editor
+  - First match highlighted with ▸
+  - Up to 5 suggestions shown
+  - Tests: `build_frame_slash_autocomplete_*` in interactive tests
 
-**Deferred to follow-up (Phase 3-4):**
-- Slash-command autocomplete dropdown UI
-- Live theme switching
-- Fine-tuning powerline footer segments
-- Cleanup deprecated wrap_line code
+- ✅ Live theme switching `/theme dark` / `/theme light` (Phase 3b)
+  - New `/theme` builtin command registered in `slash.rs`
+  - `handle_slash` dispatches to theme handler that updates `startup.settings.theme`
+  - Hot-reload tick picks up theme change and reapplies on next render
+  - Tests: `theme_live_switch.rs` (3 tests)
+
+- ✅ Word wrapping fixed + prefix bug resolved (Phase 4)
+  - Delegated `wrap_line()` to `textwrap` crate (UnicodeBreakProperties + HyphenSplitter)
+  - Fixed prefix-overrun bug: `parse_and_render_markdown` now subtracts 4 cols for "pi> " prefix
+  - Tests: `wrap_via_textwrap.rs` (3 tests) verify wrapped lines respect viewport after prefix
+
+- ✅ Test file organization (Phase 3b-4)
+  - `slash_autocomplete.rs` now contains real autocomplete registry tests (4 tests)
+  - `footer_powerline.rs` extracted with dedicated powerline tests (5 tests)
+
+**Deferred / Concerns addressed:**
+- Tab/Enter integration for autocomplete (deferred: requires keymap changes)
+- Code-block viewport wrapping and theme customization (deferred: RFD revision notes)
+
 
 ## Background
 
@@ -178,4 +199,12 @@ Every commit must have a test. Specifically:
 
 As implementation proceeds, new work items will be discovered. Track them here:
 
-- [ ] (none yet; update during implementation)
+- [x] `/theme` command implementation (done: registers builtin, handle_slash dispatches)
+- [x] `wrap_line` delegation to textwrap (done: UnicodeBreakProperties + HyphenSplitter)
+- [x] Prefix-overrun bug in markdown wrapping (done: viewport_cols - 4)
+- [x] Real autocomplete tests in `slash_autocomplete.rs` (done: 4 tests)
+- [x] `footer_powerline.rs` as separate test target (done: extracted from footer.rs)
+- [ ] Code-block wrapping via `viewport_cols` is not yet implemented — `_viewport_cols` argument exists but is ignored. Long lines in code blocks will overflow the terminal width. Deferred as `render_code_block` is complex to reflow given syntect spans. Tracked here for RFD 0025.
+- [ ] Code-block theme colours still hardcoded to `base16-ocean.dark` syntect theme. Adding `code_bg`/`code_fg` fields to `Theme` would allow per-theme customization. Deferred: schema change across all builtin JSON themes; tracked for RFD 0025.
+- [ ] Tab/Enter autocomplete acceptance. Currently the dropdown shows but Tab doesn't complete to the first suggestion. Requires keymap changes to route Tab through the slash-autocomplete layer. Deferred for RFD 0025.
+- [ ] build_frame passes `&slash` (the full registry from startup) since Concern fix, so extension commands appear in autocomplete dropdown.

@@ -56,6 +56,7 @@ impl SlashRegistry {
             ("hotkeys", "Show all keyboard shortcuts"),
             ("help", "Show help"),
             ("quit", "Exit pi"),
+            ("theme", "Switch the active theme; e.g. /theme dark, /theme light, or any installed theme name"),
             (
                 "autoresearch",
                 "Autonomous experiment loop (off | clear | export | <text>)",
