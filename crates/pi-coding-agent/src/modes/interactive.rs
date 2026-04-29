@@ -151,6 +151,9 @@ pub struct View {
     pub context_window: Option<u32>,
     /// Current theme name (updated by /theme command).
     pub current_theme_name: String,
+    /// Slash-command names available for autocomplete. Populated from the
+    /// live `Startup::slash_registry` so extension commands appear too.
+    pub slash_registry_names: Vec<String>,
     /// Active route mode shown in the footer powerline.
     pub route_mode: RouteMode,
     /// Accepted slash-autocomplete candidates for repeated Tab / Shift-Tab
@@ -207,6 +210,7 @@ impl View {
             git_status_cache: std::sync::Arc::new(crate::footer::GitStatusCache::default()),
             context_window: None,
             current_theme_name: String::new(),
+            slash_registry_names: SlashRegistry::new().names(),
             route_mode: RouteMode::Static,
             slash_ac_cycle_suggestions: Vec::new(),
             slash_ac_cycle_index: 0,
@@ -737,8 +741,19 @@ fn cycle_or_accept_slash_autocomplete(view: &mut View, forward: bool) -> bool {
 }
 
 fn slash_command_suggestions_for(view: &View) -> Vec<String> {
-    let registry = SlashRegistry::new();
-    slash_command_suggestions_for_with_registry(view, &registry)
+    let Some(token) = current_slash_token(&view.editor.text, view.editor.cursor) else {
+        return Vec::new();
+    };
+    let Some(query) = token.strip_prefix('/') else {
+        return Vec::new();
+    };
+    view
+        .slash_registry_names
+        .iter()
+        .filter(|name| name.starts_with(query))
+        .take(5)
+        .cloned()
+        .collect()
 }
 
 fn slash_command_suggestions_for_with_registry(
@@ -866,7 +881,9 @@ fn reset_slash_autocomplete_after_typed_char(view: &mut View) {
     clear_slash_autocomplete_state(view);
 }
 
-fn sync_slash_registry(_view: &mut View, _slash_registry: &SlashRegistry) {}
+fn sync_slash_registry(view: &mut View, slash_registry: &SlashRegistry) {
+    view.slash_registry_names = slash_registry.names();
+}
 
 fn reset_slash_dropdown_suppression(view: &mut View) {
     view.slash_ac_hidden_until_char = false;
@@ -3960,10 +3977,17 @@ mod tests {
     }
 
     #[test]
-    fn build_frame_slash_autocomplete_limits_to_five() {
+    fn build_frame_slash_autocomplete_shows_extension_commands_from_live_registry() {
         let mut v = fresh_view();
-        v.editor.text = "/".to_string();
-        v.editor.cursor = 1;
+        let mut registry = SlashRegistry::new();
+        let ext_cmd = crate::extensions::ExtensionCommandManifest {
+            name: "deploy".into(),
+            description: "Deploy the current branch".into(),
+        };
+        registry.register_extension_commands(&[(0usize, &ext_cmd)]);
+        sync_slash_registry(&mut v, &registry);
+        v.editor.text = "/de".to_string();
+        v.editor.cursor = v.editor.text.len();
 
         let theme = theme_for_test();
         let frame = build_frame(
@@ -3973,24 +3997,33 @@ mod tests {
             24,
             "claude-3.5-sonnet",
             std::path::Path::new("/tmp"),
-            &SlashRegistry::new(),
+            &registry,
         );
 
-        // Count suggestion lines (those with "/" in them after editor lines)
-        let suggestion_lines: Vec<_> = frame
+        let dump: String = frame
             .lines
             .iter()
-            .filter(|line| {
-                let joined = line
-                    .spans
-                    .iter()
-                    .map(|s| s.text.as_str())
-                    .collect::<String>();
-                joined.contains("/") && joined.contains("▸ ") || joined.contains("  /")
-            })
-            .collect();
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(dump.contains("/deploy"), "missing extension command: {dump}");
+    }
 
-        // Should have at most 5 suggestions
-        assert!(suggestion_lines.len() <= 5, "should limit to 5 suggestions");
+    #[test]
+    fn tab_accepts_extension_command_from_live_registry() {
+        let mut v = fresh_view();
+        let mut registry = SlashRegistry::new();
+        let ext_cmd = crate::extensions::ExtensionCommandManifest {
+            name: "deploy".into(),
+            description: "Deploy the current branch".into(),
+        };
+        registry.register_extension_commands(&[(0usize, &ext_cmd)]);
+        sync_slash_registry(&mut v, &registry);
+        v.editor.text = "/de".to_string();
+        v.editor.cursor = v.editor.text.len();
+
+        let outcome = handle_key(&mut v, &ke(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(outcome, KeyOutcome::None);
+        assert_eq!(v.editor.text, "/deploy ");
     }
 }
