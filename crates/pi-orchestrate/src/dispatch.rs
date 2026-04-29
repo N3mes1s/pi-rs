@@ -32,6 +32,96 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+/// Subset of a `.pi/agents/<name>.md` definition that the orchestrator
+/// needs at dispatch time. We don't reuse pi-coding-agent's
+/// `AgentDefinition` because pi-orchestrate is a leaf crate and a
+/// circular dependency is the wrong fix.
+///
+/// The agent's YAML frontmatter looks like:
+///   ---
+///   name: code-reviewer
+///   description: ...
+///   model: openai-codex/gpt-5.4
+///   thinking: high
+///   tools: [...]
+///   ---
+///   <system prompt body>
+///
+/// We extract `model`, `thinking`, and the body. The body becomes the
+/// system prompt; pi v1 has no `--system-prompt-file` flag, so we
+/// prepend it to the assignment at dispatch time. v2 should add
+/// `--system-prompt-file` and stop concatenating.
+#[derive(Debug, Clone, Default)]
+pub struct AgentSpec {
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+    pub system_prompt: String,
+}
+
+/// Load `<repo_root>/.pi/agents/<name>.md`. v1 only resolves project-
+/// local agents; user-global (`~/.pi/agents/`) and bundled fallbacks
+/// are deferred to v2. Errors are propagated so the dispatcher can
+/// emit a FAILED state event with a clear cause rather than silently
+/// running with no system prompt.
+pub fn load_agent_spec(repo_root: &Path, name: &str) -> std::io::Result<AgentSpec> {
+    let path = repo_root.join(".pi").join("agents").join(format!("{name}.md"));
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("agent definition {} unreadable: {e}", path.display()),
+        )
+    })?;
+    parse_agent_md(&text).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("agent definition {} missing frontmatter", path.display()),
+        )
+    })
+}
+
+/// Parse the markdown-with-frontmatter shape. Returns `None` if the
+/// frontmatter delimiters are missing — caller treats as a failure.
+fn parse_agent_md(text: &str) -> Option<AgentSpec> {
+    // The file MUST open with `---\n` and contain a closing `---` line.
+    let rest = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n"))?;
+    // Find the closing `---` line at the start of a line.
+    let close_idx = rest.find("\n---\n").or_else(|| rest.find("\n---\r\n"))?;
+    let frontmatter = &rest[..close_idx];
+    // Body starts after the closing delimiter and the newline that
+    // follows it.
+    let body_start = close_idx + "\n---\n".len();
+    let body = if body_start < rest.len() {
+        &rest[body_start..]
+    } else {
+        ""
+    };
+
+    let mut spec = AgentSpec {
+        model: None,
+        thinking: None,
+        system_prompt: body.trim_start_matches('\n').to_string(),
+    };
+    // Single-pass YAML-lite parse: only pull out top-level
+    // `key: value` lines for model + thinking. Anything else is
+    // ignored — we don't need tools/spawns/etc at dispatch time.
+    for line in frontmatter.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        match key.trim() {
+            "model" => spec.model = Some(value.to_string()),
+            "thinking" => spec.thinking = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    Some(spec)
+}
+
 /// Result of one subagent dispatch.
 #[derive(Debug, Clone)]
 pub struct DispatchOutcome {
@@ -105,18 +195,36 @@ impl Dispatch for RealDispatch {
         cwd: &Path,
     ) -> std::io::Result<DispatchOutcome> {
         let started = Instant::now();
-        // The subagent name maps to a `.pi/agents/<name>.md` file the
-        // pi binary already discovers; we rely on the binary's own
-        // agent loader rather than re-parsing definitions here. v1
-        // passes the agent name verbatim as the prompt-template id —
-        // the implementer/reviewer subagent files set up their own
-        // system prompts.
+
+        // B1 fix: actually use the named subagent.
+        // Load `<cwd>/.pi/agents/<agent_name>.md` and apply its
+        // model + thinking + system prompt to the spawned pi. The
+        // previous v1 just put the agent_name in the argv preview
+        // and ignored the file entirely, so every milestone ran
+        // under the user's default agent regardless of the campaign
+        // TOML's `implementer` / `reviewer` fields.
         //
-        // For v1 we do NOT yet reach into the agent's own model+
-        // thinking frontmatter; we let the user invoke pi with
-        // whatever defaults their environment has set. v2 will read
-        // the agent file directly and pass `-m <provider/model>
-        // --thinking <level>`.
+        // pi v1 has no `--system-prompt-file` flag, so we prepend
+        // the agent's body to the assignment (under a clear marker)
+        // and let the spawned pi treat the whole thing as one user
+        // prompt. v2 should add `--system-prompt-file` and stop
+        // concatenating.
+        let agent = load_agent_spec(cwd, agent_name).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("dispatch role={} agent={agent_name}: {e}", role.label()),
+            )
+        })?;
+        let injected_prompt = if agent.system_prompt.is_empty() {
+            assignment.to_string()
+        } else {
+            format!(
+                "# Agent: {agent_name} (role: {role})\n\n{}\n\n---\n\n# Assignment\n\n{assignment}",
+                agent.system_prompt.trim_end(),
+                role = role.label(),
+            )
+        };
+
         let mut cmd = Command::new(&self.pi_binary);
         cmd.arg("-p")
             .arg("--auto-approve")
@@ -131,25 +239,23 @@ impl Dispatch for RealDispatch {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // PI_NO_SYNC keeps the subprocess from racing on shared
-            // session-history mutations against the orchestrator's
-            // own session.
             .env("PI_NO_SYNC", "1")
-            // PI_ORCHESTRATE_ROLE is informational — lets the
-            // subagent's system prompt branch on whether it's the
-            // implementer or reviewer in case a single agent file
-            // serves both roles.
             .env("PI_ORCHESTRATE_ROLE", role.label());
+
+        // B1 fix continued: pass model + thinking from the agent's
+        // YAML frontmatter. Without these, the spawned pi runs under
+        // whatever model the parent's settings happen to default to.
+        if let Some(model) = &agent.model {
+            cmd.arg("-m").arg(model);
+        }
+        if let Some(thinking) = &agent.thinking {
+            cmd.arg("--thinking").arg(thinking);
+        }
 
         let mut child = cmd.spawn()?;
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
-            // Whole assignment goes on stdin so the print-mode
-            // implementation (modes/print.rs) treats it as the user
-            // prompt. The first-line preview also went onto argv
-            // above, but that's just for ps-listing readability;
-            // stdin is the payload.
-            stdin.write_all(assignment.as_bytes())?;
+            stdin.write_all(injected_prompt.as_bytes())?;
         }
         let output = child.wait_with_output()?;
         let exit_code = output.status.code().unwrap_or(-1);
@@ -187,5 +293,61 @@ pub fn agent_for(role: DispatchRole, milestone: &Milestone, default_reviewer: &s
             .reviewer
             .clone()
             .unwrap_or_else(|| default_reviewer.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── B1: agent-spec parser ──────────────────────────────
+
+    #[test]
+    fn parse_agent_md_extracts_model_thinking_and_body() {
+        let md = "---\n\
+                  name: code-reviewer\n\
+                  description: \"Senior pi-rs reviewer\"\n\
+                  model: openai-codex/gpt-5.4\n\
+                  thinking: high\n\
+                  tools: [read, grep, bash]\n\
+                  ---\n\
+                  You are a senior Rust engineer reviewing a feature branch.\n\
+                  \n\
+                  Output a verdict ending with `Merge readiness: ...`.\n";
+        let spec = parse_agent_md(md).expect("parses");
+        assert_eq!(spec.model.as_deref(), Some("openai-codex/gpt-5.4"));
+        assert_eq!(spec.thinking.as_deref(), Some("high"));
+        assert!(spec.system_prompt.contains("senior Rust engineer"));
+        assert!(spec.system_prompt.contains("Merge readiness"));
+    }
+
+    #[test]
+    fn parse_agent_md_returns_none_without_frontmatter() {
+        let no_frontmatter = "name: not-frontmatter\n\nbody text\n";
+        assert!(parse_agent_md(no_frontmatter).is_none());
+    }
+
+    #[test]
+    fn parse_agent_md_handles_quoted_values() {
+        let md = "---\n\
+                  model: \"openai/gpt-4o\"\n\
+                  thinking: 'medium'\n\
+                  ---\n\
+                  body\n";
+        let spec = parse_agent_md(md).expect("parses");
+        assert_eq!(spec.model.as_deref(), Some("openai/gpt-4o"));
+        assert_eq!(spec.thinking.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn parse_agent_md_omitted_fields_default_to_none() {
+        let md = "---\n\
+                  name: minimal\n\
+                  ---\n\
+                  system prompt body\n";
+        let spec = parse_agent_md(md).expect("parses");
+        assert!(spec.model.is_none());
+        assert!(spec.thinking.is_none());
+        assert_eq!(spec.system_prompt.trim(), "system prompt body");
     }
 }

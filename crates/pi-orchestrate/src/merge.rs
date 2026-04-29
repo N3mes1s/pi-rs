@@ -24,6 +24,28 @@ pub enum MergeOutcome {
     GitError(String),
 }
 
+/// `git checkout <branch>` in the given repo. Used by the runner to
+/// switch between milestone branches and the campaign target branch.
+/// Bug B2 in the v1 review: the runner never checked out
+/// `m.branch` before dispatch, so post-merge milestones executed on
+/// `target_branch`.
+pub fn git_checkout(repo_root: &Path, branch: &str) -> std::io::Result<()> {
+    let out = Command::new("git")
+        .args(["checkout", "-q", branch])
+        .current_dir(repo_root)
+        .output()?;
+    if !out.status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "git checkout {branch} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve `git rev-parse <ref>` in the given repo.
 pub fn rev_parse(repo_root: &Path, refname: &str) -> std::io::Result<String> {
     let out = Command::new("git")

@@ -25,7 +25,7 @@
 //! module docs and in the v0→v1→v2 roadmap on RFD 0021.
 
 use crate::dispatch::{agent_for, Dispatch, DispatchRole};
-use crate::merge::{cherry_pick_to_target, rev_parse, MergeOutcome};
+use crate::merge::{cherry_pick_to_target, git_checkout, rev_parse, MergeOutcome};
 use crate::plan::topological_order;
 use crate::schema::Campaign;
 use crate::verdict::{parse_verdict, MergeReadiness};
@@ -79,6 +79,7 @@ enum FinalState {
     Merged,
     Failed,
     BlockedOnConflict,
+    BlockedOnReviewStale,
 }
 
 impl FinalState {
@@ -87,6 +88,7 @@ impl FinalState {
             FinalState::Merged => "MERGED",
             FinalState::Failed => "FAILED",
             FinalState::BlockedOnConflict => "BLOCKED_ON_CONFLICT",
+            FinalState::BlockedOnReviewStale => "BLOCKED_ON_REVIEW_STALE",
         }
     }
 }
@@ -172,6 +174,25 @@ pub fn run_with(
         let mut iter: u32 = 0;
         let final_outcome: FinalState = loop {
             iter += 1;
+
+            // B2 fix: ensure the working tree is on m.branch before
+            // every dispatch. Without this, the second-and-onward
+            // milestones execute in `target_branch` (left there by
+            // the previous milestone's cherry-pick), so the
+            // implementer reads the wrong files and the reviewer
+            // diffs the wrong refs.
+            if let Err(e) = git_checkout(repo_root, &m.branch) {
+                emit_event(
+                    &mut log,
+                    &m.id,
+                    if iter == 1 { "PENDING" } else { "REVIEWED" },
+                    "FAILED",
+                    &format!("git checkout {} failed: {e}", m.branch),
+                    &mut events_for,
+                )?;
+                break FinalState::Failed;
+            }
+
             // Implementer dispatch.
             let implementer = agent_for(DispatchRole::Implementer, m, default_reviewer);
             emit_event(
@@ -213,13 +234,23 @@ pub fn run_with(
                 break FinalState::Failed;
             }
 
+            // B3 fix: capture the review snapshot per RFD §"Review
+            // snapshot" — the {branch_sha, target_head} pair as
+            // observed *immediately before* the reviewer is
+            // dispatched. These are used at merge time to detect
+            // staleness and to cherry-pick the exact sha the
+            // reviewer saw (not a fresh rev-parse that might
+            // include post-review pushes).
+            let branch_sha_at_review = rev_parse(repo_root, &m.branch).ok();
+            let target_head_at_review = rev_parse(repo_root, &campaign.target_branch).ok();
+
             // Reviewer dispatch.
             let reviewer = agent_for(DispatchRole::Reviewer, m, default_reviewer);
             let rev_outcome = dispatcher
                 .dispatch(
                     DispatchRole::Reviewer,
                     &reviewer,
-                    &reviewer_assignment(m, &imp_outcome.model_output),
+                    &reviewer_assignment(m, &imp_outcome.model_output, &campaign.target_branch),
                     repo_root,
                 )
                 .unwrap_or_else(|e| crate::dispatch::DispatchOutcome {
@@ -259,23 +290,22 @@ pub fn run_with(
             let verdict = parse_verdict(&rev_outcome.model_output);
             match verdict {
                 Some(MergeReadiness::Ready) => {
-                    // Cherry-pick to target.
-                    let branch_sha = match rev_parse(repo_root, &m.branch) {
-                        Ok(sha) => sha,
-                        Err(e) => {
-                            emit_event(
-                                &mut log,
-                                &m.id,
-                                "REVIEWED",
-                                "FAILED",
-                                &format!("rev-parse {} failed: {e}", m.branch),
-                                &mut events_for,
-                            )?;
-                            break FinalState::Failed;
-                        }
+                    // Use the snapshot captured before the reviewer
+                    // was dispatched, NOT a fresh rev-parse — this
+                    // is what RFD §"Review snapshot" requires (so a
+                    // post-review rogue push to the branch can't
+                    // sneak unreviewed commits in).
+                    let Some(branch_sha) = branch_sha_at_review.clone() else {
+                        emit_event(
+                            &mut log,
+                            &m.id,
+                            "REVIEWED",
+                            "FAILED",
+                            &format!("rev-parse {} (review snapshot) failed", m.branch),
+                            &mut events_for,
+                        )?;
+                        break FinalState::Failed;
                     };
-                    let target_head_before =
-                        rev_parse(repo_root, &campaign.target_branch).ok();
                     emit_event(
                         &mut log,
                         &m.id,
@@ -283,10 +313,38 @@ pub fn run_with(
                         "MERGE_PENDING",
                         &format!(
                             "branch_sha={branch_sha} target_head={}",
-                            target_head_before.as_deref().unwrap_or("?")
+                            target_head_at_review.as_deref().unwrap_or("?")
                         ),
                         &mut events_for,
                     )?;
+
+                    // B3 fix: re-rev-parse target_branch at merge
+                    // time. If it's different from the value we
+                    // captured before the reviewer was dispatched,
+                    // the review is stale — some other commit
+                    // landed on target_branch between review and
+                    // merge, so we cannot trust that the reviewed
+                    // diff still applies cleanly. Transition to
+                    // BLOCKED_ON_REVIEW_STALE and let the operator
+                    // decide whether to re-review (RFD §"Operator
+                    // recovery"; v3 will add auto-rebase).
+                    let target_head_now =
+                        rev_parse(repo_root, &campaign.target_branch).ok();
+                    if target_head_now != target_head_at_review {
+                        emit_event(
+                            &mut log,
+                            &m.id,
+                            "MERGE_PENDING",
+                            "BLOCKED_ON_REVIEW_STALE",
+                            &format!(
+                                "target_head moved {:?} -> {:?} between review and merge",
+                                target_head_at_review, target_head_now
+                            ),
+                            &mut events_for,
+                        )?;
+                        break FinalState::BlockedOnReviewStale;
+                    }
+
                     let merge_result = cherry_pick_to_target(
                         repo_root,
                         &campaign.target_branch,
@@ -406,7 +464,9 @@ fn compute_exit_code(states: &HashMap<String, FinalState>) -> i32 {
         match st {
             FinalState::Merged => {}
             FinalState::Failed => has_failed = true,
-            FinalState::BlockedOnConflict => has_blocked = true,
+            FinalState::BlockedOnConflict | FinalState::BlockedOnReviewStale => {
+                has_blocked = true
+            }
         }
     }
     // RFD §"Exit codes": blocked outranks failed (manual-resolution).
@@ -419,16 +479,26 @@ fn compute_exit_code(states: &HashMap<String, FinalState>) -> i32 {
     }
 }
 
-fn reviewer_assignment(m: &crate::schema::Milestone, implementer_output: &str) -> String {
+fn reviewer_assignment(
+    m: &crate::schema::Milestone,
+    implementer_output: &str,
+    target_branch: &str,
+) -> String {
+    // C1 from the review: previously the diff command was
+    // hardcoded to `main`, breaking on campaigns whose
+    // target_branch isn't main. Now we plumb the campaign's
+    // configured target_branch through.
     format!(
         "Review milestone `{id}` on branch `{branch}`.\n\n\
          The implementer just produced this output:\n\n\
          ---\n{out}\n---\n\n\
-         Read the diff (git diff main...{branch}). Produce a Markdown \
-         verdict ending with one line of the form \
-         `Merge readiness: READY_TO_MERGE | NEEDS_FIX | DO_NOT_MERGE`.",
+         Read the diff (git diff {target}...{branch}). Produce a Markdown \
+         verdict whose FINAL non-empty line is exactly one of \
+         `Merge readiness: READY_TO_MERGE`, `Merge readiness: NEEDS_FIX`, \
+         or `Merge readiness: DO_NOT_MERGE`.",
         id = m.id,
         branch = m.branch,
+        target = target_branch,
         out = truncate(implementer_output, 4000),
     )
 }
