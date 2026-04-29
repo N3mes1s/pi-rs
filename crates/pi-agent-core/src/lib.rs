@@ -21,6 +21,8 @@ pub use router::{
     validate_embedding_model, EmbeddingEngine, EmbeddingRouter, ForceOverride, Outcome, RouteMode,
     Router, RouterError, RoutingContext, RoutingDecision, StaticRouter, ToolSpec,
 };
+#[cfg(feature = "onnx-inference")]
+pub use router::OnnxRealEngine;
 pub use session::{
     OutcomeSource, SessionEntry, SessionEntryKind, SessionManager, SessionMeta, SessionTree,
 };

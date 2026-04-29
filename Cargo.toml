@@ -7,7 +7,7 @@ members = [
     "crates/pi-tui",
     "crates/pi-coding-agent",
     "crates/pi-orchestrate",
-    "crates/pi-stats",
+    "crates/pi-stats", "crates/pi-sandbox",
 ]
 
 [workspace.package]

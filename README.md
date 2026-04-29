@@ -211,12 +211,17 @@ enforces it; it just makes the budget visible to `pi --stats` so you
 can see how much of the hard-route spend is actually budgeted by you
 vs. unbounded.
 
-The auto router ships a hashed-similarity classifier today
-(RFD 0020 v1.1 §Stage 1 — accepts hashed embeddings as a v1
+The auto router ships the Stage 1 hashed-similarity classifier by
+default (RFD 0020 v1.1 §Stage 1 — hashed embeddings are an accepted v1
 implementation). The bundled `gte-small.onnx` model lives at
-`~/.pi/agent/embeddings/gte-small.onnx` for forward-compat with
-real ONNX inference; fetch it with `pi router fetch-embeddings`.
-See [RFD 0020](rfd/0020-autonomous-model-router.md).
+`~/.pi/agent/embeddings/gte-small.onnx`; enabling the optional
+`onnx-inference` cargo feature makes `EmbeddingRouter::bundled()` run
+real gte-small ONNX inference instead of the hashed shim whenever that
+file is present locally. The matching tokenizer is cached at
+`~/.pi/agent/embeddings/gte-small-tokenizer.json`. Fetch the bundled
+artifacts with `pi router fetch-embeddings`. On musl-static targets,
+leave `onnx-inference` off to avoid the known `ort::Session::builder()`
+startup deadlock. See [RFD 0020](rfd/0020-autonomous-model-router.md).
 
 ## Evolve
 

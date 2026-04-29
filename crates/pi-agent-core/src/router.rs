@@ -2,8 +2,13 @@ use anyhow::anyhow;
 use pi_ai::{Message, ModelRegistry, ThinkingLevel};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+
+#[cfg(feature = "onnx-inference")]
+use ort::session::Session;
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -133,7 +138,14 @@ pub struct EmbeddingRouter {
 impl EmbeddingRouter {
     pub fn bundled() -> Result<Self, RouterError> {
         let path = default_embedding_model_path();
-        Self::from_model_path(path)
+        #[cfg(feature = "onnx-inference")]
+        if path.exists() {
+            let engine = OnnxRealEngine::new(path)?;
+            return Ok(Self::with_engine(default_routes(), Arc::new(engine)));
+        }
+
+        let engine = OnnxEmbeddingEngine::new(path)?;
+        Ok(Self::with_engine(default_routes(), Arc::new(engine)))
     }
 
     pub fn from_model_path(path: impl AsRef<Path>) -> Result<Self, RouterError> {
@@ -144,8 +156,16 @@ impl EmbeddingRouter {
                 path.display()
             )));
         }
-        let engine = OnnxEmbeddingEngine::new(path)?;
-        Ok(Self::with_engine(default_routes(), Arc::new(engine)))
+        #[cfg(feature = "onnx-inference")]
+        {
+            let engine = OnnxRealEngine::new(path)?;
+            return Ok(Self::with_engine(default_routes(), Arc::new(engine)));
+        }
+        #[cfg(not(feature = "onnx-inference"))]
+        {
+            let engine = OnnxEmbeddingEngine::new(path)?;
+            Ok(Self::with_engine(default_routes(), Arc::new(engine)))
+        }
     }
 
     pub fn with_engine(routes: Vec<RouteEntry>, engine: Arc<dyn EmbeddingEngine>) -> Self {
@@ -223,17 +243,29 @@ impl Router for EmbeddingRouter {
     }
 }
 
-pub fn default_embedding_model_path() -> PathBuf {
+fn default_embedding_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".pi")
         .join("agent")
         .join("embeddings")
-        .join("gte-small.onnx")
+}
+
+pub fn default_embedding_model_path() -> PathBuf {
+    default_embedding_dir().join("gte-small.onnx")
+}
+
+fn default_embedding_tokenizer_path() -> PathBuf {
+    default_embedding_dir().join("gte-small-tokenizer.json")
 }
 
 pub async fn fetch_default_embeddings() -> anyhow::Result<PathBuf> {
-    fetch_embeddings_to(&default_embedding_model_path()).await
+    let model_path = fetch_embeddings_to(&default_embedding_model_path()).await?;
+    let tokenizer_path = default_embedding_tokenizer_path();
+    if !tokenizer_path.exists() {
+        fetch_tokenizer_to(&tokenizer_path).await?;
+    }
+    Ok(model_path)
 }
 
 pub async fn fetch_embeddings_to(path: &Path) -> anyhow::Result<PathBuf> {
@@ -244,6 +276,21 @@ pub async fn fetch_embeddings_to(path: &Path) -> anyhow::Result<PathBuf> {
         std::fs::create_dir_all(parent)?;
     }
     let bytes = reqwest::get("https://huggingface.co/thenlper/gte-small/resolve/main/onnx/model.onnx")
+        .await?
+        .bytes()
+        .await?;
+    std::fs::write(path, &bytes)?;
+    Ok(path.to_path_buf())
+}
+
+async fn fetch_tokenizer_to(path: &Path) -> anyhow::Result<PathBuf> {
+    if path.exists() {
+        return Ok(path.to_path_buf());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let bytes = reqwest::get("https://huggingface.co/thenlper/gte-small/resolve/main/tokenizer.json")
         .await?
         .bytes()
         .await?;
@@ -269,13 +316,13 @@ pub trait EmbeddingEngine: Send + Sync {
 /// behind a feature flag that is off on musl-static builds.
 #[derive(Debug)]
 struct OnnxEmbeddingEngine {
-    cache: Mutex<std::collections::HashMap<String, Vec<f32>>>,
+    cache: Mutex<HashMap<String, Vec<f32>>>,
 }
 
 impl OnnxEmbeddingEngine {
     fn new(_path: PathBuf) -> Result<Self, RouterError> {
         Ok(Self {
-            cache: Mutex::new(std::collections::HashMap::new()),
+            cache: Mutex::new(HashMap::new()),
         })
     }
 }
@@ -292,6 +339,269 @@ impl EmbeddingEngine for OnnxEmbeddingEngine {
             return Ok(v);
         }
         let embedding = hashed_embedding(text);
+        let normalized = l2_normalize(embedding);
+        self.cache
+            .lock()
+            .map_err(|_| RouterError::Inference("cache poisoned".into()))?
+            .insert(text.to_string(), normalized.clone());
+        Ok(normalized)
+    }
+}
+
+#[cfg(feature = "onnx-inference")]
+fn fetch_tokenizer_blocking(path: &Path) -> Result<PathBuf, String> {
+    let path = path.to_path_buf();
+    let join = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())?;
+        runtime
+            .block_on(fetch_tokenizer_to(&path))
+            .map_err(|e| e.to_string())
+    })
+    .join();
+    match join {
+        Ok(result) => result,
+        Err(_) => Err("tokenizer fetch worker panicked".into()),
+    }
+}
+
+#[cfg(feature = "onnx-inference")]
+fn resolve_tokenizer_path(model_path: &Path) -> PathBuf {
+    let mut candidates = Vec::new();
+    if let Some(parent) = model_path.parent() {
+        candidates.push(parent.join("gte-small-tokenizer.json"));
+        candidates.push(parent.join("tokenizer.json"));
+        candidates.push(parent.join("vocab.txt"));
+    }
+    candidates.push(default_embedding_tokenizer_path());
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.exists())
+        .unwrap_or_else(default_embedding_tokenizer_path)
+}
+
+#[cfg(feature = "onnx-inference")]
+fn load_tokenizer_from_path(path: &Path) -> Result<tokenizers::Tokenizer, RouterError> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("json") => tokenizers::Tokenizer::from_file(path).map_err(|e| {
+            RouterError::Inference(format!("failed to load tokenizer from {}: {e}", path.display()))
+        }),
+        Some("txt") => {
+            use tokenizers::models::wordpiece::WordPiece;
+            use tokenizers::normalizers::bert::BertNormalizer;
+            use tokenizers::pre_tokenizers::bert::BertPreTokenizer;
+            use tokenizers::processors::bert::BertProcessing;
+            use tokenizers::Model;
+
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| RouterError::Inference(format!("non-utf8 vocab path: {}", path.display())))?;
+            let model = WordPiece::from_file(path_str)
+                .unk_token("[UNK]".into())
+                .build()
+                .map_err(|e| RouterError::Inference(format!("failed to load WordPiece vocab from {}: {e}", path.display())))?;
+            let cls_id = model.token_to_id("[CLS]").ok_or_else(|| {
+                RouterError::Inference(format!("vocab {} is missing [CLS] token", path.display()))
+            })?;
+            let sep_id = model.token_to_id("[SEP]").ok_or_else(|| {
+                RouterError::Inference(format!("vocab {} is missing [SEP] token", path.display()))
+            })?;
+            let mut tokenizer = tokenizers::Tokenizer::new(model);
+            tokenizer.with_normalizer(Some(BertNormalizer::new(true, true, Some(false), false)));
+            tokenizer.with_pre_tokenizer(Some(BertPreTokenizer));
+            tokenizer.with_post_processor(Some(BertProcessing::new(
+                ("[SEP]".into(), sep_id),
+                ("[CLS]".into(), cls_id),
+            )));
+            Ok(tokenizer)
+        }
+        _ => Err(RouterError::Inference(format!(
+            "unsupported tokenizer file {}; expected tokenizer.json or vocab.txt",
+            path.display()
+        ))),
+    }
+}
+
+#[cfg(feature = "onnx-inference")]
+/// Real gte-small ONNX inference engine used by `EmbeddingRouter::bundled()`
+/// when the `onnx-inference` cargo feature is enabled and the bundled ONNX
+/// file exists locally.
+///
+/// This loads an `ort::Session` at construction and lazily loads the matching
+/// tokenizer from `tokenizer.json` on first use. If the tokenizer is missing,
+/// the engine tries to fetch it from Hugging Face and caches it at
+/// `~/.pi/agent/embeddings/gte-small-tokenizer.json`; if that fetch fails
+/// while offline, inference returns a clear error. Each `embed()` call runs
+/// real gte-small inference, mean-pools the last hidden state with the
+/// attention mask, L2-normalises the result, and caches the 384-dimensional
+/// vector in-memory.
+///
+/// Keep this feature off on musl-static production builds: `ort::Session::builder()`
+/// is known to deadlock there, so `EmbeddingRouter::bundled()` falls back to the
+/// hashed Stage-1 shim unless the feature is explicitly enabled.
+pub struct OnnxRealEngine {
+    cache: Mutex<HashMap<String, Vec<f32>>>,
+    session: Mutex<Session>,
+    tokenizer: OnceLock<tokenizers::Tokenizer>,
+    tokenizer_path: PathBuf,
+}
+
+#[cfg(feature = "onnx-inference")]
+impl OnnxRealEngine {
+    pub fn new(path: PathBuf) -> Result<Self, RouterError> {
+        let session = Session::builder()
+            .map_err(|e| RouterError::Inference(format!("failed to create ONNX session builder: {e}")))?
+            .commit_from_file(&path)
+            .map_err(|e| RouterError::Inference(format!("failed to load ONNX model from {}: {e}", path.display())))?;
+        Ok(Self {
+            cache: Mutex::new(HashMap::new()),
+            session: Mutex::new(session),
+            tokenizer: OnceLock::new(),
+            tokenizer_path: resolve_tokenizer_path(&path),
+        })
+    }
+
+    fn tokenizer(&self) -> Result<&tokenizers::Tokenizer, RouterError> {
+        if let Some(tokenizer) = self.tokenizer.get() {
+            return Ok(tokenizer);
+        }
+
+        let path = if self.tokenizer_path.exists() {
+            self.tokenizer_path.clone()
+        } else {
+            fetch_tokenizer_blocking(&default_embedding_tokenizer_path()).map_err(|e| {
+                RouterError::EmbeddingsUnavailable(format!(
+                    "tokenizer not found at {} and could not be fetched from Hugging Face (offline?): {e}",
+                    self.tokenizer_path.display()
+                ))
+            })?
+        };
+
+        let tokenizer = load_tokenizer_from_path(&path)?;
+        let _ = self.tokenizer.set(tokenizer);
+        self.tokenizer
+            .get()
+            .ok_or_else(|| RouterError::Inference("tokenizer initialization failed".into()))
+    }
+}
+
+#[cfg(feature = "onnx-inference")]
+impl EmbeddingEngine for OnnxRealEngine {
+    fn embed(&self, text: &str) -> Result<Vec<f32>, RouterError> {
+        if let Some(v) = self
+            .cache
+            .lock()
+            .map_err(|_| RouterError::Inference("cache poisoned".into()))?
+            .get(text)
+            .cloned()
+        {
+            return Ok(v);
+        }
+
+        let tokenizer = self.tokenizer()?;
+        let encoding = tokenizer
+            .encode(text, true)
+            .map_err(|e| RouterError::Inference(format!("tokenization failed: {e}")))?;
+
+        let seq_len = encoding.len().min(512);
+        let embedding = if seq_len == 0 {
+            vec![0.0; 384]
+        } else {
+            let input_ids = ndarray::Array2::from_shape_vec(
+                (1, seq_len),
+                encoding.get_ids()[..seq_len]
+                    .iter()
+                    .map(|&id| id as i64)
+                    .collect(),
+            )
+            .map_err(|e| RouterError::Inference(format!("failed to shape input_ids tensor: {e}")))?;
+            let attention_mask = ndarray::Array2::from_shape_vec(
+                (1, seq_len),
+                encoding.get_attention_mask()[..seq_len]
+                    .iter()
+                    .map(|&mask| mask as i64)
+                    .collect(),
+            )
+            .map_err(|e| RouterError::Inference(format!("failed to shape attention_mask tensor: {e}")))?;
+            let token_type_ids = if encoding.get_type_ids().len() >= seq_len {
+                ndarray::Array2::from_shape_vec(
+                    (1, seq_len),
+                    encoding.get_type_ids()[..seq_len]
+                        .iter()
+                        .map(|&token_type| token_type as i64)
+                        .collect(),
+                )
+                .map_err(|e| RouterError::Inference(format!("failed to shape token_type_ids tensor: {e}")))?
+            } else {
+                ndarray::Array2::zeros((1, seq_len))
+            };
+
+            let hidden_states = {
+                let mut session = self
+                    .session
+                    .lock()
+                    .map_err(|_| RouterError::Inference("session poisoned".into()))?;
+                let input_ids_val = ort::value::Value::from_array(input_ids)
+                    .map_err(|e| RouterError::Inference(format!("failed to create input_ids value: {e}")))?;
+                let attn_mask_val = ort::value::Value::from_array(attention_mask.clone())
+                    .map_err(|e| RouterError::Inference(format!("failed to create attention_mask value: {e}")))?;
+                let type_ids_val = ort::value::Value::from_array(token_type_ids)
+                    .map_err(|e| RouterError::Inference(format!("failed to create token_type_ids value: {e}")))?;
+                let outputs = session
+                    .run(vec![
+                        ("input_ids", input_ids_val),
+                        ("attention_mask", attn_mask_val),
+                        ("token_type_ids", type_ids_val),
+                    ])
+                    .map_err(|e| RouterError::Inference(format!("ONNX inference failed: {e}")))?;
+                let (out_shape, out_data) = outputs[0]
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| RouterError::Inference(format!("failed to extract ONNX output tensor: {e}")))?;
+                // Reconstruct [batch=1, seq_len, hidden_dim] from flat slice
+                if out_shape.len() != 3 {
+                    return Err(RouterError::Inference(format!(
+                        "unexpected ONNX output rank: {}; expected 3 (batch, seq_len, hidden_dim)",
+                        out_shape.len()
+                    )));
+                }
+                let hidden_dim = out_shape[2] as usize;
+                // Convert (out_shape, &[f32]) → Array3
+                ndarray::Array3::from_shape_vec(
+                    (out_shape[0] as usize, out_shape[1] as usize, hidden_dim),
+                    out_data.to_vec(),
+                )
+                .map_err(|e| RouterError::Inference(format!("failed to reshape ONNX output tensor: {e}")))?
+            };
+
+            if hidden_states.shape().len() != 3 || hidden_states.shape()[2] != 384 {
+                return Err(RouterError::Inference(format!(
+                    "unexpected ONNX output shape: {:?}; expected [1, seq_len, 384]",
+                    hidden_states.shape()
+                )));
+            }
+
+            let mut pooled = vec![0.0f32; hidden_states.shape()[2]];
+            let mut mask_sum = 0.0f32;
+            for token_idx in 0..seq_len {
+                let mask = attention_mask[[0, token_idx]] as f32;
+                if mask <= 0.0 {
+                    continue;
+                }
+                mask_sum += mask;
+                for dim in 0..pooled.len() {
+                    pooled[dim] += hidden_states[[0, token_idx, dim]] * mask;
+                }
+            }
+            if mask_sum > 0.0 {
+                for value in &mut pooled {
+                    *value /= mask_sum;
+                }
+            }
+            pooled
+        };
+
         let normalized = l2_normalize(embedding);
         self.cache
             .lock()
@@ -509,9 +819,9 @@ fn default_routes() -> Vec<RouteEntry> {
 /// Verify the gte-small ONNX file is present and at least plausibly an
 /// ONNX protobuf (4-byte tag + reasonable size). We deliberately do
 /// **not** invoke `ort::Session::builder()` here — that call deadlocks
-/// at process start on musl-static targets (see `OnnxEmbeddingEngine`
-/// for the full note). When real inference lands, gate the
-/// `Session::builder()` validation behind a feature flag.
+/// at process start on musl-static targets (see `OnnxRealEngine` for the
+/// full note). With the optional `onnx-inference` feature enabled, real
+/// `Session::builder()` loading happens at engine construction time.
 pub fn validate_embedding_model(path: impl AsRef<Path>) -> anyhow::Result<()> {
     let path = path.as_ref();
     if !path.exists() {
