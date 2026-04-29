@@ -51,9 +51,14 @@ pub struct Cli {
     #[arg(short = 'c', action = ArgAction::SetTrue)]
     pub continue_recent: bool,
 
-    /// Resume with a session selector.
-    #[arg(short = 'r', action = ArgAction::SetTrue)]
-    pub resume: bool,
+    /// Resume a specific session by id, or "most recent" when no id given.
+    /// Examples:
+    ///   pi -r                        # resume most-recently-touched session
+    ///   pi -r 72d77a8d-2dbd-...      # resume that exact session
+    /// Setting this AND positional message-args is supported: pi loads
+    /// the named session and then sends the message into it.
+    #[arg(short = 'r', long = "resume", num_args = 0..=1, default_missing_value = "")]
+    pub resume: Option<String>,
 
     /// Use a specific session id or path.
     #[arg(long)]

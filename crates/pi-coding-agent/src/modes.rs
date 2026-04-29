@@ -14,10 +14,15 @@ pub(crate) fn build_session(
 ) -> anyhow::Result<(AgentSession, UnboundedReceiver<pi_agent_core::AgentEvent>)> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<pi_agent_core::AgentEvent>();
     let cfg = startup.runtime_config.clone();
+    // Clone the sender so we can also hand it to `open_session` if a
+    // resume path is taken below. The original `tx` goes to the
+    // `create_agent_session` so the channel lives even if no resume
+    // happens.
+    let resume_tx = tx.clone();
     let (_runtime, mut session) = create_agent_session(cfg, Some(tx))?;
 
     if startup.cli.continue_recent
-        || startup.cli.resume
+        || startup.cli.resume.is_some()
         || startup.cli.session.is_some()
         || startup.cli.fork.is_some()
     {
@@ -28,17 +33,39 @@ pub(crate) fn build_session(
             Some(f.clone())
         } else if startup.cli.continue_recent {
             mgr.most_recent().map(|m| m.id)
-        } else if startup.cli.resume {
-            // crude: pick most recent. In interactive mode the picker
-            // overrides this.
-            mgr.most_recent().map(|m| m.id)
+        } else if let Some(r) = &startup.cli.resume {
+            // `-r` / `--resume` accepts an optional id. Empty string =
+            // user typed bare `-r`, so fall back to most-recent. Any
+            // non-empty value names the session id (or path) directly
+            // and gets passed verbatim to `open_session`, which
+            // accepts both forms.
+            if r.trim().is_empty() {
+                mgr.most_recent().map(|m| m.id)
+            } else {
+                Some(r.clone())
+            }
         } else {
             None
         };
         if let Some(id) = target {
             let runtime = pi_agent_core::AgentSessionRuntime::new(startup.runtime_config.clone());
-            if let Ok(opened) = runtime.open_session(&id, Some(_sender_clone(&session))) {
-                session = opened;
+            // Hand the LIVE sender (cloned above) to the resumed
+            // session so its events flow back into the same `rx` the
+            // caller will consume. The previous code used a fresh
+            // dead channel here, so events from the resumed session
+            // went nowhere — that's why `pi -r <id> -p` exited
+            // silently with no output.
+            match runtime.open_session(&id, Some(resume_tx.clone())) {
+                Ok(opened) => session = opened,
+                Err(e) => {
+                    // Surface the failure instead of silently continuing
+                    // with a fresh session — that swallowed-error path is
+                    // why "pi -r <bad id>" used to succeed-with-no-output
+                    // and look identical to "no resume happened".
+                    return Err(anyhow::anyhow!(
+                        "failed to resume session '{id}': {e}"
+                    ));
+                }
             }
         }
     }

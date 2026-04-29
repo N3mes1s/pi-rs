@@ -168,6 +168,13 @@ pub fn parse_chord(s: &str) -> Option<Chord> {
         "enter" | "return" => ChordCode::Enter,
         "escape" | "esc" => ChordCode::Escape,
         "backspace" | "bs" => ChordCode::Backspace,
+        // "Shift+Tab" arrives here with modifiers already having MOD_SHIFT set
+        // and the last part being "tab". Normalise to BackTab (no shift bit)
+        // so it matches what crossterm delivers as KeyCode::BackTab.
+        "tab" if (modifiers & MOD_SHIFT) != 0 => {
+            modifiers &= !MOD_SHIFT;
+            ChordCode::BackTab
+        }
         "tab" => ChordCode::Tab,
         "backtab" | "shift+tab" => ChordCode::BackTab,
         "up" => ChordCode::Up,
@@ -212,7 +219,12 @@ pub fn chord_from_event(ev: &KeyEvent) -> Chord {
         KeyCode::Esc => ChordCode::Escape,
         KeyCode::Backspace => ChordCode::Backspace,
         KeyCode::Tab => ChordCode::Tab,
-        KeyCode::BackTab => ChordCode::BackTab,
+        // BackTab already encodes the shift; strip the SHIFT modifier bit so
+        // it matches bindings stored as (0, BackTab) via "Shift+Tab".
+        KeyCode::BackTab => {
+            modifiers &= !MOD_SHIFT;
+            ChordCode::BackTab
+        }
         KeyCode::Up => ChordCode::Up,
         KeyCode::Down => ChordCode::Down,
         KeyCode::Left => ChordCode::Left,
