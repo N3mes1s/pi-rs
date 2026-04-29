@@ -1,0 +1,17 @@
+[package]
+name = "pi-orchestrate"
+version.workspace = true
+edition.workspace = true
+description = "Campaign schema parser, validator, and plan formatter for pi --orchestrate (RFD 0021)"
+
+[lib]
+name = "pi_orchestrate"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]

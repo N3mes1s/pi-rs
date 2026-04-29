@@ -229,6 +229,11 @@ pub struct Cli {
     /// Explicit task id for `--worktree`. Defaults to a random UUID.
     #[arg(long = "worktree-id", value_name = "ID")]
     pub worktree_id: Option<String>,
+
+    /// Parse + validate a campaign TOML and print the execution plan.
+    /// Zero side effects. Exit 0 on success, exit 2 on validation errors.
+    #[arg(long = "orchestrate-dry-run", value_name = "PATH")]
+    pub orchestrate_dry_run: Option<PathBuf>,
 }
 
 impl Cli {

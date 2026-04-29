@@ -108,6 +108,32 @@ fn main() -> anyhow::Result<()> {
     if let Some(spec) = &cli.policy {
         return cmd::run_policy(spec);
     }
+    if let Some(path) = &cli.orchestrate_dry_run {
+        let text = std::fs::read_to_string(path)?;
+        let campaign = match pi_orchestrate::parse_campaign(&text) {
+            Ok(campaign) => campaign,
+            Err(err) => {
+                eprintln!("error: failed to parse campaign TOML at {}", path.display());
+                eprintln!("  {err}");
+                std::process::exit(2);
+            }
+        };
+
+        if let Err(errors) = pi_orchestrate::validate(&campaign) {
+            eprintln!(
+                "error: campaign validation failed for {} ({} error(s))",
+                path.display(),
+                errors.len()
+            );
+            for error in errors {
+                eprintln!("  - {error}");
+            }
+            std::process::exit(2);
+        }
+
+        print!("{}", pi_orchestrate::format_plan(&campaign));
+        return Ok(());
+    }
     if let Some(verb) = cli.stats.clone() {
         let parsed = pi_stats::cli::StatsVerb::parse(&verb)?;
         let cfg = pi_stats::cli::StatsConfig {
