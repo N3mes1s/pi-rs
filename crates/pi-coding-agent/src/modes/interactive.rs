@@ -712,7 +712,7 @@ fn _chord_code_typecheck(c: ChordCode) -> ChordCode {
 
 // ─── render ────────────────────────────────────────────────────────────────
 
-fn build_frame(
+pub(crate) fn build_frame(
     view: &View,
     theme: &Theme,
     cols: u16,
@@ -721,6 +721,7 @@ fn build_frame(
     cwd: &std::path::Path,
 ) -> Frame {
     let mut frame = view.transcript.render(theme, cols);
+    let slash_registry = SlashRegistry::new();
 
     // Autoresearch dashboard widget (Ctrl+Shift+T toggles).
     let dashboard_lines: Vec<Line> = match (view.dashboard_mode, view.dashboard_snapshot.as_ref()) {
@@ -846,6 +847,38 @@ fn build_frame(
                     theme.accent.to_crossterm(),
                 )],
             });
+        }
+
+        // Slash-command autocomplete dropdown: if the current editor text starts
+        // with `/`, show matching commands below the editor. Match by prefix.
+        if !view.editor.text.is_empty() && view.editor.text.starts_with('/') {
+            let query = view.editor.text.trim_start_matches('/');
+            if !query.is_empty() {
+                let matches: Vec<_> = slash_registry
+                    .iter()
+                    .filter(|cmd| cmd.name.starts_with(query))
+                    .take(5)
+                    .collect();
+                if !matches.is_empty() {
+                    frame.lines.push(Line::default());
+                    for (i, cmd) in matches.iter().enumerate() {
+                        let prefix = if i == 0 { "▸ " } else { "  " };
+                        let name_color = if i == 0 {
+                            theme.accent.to_crossterm()
+                        } else {
+                            theme.muted.to_crossterm()
+                        };
+                        frame.lines.push(Line {
+                            spans: vec![
+                                Span::coloured(prefix.to_string(), name_color),
+                                Span::coloured(format!("/{}", cmd.name), name_color),
+                                Span::coloured("  ".to_string(), theme.muted.to_crossterm()),
+                                Span::coloured(cmd.description.clone(), theme.muted.to_crossterm()),
+                            ],
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -3466,5 +3499,113 @@ mod tests {
         });
         refresh_autoresearch_dashboard(&mut v, dir.path());
         assert!(v.dashboard_snapshot.is_none());
+    }
+
+    // ── slash-command autocomplete dropdown ─────────────────────────────────
+
+    #[test]
+    fn build_frame_slash_autocomplete_shows_matching_commands() {
+        let mut v = fresh_view();
+        v.editor.text = "/he".to_string();
+        v.editor.cursor = 3;
+
+        let theme = theme_for_test();
+        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"));
+
+        let dump: String = frame
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("|");
+
+        // Should contain /help (matches "/he")
+        assert!(dump.contains("/help"), "should show /help suggestion: {}", dump);
+    }
+
+    #[test]
+    fn build_frame_slash_autocomplete_empty_when_no_matches() {
+        let mut v = fresh_view();
+        v.editor.text = "/xyznotacommand".to_string();
+        v.editor.cursor = 15;
+
+        let theme = theme_for_test();
+        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"));
+
+        let dump: String = frame
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("|");
+
+        // Should NOT show suggestions since no command starts with "xyznotacommand"
+        assert!(
+            !dump.contains("▸ /"),
+            "should not show dropdown for non-matching prefix"
+        );
+    }
+
+    #[test]
+    fn build_frame_slash_autocomplete_highlights_first_match() {
+        let mut v = fresh_view();
+        v.editor.text = "/m".to_string();
+        v.editor.cursor = 2;
+
+        let theme = theme_for_test();
+        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"));
+
+        let dump: String = frame
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("|");
+
+        // Should show /model with first one marked with ▸
+        assert!(dump.contains("▸ "), "first match should be highlighted with ▸");
+    }
+
+    #[test]
+    fn build_frame_slash_autocomplete_hides_when_editor_empty() {
+        let mut v = fresh_view();
+        v.editor.text.clear();
+        v.editor.cursor = 0;
+
+        let theme = theme_for_test();
+        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"));
+
+        let dump: String = frame
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("|");
+
+        // Empty editor should not show suggestions
+        assert!(!dump.contains("▸ /"), "empty editor should not trigger dropdown");
+    }
+
+    #[test]
+    fn build_frame_slash_autocomplete_limits_to_five() {
+        let mut v = fresh_view();
+        v.editor.text = "/".to_string();
+        v.editor.cursor = 1;
+
+        let theme = theme_for_test();
+        let frame = build_frame(&v, &theme, 80, 24, "claude-3.5-sonnet", std::path::Path::new("/tmp"));
+
+        // Count suggestion lines (those with "/" in them after editor lines)
+        let suggestion_lines: Vec<_> = frame
+            .lines
+            .iter()
+            .filter(|line| {
+                let joined = line.spans.iter().map(|s| s.text.as_str()).collect::<String>();
+                joined.contains("/") && joined.contains("▸ ") || joined.contains("  /")
+            })
+            .collect();
+
+        // Should have at most 5 suggestions
+        assert!(suggestion_lines.len() <= 5, "should limit to 5 suggestions");
     }
 }

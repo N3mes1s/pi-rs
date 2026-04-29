@@ -137,6 +137,10 @@ impl SlashRegistry {
     pub fn names(&self) -> Vec<String> {
         self.inner.keys().cloned().collect()
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = &SlashCommand> {
+        self.inner.values()
+    }
 }
 
 /// Try to interpret `input` as a slash command.
