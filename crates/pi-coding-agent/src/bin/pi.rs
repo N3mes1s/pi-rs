@@ -168,7 +168,17 @@ fn main() -> anyhow::Result<()> {
         println!("Campaign : {}", summary.campaign);
         println!("State    : {}", summary.state_path.display());
         for outcome in &summary.outcomes {
-            println!("  - {} → {}", outcome.id, outcome.final_state);
+            println!(
+                "  - {} → {} (fix-loop iters: {})",
+                outcome.id, outcome.final_state, outcome.fix_loop_iterations
+            );
+        }
+        // RFD §"Exit codes":
+        //   0 — every non-FAILED milestone reached MERGED
+        //   2 — at least one FAILED
+        //   3 — at least one BLOCKED_ON_CONFLICT or BLOCKED_ON_REVIEW_STALE
+        if summary.exit_code != 0 {
+            std::process::exit(summary.exit_code);
         }
         return Ok(());
     }
