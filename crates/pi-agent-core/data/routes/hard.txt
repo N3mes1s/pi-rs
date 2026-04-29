@@ -1,0 +1,127 @@
+# Hard route examples — proofs, soundness, concurrency correctness, race
+# conditions, async ordering hazards, isolation boundaries, trait design
+# for multiple backends, audits of unsafe code, security review, deep
+# cross-crate invariant analysis, "find a counterexample".
+# One example per line; comment lines (# ...) ignored.
+#
+# Authoring technique: 10 canonical seeds × 10 paraphrase surface forms each.
+
+# Seed 1: termination proof / formal argument
+prove that this loop terminates
+give a formal argument that this recursion terminates under all inputs
+prove the algorithm converges in finite steps for any valid input
+demonstrate that the while loop reaches the fixed point
+show formally why the recursive descent cannot cycle indefinitely
+construct a termination argument for this depth-first traversal
+prove the iteration count is bounded by the height of the tree
+formalize why the bounded queue ensures progress in this scheduler
+give a mathematical argument that the retry loop cannot spin forever
+prove the inductive step that guarantees termination of this fixpoint
+
+# Seed 2: counterexample / invariant violation search
+find a counterexample to this invariant
+show whether the stated invariant can be violated
+construct an input that breaks the claimed property
+find a concrete execution trace that violates the postcondition
+demonstrate a counterexample to the type-level guarantee
+find an interleaving that violates the linearizability claim
+construct a memory layout that breaks the aliasing assumption
+show a race schedule that violates the lock-free stack's ordering guarantee
+find a sequence of operations that breaks the claimed FIFO order
+produce a counterexample to the stated monotonicity invariant
+
+# Seed 3: borrow checker soundness and unsafe code review
+is the borrow checker sound for this pattern
+reason about the aliasing safety in this unsafe block
+audit this unsafe impl for potential undefined behaviour
+review the raw pointer arithmetic for out-of-bounds access
+verify that the lifetime annotations correctly capture the borrowing rules
+explain why the compiler rejects this lifetime constraint and whether it is correct
+audit the use of transmute for type correctness and alignment
+review the unsafe Send impl and determine whether it is sound
+analyse the slice::from_raw_parts call for length and alignment invariants
+check whether the drop order is safe given these overlapping lifetimes
+
+# Seed 4: concurrency correctness and race conditions
+analyse the data race potential in this concurrent map access
+reason about the happens-before relationships in this channel protocol
+audit the lock acquisition order for potential deadlock
+find whether the atomic compare-and-swap loop is ABA-safe
+verify that the memory ordering annotations on this atomic are sufficient
+reason about whether the non-blocking queue has a linearization point
+find a schedule that produces a data race on the shared state
+analyse the spinlock for livelock under realistic contention
+verify the fence placement correctly establishes the required ordering
+audit the lock-free ring buffer for potential memory ordering violations
+
+# Seed 5: async ordering hazards and executor interactions
+reason about async ordering hazards in this select! block
+analyse the poll order in this custom Future for correctness
+verify that the cancellation safety claim holds for this async function
+audit the select! branches for missing wakeup scenarios
+reason about whether spawning on the current thread can cause deadlock
+find a task interleaving that causes the async queue to lose a message
+verify the pin projection is correct for this async struct
+audit the async drop ordering when the executor is shut down
+reason about the interaction between this waker and the reactor
+find whether this async mutex can starve waiting tasks
+
+# Seed 6: trait design for multiple backends without abstraction leak
+design a sandbox trait that supports container and vm backends
+design a storage trait that works for both in-memory and on-disk backends
+reason about the correct abstraction level for this provider trait
+audit the trait surface for backend-specific leakage
+propose a trait design that allows swapping the network transport without exposing internals
+design an async trait that composes across HTTP and gRPC backends
+review the generic bounds for over-constraining the caller
+reason about associated types versus generic parameters for this pluggable backend
+design a unified trait that hides the difference between sync and async backends
+audit the trait for object safety and explain any violations
+
+# Seed 7: security review and access control audit
+audit the token validation logic for timing attacks
+review the input sanitization for injection vulnerabilities
+reason about the TOCTOU race in this file permission check
+audit the cryptographic primitive usage for misuse
+find whether the session token can be forged with this MAC scheme
+review the capability model for privilege escalation paths
+audit the deserialization logic for untrusted input handling
+reason about the confidentiality of this side channel
+find potential path traversal in this file serving logic
+audit the rate-limiting logic for bypass via header manipulation
+
+# Seed 8: isolation boundary analysis
+reason about isolation boundaries in this sandbox design
+verify that data cannot escape from the sandboxed execution context
+audit the cross-crate invariants for unintended exposure
+reason about the memory isolation between these two processes
+find whether the shared-memory region breaks the isolation guarantee
+audit the FFI boundary for undefined behaviour at the edge
+verify the capability leakage surface for this plugin system
+reason about the trust boundary between the router and the executor
+audit the RPC interface for privilege confusion
+find whether the IPC channel can be used to break out of the container
+
+# Seed 9: cross-crate invariant analysis
+analyse cross-crate invariants that must hold for this to be safe
+reason about the semantic coupling between these two crates
+verify that the public API of this crate preserves the stated invariant
+find whether an update to the dependency crate can silently break this caller
+audit the re-export surface for invariant leakage
+reason about whether the orphan rule prevents the intended trait impl
+find the minimal set of module-level invariants that must be documented
+verify that the generic bound propagation is correct across crate boundaries
+audit the unsafe code in this crate against the safety comments in the other
+reason about whether a semver bump in this crate breaks the downstream invariant
+
+# Seed 10: deep read and audit of complex ownership / memory patterns
+audit the memory layout of this packed struct for aliasing issues
+verify the pin projection is correct and doesn't expose interior mutability unsafely
+reason about the drop order when the arena is freed
+find whether the custom allocator respects the alignment requirements
+audit the intrusive linked list for pointer validity at each operation
+reason about the validity of the self-referential struct after a move
+find whether the custom smart pointer correctly handles the cycle case
+verify the epoch-based reclamation is correct under concurrent access
+audit the slab allocator for double-free potential
+reason about the correctness of the union field access pattern

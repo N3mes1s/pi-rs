@@ -1,0 +1,126 @@
+# Default route examples — routine multi-file refactors, feature work, test
+# writing, debugging from stack traces, RFD writing, dependency bumps,
+# migration scripts. Everything "real coding work" but not soundness-level.
+# One example per line; comment lines (# ...) ignored.
+#
+# Authoring technique: 10 canonical seeds × 10 paraphrase surface forms each.
+
+# Seed 1: multi-file refactor or code reorganisation
+extract this trait into its own crate
+move the helper functions from util.rs into a dedicated helpers module
+split this large file into several smaller focused modules
+reorganize the crate layout so each domain concept has its own file
+extract the database layer into a separate sub-crate
+pull the authentication logic out into its own module
+refactor this monolithic function into smaller composable pieces
+break the god object into focused structs with clear responsibilities
+restructure the project so tests live next to their source files
+move the error types into a dedicated errors module and re-export them
+
+# Seed 2: feature implementation
+implement the new cache invalidation strategy described in the PR
+add support for the optional timeout parameter to this async call
+wire up the new config flag so it propagates to the provider factory
+implement pagination for the search results endpoint
+add a retries field to the client config and thread it through
+implement the missing display trait for the error type
+add rate-limit backoff to the HTTP client wrapper
+wire up the new telemetry events to the existing stats aggregator
+implement the diff-apply function based on the spec in the comment
+add support for streaming responses to the existing blocking client
+
+# Seed 3: test writing and fixing flaky tests
+run the test suite and fix what fails
+write integration tests for the new caching behaviour
+add unit tests for each branch of the routing logic
+debug why this integration test flakes intermittently
+write property-based tests for the serialization roundtrip
+add a regression test that pins the behaviour described in the bug report
+investigate why cargo test fails on the CI runner but not locally
+add snapshot tests for the rendered output of the markdown formatter
+expand the test coverage for the error handling paths
+fix the test that fails with a non-deterministic ordering assertion
+
+# Seed 4: debugging from a stack trace or error log
+debug why this integration test flakes
+trace through this stack trace and explain the root cause
+investigate why the tokio runtime panics on the second invocation
+figure out why the database migration fails with this error message
+track down the source of the intermittent timeout in the HTTP handler
+explain why the borrow checker rejects this pattern
+diagnose why the binary segfaults when the config file is missing
+trace the data flow from the user request to the error response
+find why the cache returns stale data after a write
+analyse the error log and propose a fix for the recurring panic
+
+# Seed 5: RFD writing or design documentation
+audit OpenAI's Responses API and write an RFD
+write a design document for the new router subsystem
+draft a lightweight RFD proposing the external config override scheme
+document the trade-offs between the two caching strategies
+write the implementation plan for this multi-crate feature
+document the migration path from the old API to the new one
+write a brief design note for how the session JSONL format should evolve
+produce an architecture overview of the stats pipeline
+draft the open questions section for this proposal
+write an internal design memo capturing the decided trade-offs
+
+# Seed 6: dependency bump and migration
+bump all out-of-date dependencies in Cargo.toml
+update the tokio version to the latest stable release
+migrate from the deprecated reqwest API to the current one
+update the clap version and fix the changed argument builder API
+bump serde to 1.0.200 and resolve the breaking changes
+update the rusqlite bundled feature and test the migration
+migrate the codebase off the old trait that is now removed
+update the MSRV in Cargo.toml and fix the resulting build failures
+bump the openssl dependency and resolve any compilation issues
+switch from the deprecated dotenv crate to the maintained fork
+
+# Seed 7: investigate flaky CI and propose a fix
+investigate failing CI and propose a fix
+figure out why the GitHub Actions workflow fails on the musl runner
+look into the intermittent timeout in the benchmark CI job
+trace the CI failure back to its root cause and suggest a fix
+investigate why cargo build --release fails on the aarch64 target
+diagnose the race condition that makes the parallel test suite flaky
+propose a fix for the CI pipeline that consistently fails on Windows
+find why the release job fails while the debug build succeeds
+investigate the compiler warning that was promoted to an error in CI
+trace the linker error on the static musl target back to its source
+
+# Seed 8: code review and improvement suggestions
+review this design and suggest improvements
+give constructive feedback on this pull request
+suggest better error handling for this function
+review the API surface and point out any sharp edges
+identify the main performance bottleneck in this implementation
+suggest a cleaner way to express this state machine
+point out any missing edge cases in the implementation
+review the public API for ergonomic issues
+identify the parts of this module that need better encapsulation
+suggest ways to reduce the complexity of this function
+
+# Seed 9: write or update documentation
+rewrite the outdated README section on configuration
+update the doc examples so they compile against the new API
+add missing doc comments to all public items in this module
+rewrite the migration guide to reflect the new crate layout
+update the changelog with a summary of the breaking changes
+expand the docs for the settings struct to explain each field
+add a usage example to the module-level documentation
+write the getting-started tutorial section for the new feature
+update the API reference to remove references to the deleted method
+rewrite the confusing doc comment for this trait method
+
+# Seed 10: migration script or data transformation
+write a migration script to convert the old config format to the new one
+produce a one-off script to backfill the missing timestamps in the DB
+write a small tool to convert the legacy TOML config to the new JSON format
+implement the database migration that adds the new column
+write a script to de-duplicate the entries in the stats table
+produce a migration that backfills the route_id column for historical rows
+write a one-off data fixer to re-derive cost from stored token counts
+implement the schema migration to split the big table into two
+produce a conversion script for the renamed session JSONL fields
+write a backfill job that fills in missing provider fields

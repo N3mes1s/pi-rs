@@ -1,5 +1,9 @@
-use crossterm::style::{Color, ResetColor, SetForegroundColor};
-use crossterm::{cursor, queue, terminal};
+use crossterm::style::Color;
+use ratatui::backend::CrosstermBackend;
+use ratatui::style::Style;
+use ratatui::text::{Line as RtLine, Span as RtSpan, Text};
+use ratatui::widgets::Paragraph;
+use ratatui::Terminal;
 use std::io::Write;
 
 #[derive(Debug, Clone)]
@@ -47,146 +51,105 @@ pub struct Frame {
     pub cursor_at: Option<(u16, u16)>,
 }
 
-/// Differential renderer — keeps the previous frame, only redraws lines that
-/// differ. Wraps each render in synchronized output where supported.
+/// Differential renderer implemented on top of ratatui's terminal backend.
+///
+/// Public API intentionally stays stable so `pi-coding-agent` can keep using
+/// `Frame`, `Line`, and `Span` unchanged while the renderer internals migrate
+/// to ratatui.
 pub struct DiffRenderer<W: Write> {
-    out: W,
-    last: Vec<String>,
-    width: u16,
+    terminal: Terminal<CrosstermBackend<W>>,
     sync: bool,
 }
 
 impl<W: Write> DiffRenderer<W> {
     pub fn new(out: W) -> Self {
-        let (cols, _) = terminal::size().unwrap_or((80, 24));
+        let backend = CrosstermBackend::new(out);
+        let mut terminal = Terminal::new(backend).expect("failed to create ratatui terminal backend");
+        terminal.clear().expect("failed to clear ratatui terminal");
         Self {
-            out,
-            last: Vec::new(),
-            width: cols,
+            terminal,
             sync: std::env::var("PI_NO_SYNC").is_err(),
         }
     }
 
-    pub fn resize(&mut self, cols: u16) {
-        if cols != self.width {
-            // Width change invalidates word-wrapping for every line; the
-            // diff renderer would otherwise compare new wrapped text against
-            // old differently-wrapped text and produce visible drift. Force
-            // a full repaint by dropping the previous-frame cache. The next
-            // `render()` call will redraw every line unconditionally.
-            self.last.clear();
-            // Best-effort screen scrub so we don't leave stale glyphs from
-            // the old layout. Failure here just means the next render still
-            // repaints from scratch; not fatal.
-            let _ = queue!(self.out, terminal::Clear(terminal::ClearType::FromCursorDown));
-            let _ = self.out.flush();
-        }
-        self.width = cols;
+    pub fn resize(&mut self, _cols: u16) {
+        // Ratatui tracks terminal size internally. Clear to force a full repaint
+        // after width changes invalidate any upstream wrapping decisions.
+        let _ = self.terminal.clear();
     }
 
     pub fn render(&mut self, frame: &Frame) -> std::io::Result<()> {
-        let raw: Vec<String> = frame
-            .lines
-            .iter()
-            .map(|l| {
-                let mut s = String::new();
-                for span in &l.spans {
-                    s.push_str(&span.text);
-                }
-                s
-            })
-            .collect();
-
         if self.sync {
-            // DEC 2026 begin synchronized update
-            self.out.write_all(b"\x1b[?2026h")?;
+            self.terminal.backend_mut().write_all(b"\x1b[?2026h")?;
         }
 
-        // Absolute anchoring. The whole alt-screen is ours: paint
-        // every frame starting at (col=0, row=0). This is what
-        // ratatui / blessed.js / Ink all do; relative MoveUp/MoveDown
-        // off the previous render's cursor position is too fragile
-        // because:
-        //   * a hardware-cursor target on a mid-frame line leaves the
-        //     OS cursor away from the frame's bottom;
-        //   * `\n` written at the last terminal row triggers scroll
-        //     instead of moving the cursor down, but the cursor
-        //     position itself stays put — so MoveUp(N) afterwards
-        //     undershoots by 1.
-        //
-        // With absolute MoveTo(0,0) the position is unambiguous and
-        // every frame paints over the previous one in place.
-        // Diff-rendering still applies per-line (we only emit Clear+
-        // text for changed lines) so the wire cost is unchanged for
-        // the common "edit one row" case.
-        queue!(self.out, cursor::MoveTo(0, 0))?;
+        self.terminal.draw(|f| {
+            let area = f.area();
+            let rendered_lines = frame
+                .lines
+                .iter()
+                .take(area.height as usize)
+                .map(|line| {
+                    let spans = line
+                        .spans
+                        .iter()
+                        .map(|span| {
+                            let style = match span.color {
+                                Some(color) => Style::default().fg(to_ratatui_color(color)),
+                                None => Style::default(),
+                            };
+                            RtSpan::styled(span.text.clone(), style)
+                        })
+                        .collect::<Vec<_>>();
+                    RtLine::from(spans)
+                })
+                .collect::<Vec<_>>();
 
-        for (i, line) in frame.lines.iter().enumerate() {
-            let raw_line = raw.get(i).cloned().unwrap_or_default();
-            let same = self.last.get(i).map(|s| s == &raw_line).unwrap_or(false);
-            if !same {
-                queue!(
-                    self.out,
-                    terminal::Clear(terminal::ClearType::CurrentLine),
-                    cursor::MoveToColumn(0)
-                )?;
-                for span in &line.spans {
-                    if let Some(c) = span.color {
-                        queue!(self.out, SetForegroundColor(c))?;
-                    }
-                    self.out.write_all(span.text.as_bytes())?;
-                    if span.color.is_some() {
-                        queue!(self.out, ResetColor)?;
-                    }
-                }
-            }
-            // Move to start of next row instead of writing a literal
-            // `\n`: at the bottom-most row a `\n` would scroll the
-            // alt-screen. Absolute MoveTo never scrolls.
-            if i + 1 < frame.lines.len() {
-                queue!(self.out, cursor::MoveTo(0, (i + 1) as u16))?;
-            }
-        }
+            let text = Text::from(rendered_lines);
+            let paragraph = Paragraph::new(text);
+            f.render_widget(paragraph, area);
 
-        // Clear leftover lines from previous frame: rows
-        // `frame.lines.len() .. last.len()` need to be blanked out
-        // because they may contain text from a taller previous frame
-        // (e.g. picker overlay closed, transcript shrunk).
-        let new_len = frame.lines.len();
-        let old_len = self.last.len();
-        if old_len > new_len {
-            for row in new_len..old_len {
-                queue!(
-                    self.out,
-                    cursor::MoveTo(0, row as u16),
-                    terminal::Clear(terminal::ClearType::CurrentLine)
-                )?;
+            if let Some((target_line, target_col)) = frame.cursor_at {
+                let line = target_line.min(area.height.saturating_sub(1));
+                let col = target_col.min(area.width.saturating_sub(1));
+                f.set_cursor_position((col, line));
             }
-        }
+        })?;
 
-        // Hardware cursor placement (RFD-style): if the frame named a
-        // target, hop to it from the post-render position (last line of
-        // the frame, end of its text) and reveal the cursor; otherwise
-        // keep it hidden so picker overlays don't blink in random spots.
-        if let Some((target_line, target_col)) = frame.cursor_at {
-            let cur_line = frame.lines.len().saturating_sub(1) as u16;
-            let target_line = target_line.min(cur_line);
-            // Absolute placement — works regardless of where the
-            // line-rendering loop left the cursor.
-            queue!(
-                self.out,
-                cursor::MoveTo(target_col, target_line),
-                cursor::Show
-            )?;
+        if frame.cursor_at.is_some() {
+            self.terminal.show_cursor()?;
         } else {
-            queue!(self.out, cursor::Hide)?;
+            self.terminal.hide_cursor()?;
         }
 
         if self.sync {
-            self.out.write_all(b"\x1b[?2026l")?;
+            self.terminal.backend_mut().write_all(b"\x1b[?2026l")?;
         }
-        self.out.flush()?;
-        self.last = raw;
+        self.terminal.backend_mut().flush()?;
         Ok(())
+    }
+}
+
+fn to_ratatui_color(c: Color) -> ratatui::style::Color {
+    match c {
+        Color::Reset => ratatui::style::Color::Reset,
+        Color::Black => ratatui::style::Color::Black,
+        Color::DarkGrey => ratatui::style::Color::DarkGray,
+        Color::Red => ratatui::style::Color::Red,
+        Color::DarkRed => ratatui::style::Color::Red,  // Map dark variants to their light equivalents
+        Color::Green => ratatui::style::Color::Green,
+        Color::DarkGreen => ratatui::style::Color::Green,
+        Color::Yellow => ratatui::style::Color::Yellow,
+        Color::DarkYellow => ratatui::style::Color::Yellow,
+        Color::Blue => ratatui::style::Color::Blue,
+        Color::DarkBlue => ratatui::style::Color::Blue,
+        Color::Magenta => ratatui::style::Color::Magenta,
+        Color::DarkMagenta => ratatui::style::Color::Magenta,
+        Color::Cyan => ratatui::style::Color::Cyan,
+        Color::DarkCyan => ratatui::style::Color::Cyan,
+        Color::White => ratatui::style::Color::White,
+        Color::Grey => ratatui::style::Color::Gray,
+        Color::Rgb { r, g, b } => ratatui::style::Color::Rgb(r, g, b),
+        Color::AnsiValue(v) => ratatui::style::Color::Indexed(v),
     }
 }

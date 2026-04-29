@@ -61,6 +61,10 @@ unicode-segmentation = "1"
 serde_yaml = "0.9"
 tiktoken-rs = "0.5"
 toml = "0.8"
+textwrap = "0.16"
+pulldown-cmark = "0.9"
+syntect = { version = "5", features = ["parsing"] }
+ratatui = { version = "0.28", features = ["crossterm"] }
 
 pi-ai = { path = "crates/pi-ai" }
 pi-tools = { path = "crates/pi-tools" }

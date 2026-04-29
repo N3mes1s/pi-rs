@@ -47,6 +47,9 @@ pi-stats.workspace = true
 pi-orchestrate.workspace = true
 uuid.workspace = true
 serde_yaml.workspace = true
+textwrap.workspace = true
+pulldown-cmark.workspace = true
+syntect.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true

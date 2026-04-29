@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Terminal UI primitives with differential rendering for pi-rs"
 
 [dependencies]
+ratatui.workspace = true
 crossterm.workspace = true
 unicode-width.workspace = true
 serde.workspace = true
