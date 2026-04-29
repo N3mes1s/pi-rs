@@ -30,6 +30,7 @@ pub mod evolve;
 pub mod extensions;
 pub mod footer;
 pub mod keymap;
+pub mod markdown;
 pub mod modes;
 pub mod native;
 pub mod packages;

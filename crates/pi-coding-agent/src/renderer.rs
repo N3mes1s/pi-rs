@@ -158,13 +158,34 @@ impl Transcript {
                     t,
                     viewport_cols,
                 ),
-                Block::AssistantText(t) => render_block(
-                    &mut lines,
-                    "pi",
-                    theme.assistant.to_crossterm(),
-                    t,
-                    viewport_cols,
-                ),
+                Block::AssistantText(t) => {
+                    // Use markdown rendering for assistant text
+                    let md_lines = crate::markdown::parse_and_render_markdown(
+                        t,
+                        theme.accent.to_crossterm(),
+                        theme.muted.to_crossterm(),
+                        viewport_cols,
+                    );
+                    let mut first = true;
+                    for line in md_lines {
+                        if first {
+                            // Prefix first line with "pi>"
+                            let mut prefixed_spans = vec![
+                                Span::coloured(format!("pi> "), theme.assistant.to_crossterm()),
+                            ];
+                            prefixed_spans.extend(line.spans);
+                            lines.push(Line { spans: prefixed_spans });
+                            first = false;
+                        } else {
+                            // Continuation lines with padding
+                            let mut padded_spans = vec![
+                                Span::coloured("    ".to_string(), theme.assistant.to_crossterm()),
+                            ];
+                            padded_spans.extend(line.spans);
+                            lines.push(Line { spans: padded_spans });
+                        }
+                    }
+                }
                 Block::Thinking(t) => {
                     if !self.thinking_collapsed {
                         render_block(
@@ -504,6 +525,10 @@ fn render_block(lines: &mut Vec<Line>, label: &str, color: Color, body: &str, co
             first = false;
         }
     }
+}
+
+pub fn wrap_line_pub(s: &str, width: usize) -> Vec<String> {
+    wrap_line(s, width)
 }
 
 fn wrap_line(s: &str, width: usize) -> Vec<String> {
