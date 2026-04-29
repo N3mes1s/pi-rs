@@ -113,7 +113,9 @@ async fn anthropic_stream_captures_thinking_signature_onto_content_block() {
         system: None,
         messages: vec![Message {
             role: Role::User,
-            content: vec![ContentBlock::Text { text: "think hard".into() }],
+            content: vec![ContentBlock::Text {
+                text: "think hard".into(),
+            }],
         }],
         tools: vec![],
         thinking: ThinkingLevel::Medium,
@@ -152,7 +154,9 @@ fn content_blocks_to_anthropic_skips_thinking_with_null_signature() {
             text: "unsigned reasoning".into(),
             signature: None,
         },
-        ContentBlock::Text { text: "hello".into() },
+        ContentBlock::Text {
+            text: "hello".into(),
+        },
     ];
     let v = pi_ai::provider::anthropic::content_blocks_to_anthropic(&blocks);
     let arr = v.as_array().expect("array");
@@ -160,7 +164,11 @@ fn content_blocks_to_anthropic_skips_thinking_with_null_signature() {
         .iter()
         .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
         .collect();
-    assert_eq!(types, vec!["text"], "thinking-without-signature must be dropped");
+    assert_eq!(
+        types,
+        vec!["text"],
+        "thinking-without-signature must be dropped"
+    );
     assert_eq!(arr[0].get("text").and_then(|v| v.as_str()), Some("hello"));
 }
 
@@ -173,7 +181,16 @@ fn content_blocks_to_anthropic_keeps_thinking_with_real_signature() {
     let v = pi_ai::provider::anthropic::content_blocks_to_anthropic(&blocks);
     let arr = v.as_array().expect("array");
     assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0].get("type").and_then(|v| v.as_str()), Some("thinking"));
-    assert_eq!(arr[0].get("thinking").and_then(|v| v.as_str()), Some("signed reasoning"));
-    assert_eq!(arr[0].get("signature").and_then(|v| v.as_str()), Some("SIG_X"));
+    assert_eq!(
+        arr[0].get("type").and_then(|v| v.as_str()),
+        Some("thinking")
+    );
+    assert_eq!(
+        arr[0].get("thinking").and_then(|v| v.as_str()),
+        Some("signed reasoning")
+    );
+    assert_eq!(
+        arr[0].get("signature").and_then(|v| v.as_str()),
+        Some("SIG_X")
+    );
 }

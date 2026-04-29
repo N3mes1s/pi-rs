@@ -18,7 +18,10 @@ fn budget_tag_inside_freeform_prompt() {
 
 #[test]
 fn budget_tag_tolerates_inner_whitespace() {
-    assert_eq!(parse_tale_ep_budget("<budget>  4096  </budget>"), Some(4096));
+    assert_eq!(
+        parse_tale_ep_budget("<budget>  4096  </budget>"),
+        Some(4096)
+    );
 }
 
 #[test]

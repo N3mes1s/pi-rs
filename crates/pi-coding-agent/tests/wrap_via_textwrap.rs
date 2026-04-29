@@ -27,7 +27,9 @@ fn wrap_via_textwrap_respects_viewport_with_prefix() {
     // Test that a 200-word paragraph wrapped at width 80 with "pi> " prefix
     // on first line and 4 spaces on continuation lines never exceeds 80 cols.
     let mut transcript = Transcript::default();
-    transcript.blocks.push(Block::AssistantText(LONG_PARAGRAPH.to_string()));
+    transcript
+        .blocks
+        .push(Block::AssistantText(LONG_PARAGRAPH.to_string()));
 
     let theme = dark_theme();
     let viewport_width = 80u16;
@@ -59,14 +61,19 @@ fn wrap_via_textwrap_respects_viewport_with_prefix() {
         }
     }
 
-    assert!(found_assistant, "Should have found at least one assistant line");
+    assert!(
+        found_assistant,
+        "Should have found at least one assistant line"
+    );
 }
 
 #[test]
 fn wrap_via_textwrap_narrower_viewport() {
     // Same test but at width 40 to ensure aggressive wrapping works.
     let mut transcript = Transcript::default();
-    transcript.blocks.push(Block::AssistantText(LONG_PARAGRAPH.to_string()));
+    transcript
+        .blocks
+        .push(Block::AssistantText(LONG_PARAGRAPH.to_string()));
 
     let theme = dark_theme();
     let viewport_width = 40u16;
@@ -94,14 +101,19 @@ fn wrap_via_textwrap_narrower_viewport() {
         }
     }
 
-    assert!(found_assistant, "Should have found at least one assistant line");
+    assert!(
+        found_assistant,
+        "Should have found at least one assistant line"
+    );
 }
 
 #[test]
 fn wrap_via_textwrap_preserves_content() {
     // Ensure wrapping doesn't lose content.
     let mut transcript = Transcript::default();
-    transcript.blocks.push(Block::AssistantText(LONG_PARAGRAPH.to_string()));
+    transcript
+        .blocks
+        .push(Block::AssistantText(LONG_PARAGRAPH.to_string()));
 
     let theme = dark_theme();
     let frame = transcript.render(&theme, 80);

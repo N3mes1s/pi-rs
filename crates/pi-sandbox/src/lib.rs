@@ -6,8 +6,8 @@
 //! and return a result tuple (stdout, stderr, exit_status) that the agent
 //! converts back into a standard `ToolResult`.
 
-pub mod provider;
 pub mod local;
+pub mod provider;
 
-pub use provider::{SandboxProvider, SandboxExecution, SandboxError};
 pub use local::LocalProcessProvider;
+pub use provider::{SandboxError, SandboxExecution, SandboxProvider};

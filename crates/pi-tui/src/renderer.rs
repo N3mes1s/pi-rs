@@ -81,7 +81,8 @@ pub struct DiffRenderer<W: Write> {
 impl<W: Write> DiffRenderer<W> {
     pub fn new(out: W) -> Self {
         let backend = CrosstermBackend::new(out);
-        let mut terminal = Terminal::new(backend).expect("failed to create ratatui terminal backend");
+        let mut terminal =
+            Terminal::new(backend).expect("failed to create ratatui terminal backend");
         terminal.clear().expect("failed to clear ratatui terminal");
         Self {
             terminal,
@@ -159,7 +160,7 @@ fn to_ratatui_color(c: Color) -> ratatui::style::Color {
         Color::Black => ratatui::style::Color::Black,
         Color::DarkGrey => ratatui::style::Color::DarkGray,
         Color::Red => ratatui::style::Color::Red,
-        Color::DarkRed => ratatui::style::Color::Red,  // Map dark variants to their light equivalents
+        Color::DarkRed => ratatui::style::Color::Red, // Map dark variants to their light equivalents
         Color::Green => ratatui::style::Color::Green,
         Color::DarkGreen => ratatui::style::Color::Green,
         Color::Yellow => ratatui::style::Color::Yellow,

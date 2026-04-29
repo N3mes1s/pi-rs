@@ -1,8 +1,8 @@
+use pi_agent_core::router::RouteEntry;
 use pi_agent_core::{
     default_embedding_model_path, EmbeddingEngine, EmbeddingRouter, RouteMode, Router,
     RoutingContext, ToolSpec,
 };
-use pi_agent_core::router::RouteEntry;
 use pi_ai::{AuthStorage, Message, ModelRegistry, ThinkingLevel};
 use std::sync::Arc;
 
@@ -13,7 +13,8 @@ impl EmbeddingEngine for FakeEngine {
         let lower = text.to_ascii_lowercase();
         let v = if lower.contains("rename") || lower.contains("diff") {
             vec![1.0, 0.0, 0.0]
-        } else if lower.contains("prove") || lower.contains("invariant") || lower.contains("sound") {
+        } else if lower.contains("prove") || lower.contains("invariant") || lower.contains("sound")
+        {
             vec![0.0, 0.0, 1.0]
         } else {
             vec![0.0, 1.0, 0.0]
@@ -80,7 +81,12 @@ fn embedding_router_uses_actual_prompt_semantics() {
     }];
 
     let fast = router
-        .route("rename foo to bar in src/lib.rs", &[], &tools, &ctx(&registry))
+        .route(
+            "rename foo to bar in src/lib.rs",
+            &[],
+            &tools,
+            &ctx(&registry),
+        )
         .unwrap();
     assert_eq!(fast.route_id, "fast");
     assert_eq!(fast.model, "claude-haiku-4-5-20251001");
@@ -121,5 +127,8 @@ fn embedding_router_consults_history_and_tools() {
 #[test]
 fn downloaded_onnx_path_is_loadable() {
     let path = default_embedding_model_path();
-    assert!(path.exists(), "embedding model should be fetched before smoke tests");
+    assert!(
+        path.exists(),
+        "embedding model should be fetched before smoke tests"
+    );
 }

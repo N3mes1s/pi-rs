@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use pi_agent_core::{
-    create_agent_session, default_embedding_model_path, fetch_default_embeddings, validate_embedding_model,
-    ProviderFactory, RuntimeConfig, SessionManager, Settings,
+    create_agent_session, default_embedding_model_path, fetch_default_embeddings,
+    validate_embedding_model, ProviderFactory, RuntimeConfig, SessionManager, Settings,
 };
 use pi_ai::provider::EventStream;
 use pi_ai::{
@@ -19,13 +19,22 @@ struct CaptureProvider {
 
 #[async_trait]
 impl Provider for CaptureProvider {
-    fn config(&self) -> &ProviderConfig { &self.cfg }
-    fn auth(&self) -> &AuthMethod { static N: AuthMethod = AuthMethod::None; &N }
+    fn config(&self) -> &ProviderConfig {
+        &self.cfg
+    }
+    fn auth(&self) -> &AuthMethod {
+        static N: AuthMethod = AuthMethod::None;
+        &N
+    }
     async fn stream(&self, req: GenerateRequest, _model: &ModelInfo) -> AiResult<EventStream> {
         *self.seen_model.lock().unwrap() = req.model.clone();
         let s = futures::stream::iter(vec![
-            Ok(StreamEvent::new(StreamEventKind::TextDelta { text: "ok".into() })),
-            Ok(StreamEvent::new(StreamEventKind::Finish { reason: FinishReason::Stop })),
+            Ok(StreamEvent::new(StreamEventKind::TextDelta {
+                text: "ok".into(),
+            })),
+            Ok(StreamEvent::new(StreamEventKind::Finish {
+                reason: FinishReason::Stop,
+            })),
         ]);
         Ok(Box::pin(s))
     }
@@ -36,7 +45,11 @@ struct CaptureFactory {
 }
 
 impl ProviderFactory for CaptureFactory {
-    fn build(&self, _cfg: ProviderConfig, _auth: AuthMethod) -> Result<Box<dyn Provider>, pi_agent_core::runtime::RuntimeError> {
+    fn build(
+        &self,
+        _cfg: ProviderConfig,
+        _auth: AuthMethod,
+    ) -> Result<Box<dyn Provider>, pi_agent_core::runtime::RuntimeError> {
         Ok(Box::new(CaptureProvider {
             cfg: ProviderConfig {
                 name: "anthropic".into(),
@@ -75,7 +88,9 @@ async fn route_auto_flows_into_model_dispatch() {
         system_prompt: "system".into(),
         context_files: vec![],
         cwd: std::env::current_dir().unwrap(),
-        provider_factory: Some(Arc::new(CaptureFactory { seen_model: seen_model.clone() })),
+        provider_factory: Some(Arc::new(CaptureFactory {
+            seen_model: seen_model.clone(),
+        })),
         tool_gate: None,
         gate_ask_is_approve: false,
         stream_interceptor: None,

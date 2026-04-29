@@ -152,12 +152,7 @@ pub fn run_with(
         let blocked_by: Vec<&str> = m
             .depends_on
             .iter()
-            .filter(|dep| {
-                !matches!(
-                    milestone_state.get(*dep),
-                    Some(FinalState::Merged)
-                )
-            })
+            .filter(|dep| !matches!(milestone_state.get(*dep), Some(FinalState::Merged)))
             .map(|s| s.as_str())
             .collect();
         if !blocked_by.is_empty() {
@@ -341,8 +336,7 @@ pub fn run_with(
                     // BLOCKED_ON_REVIEW_STALE and let the operator
                     // decide whether to re-review (RFD §"Operator
                     // recovery"; v3 will add auto-rebase).
-                    let target_head_now =
-                        rev_parse(repo_root, &campaign.target_branch).ok();
+                    let target_head_now = rev_parse(repo_root, &campaign.target_branch).ok();
                     if target_head_now != target_head_at_review {
                         emit_event(
                             &mut log,
@@ -358,11 +352,8 @@ pub fn run_with(
                         break FinalState::BlockedOnReviewStale;
                     }
 
-                    let merge_result = cherry_pick_to_target(
-                        repo_root,
-                        &campaign.target_branch,
-                        &branch_sha,
-                    );
+                    let merge_result =
+                        cherry_pick_to_target(repo_root, &campaign.target_branch, &branch_sha);
                     let outcome = match merge_result {
                         MergeOutcome::Merged => {
                             emit_event(
@@ -381,7 +372,10 @@ pub fn run_with(
                                 &m.id,
                                 "MERGE_PENDING",
                                 "BLOCKED_ON_CONFLICT",
-                                &format!("cherry-pick {branch_sha} → {} conflicted", campaign.target_branch),
+                                &format!(
+                                    "cherry-pick {branch_sha} → {} conflicted",
+                                    campaign.target_branch
+                                ),
                                 &mut events_for,
                             )?;
                             FinalState::BlockedOnConflict
@@ -477,9 +471,7 @@ fn compute_exit_code(states: &HashMap<String, FinalState>) -> i32 {
         match st {
             FinalState::Merged => {}
             FinalState::Failed => has_failed = true,
-            FinalState::BlockedOnConflict | FinalState::BlockedOnReviewStale => {
-                has_blocked = true
-            }
+            FinalState::BlockedOnConflict | FinalState::BlockedOnReviewStale => has_blocked = true,
         }
     }
     // RFD §"Exit codes": blocked outranks failed (manual-resolution).

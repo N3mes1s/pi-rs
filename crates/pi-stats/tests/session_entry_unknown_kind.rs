@@ -79,7 +79,8 @@ fn ingest_skips_unknown_kind_lines_silently() {
     }
 
     let mut conn = open_in_memory().unwrap();
-    let report = ingest::sync_all(&mut conn, &sessions).expect("sync must not error on unknown kind");
+    let report =
+        ingest::sync_all(&mut conn, &sessions).expect("sync must not error on unknown kind");
     assert_eq!(report.files, 1);
     // One assistant row landed; the unknown line contributed nothing
     // and didn't abort the loop.

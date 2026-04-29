@@ -129,11 +129,8 @@ fn override_subtraction_drops_bundled_exemplar() {
         "sanity: '{known_fast}' is a bundled fast exemplar"
     );
 
-    let with_sub = route_with_override(
-        &[("fast.txt", &format!("-{known_fast}\n"))],
-        known_fast,
-    )
-    .unwrap();
+    let with_sub =
+        route_with_override(&[("fast.txt", &format!("-{known_fast}\n"))], known_fast).unwrap();
 
     // Subtraction is valid behaviour either way — the parser ran
     // and didn't crash. Print for diagnostic so a future failure is
@@ -158,7 +155,10 @@ fn override_no_op_subtraction_preserves_routing() {
     assert_eq!(baseline, "fast");
 
     let with_phantom_sub = route_with_override(
-        &[("fast.txt", "-this exact string is not in any bundled file\n")],
+        &[(
+            "fast.txt",
+            "-this exact string is not in any bundled file\n",
+        )],
         known_fast,
     )
     .unwrap();
@@ -211,10 +211,6 @@ fn override_addition_dedups_against_bundled() {
             return;
         }
     };
-    let with_dup = route_with_override(
-        &[("fast.txt", &format!("{dup}\n"))],
-        dup,
-    )
-    .unwrap();
+    let with_dup = route_with_override(&[("fast.txt", &format!("{dup}\n"))], dup).unwrap();
     assert_eq!(with_dup, baseline);
 }

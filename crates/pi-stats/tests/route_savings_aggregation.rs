@@ -114,20 +114,26 @@ fn route_savings_three_routes_one_session() {
         let mut f = fs::File::create(&path).unwrap();
 
         // Meta
-        f.write_all(line(&meta_entry("m1", 1_000_000)).as_bytes()).unwrap();
+        f.write_all(line(&meta_entry("m1", 1_000_000)).as_bytes())
+            .unwrap();
 
         // Turn 1: fast / haiku
         let base1 = 1_000_100_i64;
         f.write_all(
-            line(&route_entry("rd1", base1, "fast", "anthropic", "claude-haiku-4-5-20251001"))
-                .as_bytes(),
+            line(&route_entry(
+                "rd1",
+                base1,
+                "fast",
+                "anthropic",
+                "claude-haiku-4-5-20251001",
+            ))
+            .as_bytes(),
         )
         .unwrap();
-        f.write_all(line(&assistant_entry("a1", base1 + 50)).as_bytes()).unwrap();
-        f.write_all(
-            line(&usage_entry("u1", base1 + 100, 100, 50, 10, 5, 0.000_050)).as_bytes(),
-        )
-        .unwrap();
+        f.write_all(line(&assistant_entry("a1", base1 + 50)).as_bytes())
+            .unwrap();
+        f.write_all(line(&usage_entry("u1", base1 + 100, 100, 50, 10, 5, 0.000_050)).as_bytes())
+            .unwrap();
 
         // Turn 2: default / sonnet
         let base2 = 1_001_000_i64;
@@ -142,23 +148,19 @@ fn route_savings_three_routes_one_session() {
             .as_bytes(),
         )
         .unwrap();
-        f.write_all(line(&assistant_entry("a2", base2 + 50)).as_bytes()).unwrap();
-        f.write_all(
-            line(&usage_entry("u2", base2 + 100, 200, 80, 0, 0, 0.003_200)).as_bytes(),
-        )
-        .unwrap();
+        f.write_all(line(&assistant_entry("a2", base2 + 50)).as_bytes())
+            .unwrap();
+        f.write_all(line(&usage_entry("u2", base2 + 100, 200, 80, 0, 0, 0.003_200)).as_bytes())
+            .unwrap();
 
         // Turn 3: hard / gpt-5.4
         let base3 = 1_002_000_i64;
-        f.write_all(
-            line(&route_entry("rd3", base3, "hard", "openai", "gpt-5.4")).as_bytes(),
-        )
-        .unwrap();
-        f.write_all(line(&assistant_entry("a3", base3 + 50)).as_bytes()).unwrap();
-        f.write_all(
-            line(&usage_entry("u3", base3 + 100, 300, 120, 20, 10, 0.010_000)).as_bytes(),
-        )
-        .unwrap();
+        f.write_all(line(&route_entry("rd3", base3, "hard", "openai", "gpt-5.4")).as_bytes())
+            .unwrap();
+        f.write_all(line(&assistant_entry("a3", base3 + 50)).as_bytes())
+            .unwrap();
+        f.write_all(line(&usage_entry("u3", base3 + 100, 300, 120, 20, 10, 0.010_000)).as_bytes())
+            .unwrap();
     }
 
     let mut conn = open_in_memory().unwrap();
@@ -232,25 +234,20 @@ fn route_savings_skips_routing_decision_with_no_following_message() {
     let path = cwd_dir.join("partial.jsonl");
     {
         let mut f = fs::File::create(&path).unwrap();
-        f.write_all(line(&meta_entry("m1", 1_000_000)).as_bytes()).unwrap();
+        f.write_all(line(&meta_entry("m1", 1_000_000)).as_bytes())
+            .unwrap();
 
         // This routing decision has a matching assistant row.
-        f.write_all(
-            line(&route_entry("rd1", 1_001_000, "fast", "anthropic", "haiku"))
-                .as_bytes(),
-        )
-        .unwrap();
-        f.write_all(line(&assistant_entry("a1", 1_001_050)).as_bytes()).unwrap();
-        f.write_all(
-            line(&usage_entry("u1", 1_001_100, 100, 50, 0, 0, 0.001)).as_bytes(),
-        )
-        .unwrap();
+        f.write_all(line(&route_entry("rd1", 1_001_000, "fast", "anthropic", "haiku")).as_bytes())
+            .unwrap();
+        f.write_all(line(&assistant_entry("a1", 1_001_050)).as_bytes())
+            .unwrap();
+        f.write_all(line(&usage_entry("u1", 1_001_100, 100, 50, 0, 0, 0.001)).as_bytes())
+            .unwrap();
 
         // This routing decision has no subsequent assistant row (turn errored / dropped).
-        f.write_all(
-            line(&route_entry("rd2", 1_002_000, "hard", "openai", "gpt-5")).as_bytes(),
-        )
-        .unwrap();
+        f.write_all(line(&route_entry("rd2", 1_002_000, "hard", "openai", "gpt-5")).as_bytes())
+            .unwrap();
         // No assistant entry follows rd2.
     }
 

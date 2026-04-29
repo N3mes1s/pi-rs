@@ -1,10 +1,10 @@
 //! Integration test for /theme command: verify that theme switching changes
 //! the rendered output colors immediately.
 
-use pi_coding_agent::modes::interactive::View;
-use pi_coding_agent::keymap::Keymap;
-use pi_coding_agent::renderer::{Block, Transcript};
 use pi_agent_core::settings::ThinkingSetting;
+use pi_coding_agent::keymap::Keymap;
+use pi_coding_agent::modes::interactive::View;
+use pi_coding_agent::renderer::{Block, Transcript};
 use pi_tui::ThemeRegistry;
 
 #[test]
@@ -14,7 +14,9 @@ fn theme_live_switch_changes_palette() {
     transcript.blocks.push(Block::AssistantText(
         "Here is **bold text** and _italic text_ and `code`.".to_string(),
     ));
-    transcript.blocks.push(Block::User("User prompt here.".to_string()));
+    transcript
+        .blocks
+        .push(Block::User("User prompt here.".to_string()));
 
     // Get dark and light themes from the registry.
     let registry = ThemeRegistry::new();
@@ -51,8 +53,10 @@ fn theme_live_switch_changes_palette() {
     assert_eq!(dark_text, light_text, "Text content should be identical");
 
     // But the colors should differ (themes have different accent/assistant colors)
-    let dark_colors: Vec<Option<crossterm::style::Color>> = dark_spans.iter().map(|(_, c)| *c).collect();
-    let light_colors: Vec<Option<crossterm::style::Color>> = light_spans.iter().map(|(_, c)| *c).collect();
+    let dark_colors: Vec<Option<crossterm::style::Color>> =
+        dark_spans.iter().map(|(_, c)| *c).collect();
+    let light_colors: Vec<Option<crossterm::style::Color>> =
+        light_spans.iter().map(|(_, c)| *c).collect();
 
     // At least some spans should have different colors between dark and light
     let colors_differ = dark_colors != light_colors;

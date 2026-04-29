@@ -2,17 +2,13 @@
 //! the configured `RouteEntry`s by max-pool similarity of the
 //! prompt embedding against each route's exemplar embeddings.
 
-use crate::router::engine::{
-    default_embedding_model_path, EmbeddingEngine, OnnxEmbeddingEngine,
-};
 #[cfg(feature = "onnx-inference")]
 use crate::router::engine::OnnxRealEngine;
+use crate::router::engine::{default_embedding_model_path, EmbeddingEngine, OnnxEmbeddingEngine};
+use crate::router::exemplars::default_routes;
 use crate::router::exemplars::{load_routes_from_dir, resolve_router_dir};
 use crate::router::text::{cosine_similarity, parse_thinking, resolve_force, router_input};
-use crate::router::{
-    RouteEntry, Router, RouterError, RoutingContext, RoutingDecision, ToolSpec,
-};
-use crate::router::exemplars::default_routes;
+use crate::router::{RouteEntry, Router, RouterError, RoutingContext, RoutingDecision, ToolSpec};
 use pi_ai::Message;
 use std::cmp::Ordering;
 use std::path::Path;
@@ -86,7 +82,8 @@ impl EmbeddingRouter {
                 _ => best = Some((score, route)),
             }
         }
-        let (score, route) = best.ok_or_else(|| RouterError::Config("no routes configured".into()))?;
+        let (score, route) =
+            best.ok_or_else(|| RouterError::Config("no routes configured".into()))?;
         Ok((route.clone(), score))
     }
 

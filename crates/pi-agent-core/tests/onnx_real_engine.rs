@@ -45,7 +45,10 @@ fn real_engine_returns_normalized_384d_vectors() {
     let embedding = engine.embed("rename foo to bar in this file").unwrap();
     assert_eq!(embedding.len(), 384);
     let norm = norm_sq(&embedding);
-    assert!((norm - 1.0).abs() < 1e-3, "expected L2-normalized vector, got norm^2={norm}");
+    assert!(
+        (norm - 1.0).abs() < 1e-3,
+        "expected L2-normalized vector, got norm^2={norm}"
+    );
 }
 
 #[test]

@@ -83,9 +83,7 @@ pub fn cherry_pick_to_target(
         .current_dir(repo_root)
         .output();
     let Ok(co) = checkout else {
-        return MergeOutcome::GitError(format!(
-            "git checkout {target_branch}: spawn failed"
-        ));
+        return MergeOutcome::GitError(format!("git checkout {target_branch}: spawn failed"));
     };
     if !co.status.success() {
         return MergeOutcome::GitError(format!(

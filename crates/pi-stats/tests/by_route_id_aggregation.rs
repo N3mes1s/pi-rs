@@ -53,18 +53,24 @@ fn by_route_id_groups_decisions_with_session_counts_and_avg_budget() {
     let path_a = cwd_dir.join("aaa.jsonl");
     {
         let mut f = fs::File::create(&path_a).unwrap();
-        f.write_all(line(&meta("ma", 1_700_000_000_000)).as_bytes()).unwrap();
-        f.write_all(line(&route("r1", 1_700_000_000_100, "fast", None)).as_bytes()).unwrap();
-        f.write_all(line(&route("r2", 1_700_000_000_200, "fast", None)).as_bytes()).unwrap();
-        f.write_all(line(&route("r3", 1_700_000_000_300, "hard", Some(200))).as_bytes()).unwrap();
+        f.write_all(line(&meta("ma", 1_700_000_000_000)).as_bytes())
+            .unwrap();
+        f.write_all(line(&route("r1", 1_700_000_000_100, "fast", None)).as_bytes())
+            .unwrap();
+        f.write_all(line(&route("r2", 1_700_000_000_200, "fast", None)).as_bytes())
+            .unwrap();
+        f.write_all(line(&route("r3", 1_700_000_000_300, "hard", Some(200))).as_bytes())
+            .unwrap();
     }
 
     // Session B: 1 hard decision with budget=400 — distinct session_file.
     let path_b = cwd_dir.join("bbb.jsonl");
     {
         let mut f = fs::File::create(&path_b).unwrap();
-        f.write_all(line(&meta("mb", 1_700_000_001_000)).as_bytes()).unwrap();
-        f.write_all(line(&route("r4", 1_700_000_001_100, "hard", Some(400))).as_bytes()).unwrap();
+        f.write_all(line(&meta("mb", 1_700_000_001_000)).as_bytes())
+            .unwrap();
+        f.write_all(line(&route("r4", 1_700_000_001_100, "hard", Some(400))).as_bytes())
+            .unwrap();
     }
 
     let mut conn = open_in_memory().unwrap();
@@ -107,11 +113,16 @@ fn by_route_id_groups_within_one_session_set_sessions_to_one_per_group() {
     let path = cwd_dir.join("mixed.jsonl");
     {
         let mut f = fs::File::create(&path).unwrap();
-        f.write_all(line(&meta("m1", 1_700_000_000_000)).as_bytes()).unwrap();
-        f.write_all(line(&route("r1", 1_700_000_000_100, "fast", None)).as_bytes()).unwrap();
-        f.write_all(line(&route("r2", 1_700_000_000_200, "fast", None)).as_bytes()).unwrap();
-        f.write_all(line(&route("r3", 1_700_000_000_300, "default", None)).as_bytes()).unwrap();
-        f.write_all(line(&route("r4", 1_700_000_000_400, "hard", None)).as_bytes()).unwrap();
+        f.write_all(line(&meta("m1", 1_700_000_000_000)).as_bytes())
+            .unwrap();
+        f.write_all(line(&route("r1", 1_700_000_000_100, "fast", None)).as_bytes())
+            .unwrap();
+        f.write_all(line(&route("r2", 1_700_000_000_200, "fast", None)).as_bytes())
+            .unwrap();
+        f.write_all(line(&route("r3", 1_700_000_000_300, "default", None)).as_bytes())
+            .unwrap();
+        f.write_all(line(&route("r4", 1_700_000_000_400, "hard", None)).as_bytes())
+            .unwrap();
     }
 
     let mut conn = open_in_memory().unwrap();
@@ -135,11 +146,13 @@ fn by_route_id_aggregates_same_route_across_distinct_sessions() {
         let path = cwd_dir.join(file_name);
         let mut f = fs::File::create(&path).unwrap();
         let base_ts = 1_700_000_000_000_i64 + (sess_idx as i64) * 10_000;
-        f.write_all(line(&meta(&format!("m{sess_idx}"), base_ts)).as_bytes()).unwrap();
+        f.write_all(line(&meta(&format!("m{sess_idx}"), base_ts)).as_bytes())
+            .unwrap();
         for j in 0..5 {
             let id = format!("r{sess_idx}_{j}");
             let ts = base_ts + 100 + (j as i64) * 10;
-            f.write_all(line(&route(&id, ts, "default", None)).as_bytes()).unwrap();
+            f.write_all(line(&route(&id, ts, "default", None)).as_bytes())
+                .unwrap();
         }
     }
 
@@ -166,11 +179,16 @@ fn by_route_id_one_session_multiple_routes() {
     let path = cwd_dir.join("single.jsonl");
     {
         let mut f = fs::File::create(&path).unwrap();
-        f.write_all(line(&meta("m_single", 1_700_000_000_000)).as_bytes()).unwrap();
-        f.write_all(line(&route("r1", 1_700_000_000_100, "fast", None)).as_bytes()).unwrap();
-        f.write_all(line(&route("r2", 1_700_000_000_200, "fast", None)).as_bytes()).unwrap();
-        f.write_all(line(&route("r3", 1_700_000_000_300, "default", None)).as_bytes()).unwrap();
-        f.write_all(line(&route("r4", 1_700_000_000_400, "hard", None)).as_bytes()).unwrap();
+        f.write_all(line(&meta("m_single", 1_700_000_000_000)).as_bytes())
+            .unwrap();
+        f.write_all(line(&route("r1", 1_700_000_000_100, "fast", None)).as_bytes())
+            .unwrap();
+        f.write_all(line(&route("r2", 1_700_000_000_200, "fast", None)).as_bytes())
+            .unwrap();
+        f.write_all(line(&route("r3", 1_700_000_000_300, "default", None)).as_bytes())
+            .unwrap();
+        f.write_all(line(&route("r4", 1_700_000_000_400, "hard", None)).as_bytes())
+            .unwrap();
     }
 
     let mut conn = open_in_memory().unwrap();
@@ -181,10 +199,7 @@ fn by_route_id_one_session_multiple_routes() {
     assert_eq!(stats.len(), 3, "expected 3 route groups, got {stats:?}");
 
     for s in &stats {
-        assert_eq!(
-            s.sessions, 1,
-            "each group should report sessions=1: {s:?}"
-        );
+        assert_eq!(s.sessions, 1, "each group should report sessions=1: {s:?}");
     }
 }
 
@@ -196,15 +211,20 @@ fn by_route_id_three_sessions_same_route_default() {
     fs::create_dir_all(&cwd_dir).unwrap();
 
     // 3 distinct sessions, each with 5 routing decisions on "default"
-    for (sess_idx, file_name) in ["sess1.jsonl", "sess2.jsonl", "sess3.jsonl"].iter().enumerate() {
+    for (sess_idx, file_name) in ["sess1.jsonl", "sess2.jsonl", "sess3.jsonl"]
+        .iter()
+        .enumerate()
+    {
         let path = cwd_dir.join(file_name);
         let mut f = fs::File::create(&path).unwrap();
         let base_ts = 1_700_000_000_000_i64 + (sess_idx as i64) * 10_000;
-        f.write_all(line(&meta(&format!("m_sess{}", sess_idx), base_ts)).as_bytes()).unwrap();
+        f.write_all(line(&meta(&format!("m_sess{}", sess_idx), base_ts)).as_bytes())
+            .unwrap();
         for j in 0..5 {
             let id = format!("r{sess_idx}_{j}");
             let ts = base_ts + 100 + (j as i64) * 10;
-            f.write_all(line(&route(&id, ts, "default", None)).as_bytes()).unwrap();
+            f.write_all(line(&route(&id, ts, "default", None)).as_bytes())
+                .unwrap();
         }
     }
 

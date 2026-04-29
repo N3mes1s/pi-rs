@@ -22,7 +22,10 @@ fn embedding_router_routes() {
     };
     let cases = vec![
         ("rename foo to bar in src/lib.rs", "fast"),
-        ("rename foo to bar in src/lib.rs (just describe the diff)", "fast"),
+        (
+            "rename foo to bar in src/lib.rs (just describe the diff)",
+            "fast",
+        ),
         ("add a doc comment to this function", "fast"),
         ("remove the println at line 42", "fast"),
         ("fix this typo in README", "fast"),
@@ -44,7 +47,10 @@ fn embedding_router_routes() {
         ("prove that this loop terminates", "hard"),
         ("find a counterexample to this invariant", "hard"),
         ("is the borrow checker sound for this pattern?", "hard"),
-        ("give a formal argument that this recursion terminates", "hard"),
+        (
+            "give a formal argument that this recursion terminates",
+            "hard",
+        ),
         ("reason about aliasing safety in this unsafe block", "hard"),
         ("prove memory safety for this ownership pattern", "hard"),
         ("find a soundness hole in this type system rule", "hard"),
@@ -53,7 +59,9 @@ fn embedding_router_routes() {
         ("counterexample for borrow checker assumption", "hard"),
     ];
     for (prompt, expected) in cases {
-        let decision = router.route(prompt, &[], &[], &ctx(&registry)).expect(prompt);
+        let decision = router
+            .route(prompt, &[], &[], &ctx(&registry))
+            .expect(prompt);
         assert_eq!(decision.route_id, expected, "prompt: {prompt}");
     }
     assert_eq!(RouteMode::parse("auto"), Some(RouteMode::Auto));

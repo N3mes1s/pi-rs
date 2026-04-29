@@ -148,7 +148,9 @@ pub fn parse_and_render_markdown(
                 );
                 in_code_block = true;
                 code_lang = match kind {
-                    CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or("").to_owned(),
+                    CodeBlockKind::Fenced(info) => {
+                        info.split_whitespace().next().unwrap_or("").to_owned()
+                    }
                     CodeBlockKind::Indented => String::new(),
                 };
                 code_body.clear();
@@ -247,7 +249,10 @@ fn build_wrap_prefix(blockquote_depth: u32, item_prefix: Option<String>) -> Wrap
     match item_prefix {
         Some(item_prefix) => WrapPrefix {
             first: format!("{gutter}{item_prefix}"),
-            rest: format!("{gutter}{}", " ".repeat(UnicodeWidthStr::width(item_prefix.as_str()))),
+            rest: format!(
+                "{gutter}{}",
+                " ".repeat(UnicodeWidthStr::width(item_prefix.as_str()))
+            ),
         },
         None if gutter.is_empty() => WrapPrefix::default(),
         None => WrapPrefix {
@@ -296,7 +301,10 @@ fn wrap_spans(spans: Vec<Span>, width: usize, prefix: &WrapPrefix) -> Vec<Line> 
 
             let available = line_width.saturating_sub(current_width);
             if available == 0 {
-                out.push(build_wrapped_line(std::mem::take(&mut current), line_prefix));
+                out.push(build_wrapped_line(
+                    std::mem::take(&mut current),
+                    line_prefix,
+                ));
                 current_width = 0;
                 line_prefix = prefix.rest.as_str();
                 line_width = available_width(width, line_prefix);
@@ -306,7 +314,10 @@ fn wrap_spans(spans: Vec<Span>, width: usize, prefix: &WrapPrefix) -> Vec<Line> 
             let (take, rest) = split_for_wrap(remaining, available);
             if take.is_empty() {
                 if !current.is_empty() {
-                    out.push(build_wrapped_line(std::mem::take(&mut current), line_prefix));
+                    out.push(build_wrapped_line(
+                        std::mem::take(&mut current),
+                        line_prefix,
+                    ));
                     current_width = 0;
                     line_prefix = prefix.rest.as_str();
                     line_width = available_width(width, line_prefix);
@@ -322,7 +333,10 @@ fn wrap_spans(spans: Vec<Span>, width: usize, prefix: &WrapPrefix) -> Vec<Line> 
             remaining = rest;
 
             if !remaining.is_empty() {
-                out.push(build_wrapped_line(std::mem::take(&mut current), line_prefix));
+                out.push(build_wrapped_line(
+                    std::mem::take(&mut current),
+                    line_prefix,
+                ));
                 current_width = 0;
                 line_prefix = prefix.rest.as_str();
                 line_width = available_width(width, line_prefix);

@@ -28,12 +28,12 @@ mod exemplars;
 mod text;
 
 pub use embedding::EmbeddingRouter;
+#[cfg(feature = "onnx-inference")]
+pub use engine::OnnxRealEngine;
 pub use engine::{
     default_embedding_model_path, fetch_default_embeddings, validate_embedding_model,
     EmbeddingEngine,
 };
-#[cfg(feature = "onnx-inference")]
-pub use engine::OnnxRealEngine;
 pub use exemplars::resolve_router_dir;
 pub use text::parse_tale_ep_budget;
 

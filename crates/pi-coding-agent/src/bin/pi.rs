@@ -7,7 +7,9 @@ fn main() -> anyhow::Result<()> {
     // values or interactions, so a manual match shaves the parse cost.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() == 2 && args[0] == "router" && args[1] == "fetch-embeddings" {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         return rt.block_on(cmd::run_router_fetch_embeddings());
     }
     if args.len() == 1 {

@@ -357,7 +357,15 @@ pub fn route_savings(conn: &Connection) -> rusqlite::Result<Vec<RouteSavings>> {
         let output: i64 = r.get(4)?;
         let cache_read: i64 = r.get(5)?;
         let cache_write: i64 = r.get(6)?;
-        Ok((route_id, turns, actual_cost, input, output, cache_read, cache_write))
+        Ok((
+            route_id,
+            turns,
+            actual_cost,
+            input,
+            output,
+            cache_read,
+            cache_write,
+        ))
     })?;
     let mut result = Vec::new();
     for row in rows {

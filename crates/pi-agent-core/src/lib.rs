@@ -12,17 +12,17 @@ pub mod system;
 pub use compaction::{Compactor, LlmCompactor};
 pub use context::{discover_context_files, ContextFile};
 pub use event::{AgentEvent, AgentEventKind, EventSender};
-pub use runtime::{
-    create_agent_session, AgentSession, AgentSessionRuntime, DefaultProviderFactory,
-    InterceptAction, ProviderFactory, RuntimeConfig, StreamInterceptor, ToolGate, ToolGateOutcome,
-};
+#[cfg(feature = "onnx-inference")]
+pub use router::OnnxRealEngine;
 pub use router::{
     default_embedding_model_path, fetch_default_embeddings, parse_tale_ep_budget,
     validate_embedding_model, EmbeddingEngine, EmbeddingRouter, ForceOverride, Outcome, RouteMode,
     Router, RouterError, RoutingContext, RoutingDecision, StaticRouter, ToolSpec,
 };
-#[cfg(feature = "onnx-inference")]
-pub use router::OnnxRealEngine;
+pub use runtime::{
+    create_agent_session, AgentSession, AgentSessionRuntime, DefaultProviderFactory,
+    InterceptAction, ProviderFactory, RuntimeConfig, StreamInterceptor, ToolGate, ToolGateOutcome,
+};
 pub use session::{
     OutcomeSource, SessionEntry, SessionEntryKind, SessionManager, SessionMeta, SessionTree,
 };

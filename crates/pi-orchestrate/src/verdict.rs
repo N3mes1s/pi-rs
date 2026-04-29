@@ -122,7 +122,10 @@ mod tests {
 
     #[test]
     fn missing_line_returns_none() {
-        assert_eq!(parse_verdict("the reviewer forgot to include the line"), None);
+        assert_eq!(
+            parse_verdict("the reviewer forgot to include the line"),
+            None
+        );
     }
 
     #[test]

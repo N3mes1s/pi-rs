@@ -25,7 +25,9 @@ fn empty_frame_emits_no_visible_text() {
     // SGR uses 'm', cursor ops use 'A','B','C','D','H','f','J','K' etc.
     let trimmed: String = text
         .chars()
-        .filter(|c| !"?0123456789hlABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz ;=".contains(*c))
+        .filter(|c| {
+            !"?0123456789hlABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz ;=".contains(*c)
+        })
         .collect();
     assert!(
         trimmed.trim().is_empty(),

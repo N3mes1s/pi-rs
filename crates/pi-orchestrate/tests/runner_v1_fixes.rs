@@ -48,10 +48,7 @@ impl FakeDispatch {
             side_effect: Mutex::new(None),
         }
     }
-    fn with_side_effect(
-        canned: Vec<DispatchOutcome>,
-        f: Box<dyn FnMut(&Path) + Send>,
-    ) -> Self {
+    fn with_side_effect(canned: Vec<DispatchOutcome>, f: Box<dyn FnMut(&Path) + Send>) -> Self {
         Self {
             canned: Mutex::new(canned),
             branches_seen: Mutex::new(Vec::new()),
@@ -77,11 +74,10 @@ impl Dispatch for FakeDispatch {
     ) -> std::io::Result<DispatchOutcome> {
         let head = current_branch(cwd);
         self.branches_seen.lock().unwrap().push(head);
-        self.calls.lock().unwrap().push((
-            role,
-            agent_name.to_string(),
-            assignment.to_string(),
-        ));
+        self.calls
+            .lock()
+            .unwrap()
+            .push((role, agent_name.to_string(), assignment.to_string()));
         if let Some(f) = self.side_effect.lock().unwrap().as_mut() {
             f(cwd);
         }
@@ -120,7 +116,11 @@ fn make_repo(target: &str, milestone_branches: &[&str]) -> tempfile::TempDir {
     let dir = tempdir().unwrap();
     let p = dir.path();
     fn run(p: &Path, args: &[&str]) {
-        let out = Command::new("git").args(args).current_dir(p).output().unwrap();
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(p)
+            .output()
+            .unwrap();
         assert!(
             out.status.success(),
             "git {:?} failed: {}",
@@ -197,8 +197,14 @@ fn b2_each_milestone_checks_out_its_branch_before_dispatch() {
     //   beta-rev  → feat/beta
     let branches = dispatcher.branches_seen();
     assert_eq!(branches.len(), 4);
-    assert_eq!(branches[0], "feat/alpha", "alpha implementer must run on feat/alpha");
-    assert_eq!(branches[1], "feat/alpha", "alpha reviewer must run on feat/alpha");
+    assert_eq!(
+        branches[0], "feat/alpha",
+        "alpha implementer must run on feat/alpha"
+    );
+    assert_eq!(
+        branches[1], "feat/alpha",
+        "alpha reviewer must run on feat/alpha"
+    );
     assert_eq!(
         branches[2], "feat/beta",
         "beta implementer must run on feat/beta — this is the bug B2 catches: \
@@ -242,7 +248,11 @@ assignment = "do alpha"
                 // checkout doesn't have to fix anything weird.
                 vec!["checkout", "-q", "feat/alpha"],
             ] {
-                let out = Command::new("git").args(cmd).current_dir(p).output().unwrap();
+                let out = Command::new("git")
+                    .args(cmd)
+                    .current_dir(p)
+                    .output()
+                    .unwrap();
                 assert!(out.status.success(), "side-effect git {:?} failed", cmd);
             }
         }
@@ -283,7 +293,11 @@ fn make_repo_with_conflict() -> tempfile::TempDir {
     let dir = tempdir().unwrap();
     let p = dir.path();
     fn run(p: &Path, args: &[&str]) {
-        let out = Command::new("git").args(args).current_dir(p).output().unwrap();
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(p)
+            .output()
+            .unwrap();
         assert!(
             out.status.success(),
             "git {:?} failed: {}",

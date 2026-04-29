@@ -83,7 +83,11 @@ fn make_repo(target: &str, milestone_branches: &[&str]) -> tempfile::TempDir {
     let dir = tempdir().unwrap();
     let p = dir.path();
     fn run(p: &Path, args: &[&str]) {
-        let out = Command::new("git").args(args).current_dir(p).output().unwrap();
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(p)
+            .output()
+            .unwrap();
         if !out.status.success() {
             panic!(
                 "git {:?} failed: {}",
@@ -153,13 +157,22 @@ fn ready_to_merge_both_milestones_reach_merged_exit_0() {
         ok("ditto\n\nMerge readiness: READY_TO_MERGE"),
     ]);
     let state_root = tempdir().unwrap();
-    let summary = run_with(&parse(TWO_MILESTONE_TOML), state_root.path(), &dispatcher, repo.path())
-        .unwrap();
+    let summary = run_with(
+        &parse(TWO_MILESTONE_TOML),
+        state_root.path(),
+        &dispatcher,
+        repo.path(),
+    )
+    .unwrap();
 
     assert_eq!(summary.exit_code, 0);
     assert_eq!(summary.outcomes.len(), 2);
     for o in &summary.outcomes {
-        assert_eq!(o.final_state, "MERGED", "milestone {} should be MERGED", o.id);
+        assert_eq!(
+            o.final_state, "MERGED",
+            "milestone {} should be MERGED",
+            o.id
+        );
     }
 
     // State.jsonl should have for each milestone:
@@ -207,8 +220,7 @@ assignment = "do alpha"
         ok("better\n\nMerge readiness: READY_TO_MERGE"),
     ]);
     let state_root = tempdir().unwrap();
-    let summary =
-        run_with(&parse(toml), state_root.path(), &dispatcher, repo.path()).unwrap();
+    let summary = run_with(&parse(toml), state_root.path(), &dispatcher, repo.path()).unwrap();
     assert_eq!(summary.exit_code, 0);
     assert_eq!(summary.outcomes[0].final_state, "MERGED");
     assert_eq!(summary.outcomes[0].fix_loop_iterations, 2);
@@ -243,8 +255,7 @@ assignment = "do alpha"
         ok("Merge readiness: NEEDS_FIX"),
     ]);
     let state_root = tempdir().unwrap();
-    let summary =
-        run_with(&parse(toml), state_root.path(), &dispatcher, repo.path()).unwrap();
+    let summary = run_with(&parse(toml), state_root.path(), &dispatcher, repo.path()).unwrap();
     assert_eq!(summary.exit_code, 2);
     assert_eq!(summary.outcomes[0].final_state, "FAILED");
     assert_eq!(summary.outcomes[0].fix_loop_iterations, 2);
@@ -268,13 +279,9 @@ branch = "feat/alpha"
 implementer = "router-implementer"
 assignment = "do alpha"
 "#;
-    let dispatcher = FakeDispatch::new(vec![
-        ok("attempt 1"),
-        ok("Merge readiness: DO_NOT_MERGE"),
-    ]);
+    let dispatcher = FakeDispatch::new(vec![ok("attempt 1"), ok("Merge readiness: DO_NOT_MERGE")]);
     let state_root = tempdir().unwrap();
-    let summary =
-        run_with(&parse(toml), state_root.path(), &dispatcher, repo.path()).unwrap();
+    let summary = run_with(&parse(toml), state_root.path(), &dispatcher, repo.path()).unwrap();
     assert_eq!(summary.exit_code, 2);
     assert_eq!(summary.outcomes[0].final_state, "FAILED");
     // Must have used exactly ONE iteration even though fix_loop_max = 5.
@@ -295,13 +302,20 @@ fn failed_dependency_blocks_descendant() {
         // FakeDispatch will run out of canned outcomes and return Err.
     ]);
     let state_root = tempdir().unwrap();
-    let summary =
-        run_with(&parse(TWO_MILESTONE_TOML), state_root.path(), &dispatcher, repo.path())
-            .unwrap();
+    let summary = run_with(
+        &parse(TWO_MILESTONE_TOML),
+        state_root.path(),
+        &dispatcher,
+        repo.path(),
+    )
+    .unwrap();
     assert_eq!(summary.exit_code, 2);
     let beta = summary.outcomes.iter().find(|o| o.id == "beta").unwrap();
     assert_eq!(beta.final_state, "FAILED");
-    assert_eq!(beta.fix_loop_iterations, 0, "beta must not have run an implementer");
+    assert_eq!(
+        beta.fix_loop_iterations, 0,
+        "beta must not have run an implementer"
+    );
     assert_eq!(dispatcher.calls().len(), 2, "only alpha's two calls");
 }
 
@@ -330,8 +344,7 @@ assignment = "do alpha"
         ok("Merge readiness: READY_TO_MERGE"),
     ]);
     let state_root = tempdir().unwrap();
-    let summary =
-        run_with(&parse(toml), state_root.path(), &dispatcher, repo.path()).unwrap();
+    let summary = run_with(&parse(toml), state_root.path(), &dispatcher, repo.path()).unwrap();
     assert_eq!(summary.exit_code, 0);
     assert_eq!(summary.outcomes[0].final_state, "MERGED");
     // First iteration's unparseable verdict counted as needs-fix
@@ -356,8 +369,7 @@ assignment = "do alpha"
 "#;
     let dispatcher = FakeDispatch::new(vec![fail("oom")]);
     let state_root = tempdir().unwrap();
-    let summary =
-        run_with(&parse(toml), state_root.path(), &dispatcher, repo.path()).unwrap();
+    let summary = run_with(&parse(toml), state_root.path(), &dispatcher, repo.path()).unwrap();
     assert_eq!(summary.exit_code, 2);
     assert_eq!(summary.outcomes[0].final_state, "FAILED");
     // Reviewer was never called.
@@ -384,13 +396,9 @@ implementer = "router-implementer"
 assignment = "do alpha"
 "#;
     // One implementer + one reviewer with NEEDS_FIX → exhausted (max=1).
-    let dispatcher = FakeDispatch::new(vec![
-        ok("attempt 1"),
-        ok("Merge readiness: NEEDS_FIX"),
-    ]);
+    let dispatcher = FakeDispatch::new(vec![ok("attempt 1"), ok("Merge readiness: NEEDS_FIX")]);
     let state_root = tempdir().unwrap();
-    let summary =
-        run_with(&parse(toml), state_root.path(), &dispatcher, repo.path()).unwrap();
+    let summary = run_with(&parse(toml), state_root.path(), &dispatcher, repo.path()).unwrap();
     assert_eq!(summary.exit_code, 2);
     assert_eq!(summary.outcomes[0].final_state, "FAILED");
     assert_eq!(summary.outcomes[0].fix_loop_iterations, 1);
@@ -415,10 +423,8 @@ implementer = "router-implementer"
 reviewer = "rfd-critic"
 assignment = "do alpha"
 "#;
-    let dispatcher = FakeDispatch::new(vec![
-        ok("attempt 1"),
-        ok("Merge readiness: READY_TO_MERGE"),
-    ]);
+    let dispatcher =
+        FakeDispatch::new(vec![ok("attempt 1"), ok("Merge readiness: READY_TO_MERGE")]);
     let state_root = tempdir().unwrap();
     run_with(&parse(toml), state_root.path(), &dispatcher, repo.path()).unwrap();
     let calls = dispatcher.calls();

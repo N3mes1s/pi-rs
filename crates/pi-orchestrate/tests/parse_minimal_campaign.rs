@@ -49,7 +49,9 @@ fn parse_minimal_campaign() {
     assert!(campaign.milestones[0].depends_on.is_empty());
     assert_eq!(campaign.milestones[0].override_rules.len(), 1);
     assert_eq!(
-        campaign.milestones[0].override_rules[0].forward_to.as_deref(),
+        campaign.milestones[0].override_rules[0]
+            .forward_to
+            .as_deref(),
         Some("m2-classifier")
     );
 

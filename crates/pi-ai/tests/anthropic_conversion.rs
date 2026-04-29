@@ -40,7 +40,9 @@ fn thinking_block_with_no_signature_is_dropped_from_request_body() {
             text: "raw".into(),
             signature: None,
         },
-        ContentBlock::Text { text: "hello".into() },
+        ContentBlock::Text {
+            text: "hello".into(),
+        },
     ];
     let v = content_blocks_to_anthropic(&blocks);
     assert_eq!(v, json!([{"type": "text", "text": "hello"}]));

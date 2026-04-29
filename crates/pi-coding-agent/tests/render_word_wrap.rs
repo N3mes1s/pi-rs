@@ -19,8 +19,9 @@ const SAMPLE_200_WORD_PARAGRAPH: &str =
 
 #[test]
 fn word_wrap_no_line_exceeds_80_cols() {
-    let result = parse_and_render_markdown(SAMPLE_200_WORD_PARAGRAPH, Color::Cyan, Color::DarkGrey, 80);
-    
+    let result =
+        parse_and_render_markdown(SAMPLE_200_WORD_PARAGRAPH, Color::Cyan, Color::DarkGrey, 80);
+
     for (i, line) in result.iter().enumerate() {
         let line_text: String = line.spans.iter().map(|s| s.text.as_str()).collect();
         let width = UnicodeWidthStr::width(line_text.as_str());
@@ -36,20 +37,24 @@ fn word_wrap_no_line_exceeds_80_cols() {
 
 #[test]
 fn word_wrap_no_word_split_across_lines() {
-    let result = parse_and_render_markdown(SAMPLE_200_WORD_PARAGRAPH, Color::Cyan, Color::DarkGrey, 80);
-    
+    let result =
+        parse_and_render_markdown(SAMPLE_200_WORD_PARAGRAPH, Color::Cyan, Color::DarkGrey, 80);
+
     // Collect all line texts
     let line_texts: Vec<String> = result
         .iter()
         .map(|line| {
-            line.spans.iter().map(|s| s.text.as_str()).collect::<String>()
+            line.spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>()
         })
         .collect();
-    
+
     // No line should start with a fragment that looks like a mid-word continuation.
     // Simplified check: no word from the original text should appear split across two adjacent lines.
     let all_words: Vec<&str> = SAMPLE_200_WORD_PARAGRAPH.split_whitespace().collect();
-    
+
     for word in &all_words {
         // word must appear whole on at least one line
         let appears_whole = line_texts.iter().any(|l| l.contains(*word));
@@ -69,8 +74,9 @@ fn word_wrap_no_word_split_across_lines() {
 
 #[test]
 fn word_wrap_at_width_40() {
-    let result = parse_and_render_markdown(SAMPLE_200_WORD_PARAGRAPH, Color::Cyan, Color::DarkGrey, 40);
-    
+    let result =
+        parse_and_render_markdown(SAMPLE_200_WORD_PARAGRAPH, Color::Cyan, Color::DarkGrey, 40);
+
     for (i, line) in result.iter().enumerate() {
         let line_text: String = line.spans.iter().map(|s| s.text.as_str()).collect();
         let width = UnicodeWidthStr::width(line_text.as_str());
@@ -88,16 +94,23 @@ fn word_wrap_at_width_40() {
 fn word_wrap_preserves_all_content() {
     let text = "one two three four five six seven eight nine ten";
     let result = parse_and_render_markdown(text, Color::Cyan, Color::DarkGrey, 20);
-    
+
     let all_text: String = result
         .iter()
         .flat_map(|line| line.spans.iter().map(|s| s.text.as_str()))
         .collect::<Vec<_>>()
         .join(" ");
-    
+
     // All words should be present in the output
-    for word in ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"] {
-        assert!(all_text.contains(word), "word '{}' missing from output: {}", word, all_text);
+    for word in [
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    ] {
+        assert!(
+            all_text.contains(word),
+            "word '{}' missing from output: {}",
+            word,
+            all_text
+        );
     }
 }
 
@@ -110,14 +123,28 @@ fn word_wrap_reflows_styled_paragraphs_without_eating_spaces() {
 
     let joined = result
         .iter()
-        .map(|line| line.spans.iter().map(|s| s.text.as_str()).collect::<String>())
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(joined.contains("alpha bravo charlie"), "lost spacing: {joined}");
+    assert!(
+        joined.contains("alpha bravo charlie"),
+        "lost spacing: {joined}"
+    );
 
     for (i, line) in result.iter().enumerate() {
         let line_text: String = line.spans.iter().map(|s| s.text.as_str()).collect();
         let width = UnicodeWidthStr::width(line_text.as_str());
-        assert!(width <= 18, "line {} exceeds 18 cols (width={}): {:?}", i, width, line_text);
+        assert!(
+            width <= 18,
+            "line {} exceeds 18 cols (width={}): {:?}",
+            i,
+            width,
+            line_text
+        );
     }
 }

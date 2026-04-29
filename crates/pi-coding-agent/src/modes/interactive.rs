@@ -747,8 +747,7 @@ fn slash_command_suggestions_for(view: &View) -> Vec<String> {
     let Some(query) = token.strip_prefix('/') else {
         return Vec::new();
     };
-    view
-        .slash_registry_names
+    view.slash_registry_names
         .iter()
         .filter(|name| name.starts_with(query))
         .take(5)
@@ -1152,16 +1151,15 @@ pub(crate) fn build_frame(
 
     // Footer (powerline-style: model ▶ cwd ▶ git ▶ usage ▶ ctx).
     let git = view.git_status_cache.get(cwd);
-    let mut footer =
-        view.transcript.footer_powerline(
-            theme,
-            model,
-            cwd,
-            git.as_ref(),
-            view.route_mode,
-            view.context_window,
-            Some(available_color_count()),
-        );
+    let mut footer = view.transcript.footer_powerline(
+        theme,
+        model,
+        cwd,
+        git.as_ref(),
+        view.route_mode,
+        view.context_window,
+        Some(available_color_count()),
+    );
     if view.scoped_models {
         // Highlight that model changes will only apply to the next message.
         footer.spans.push(Span::coloured(
@@ -4006,7 +4004,10 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
             .collect::<Vec<_>>()
             .join("|");
-        assert!(dump.contains("/deploy"), "missing extension command: {dump}");
+        assert!(
+            dump.contains("/deploy"),
+            "missing extension command: {dump}"
+        );
     }
 
     #[test]

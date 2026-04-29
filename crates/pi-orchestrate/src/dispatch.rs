@@ -64,7 +64,10 @@ pub struct AgentSpec {
 /// emit a FAILED state event with a clear cause rather than silently
 /// running with no system prompt.
 pub fn load_agent_spec(repo_root: &Path, name: &str) -> std::io::Result<AgentSpec> {
-    let path = repo_root.join(".pi").join("agents").join(format!("{name}.md"));
+    let path = repo_root
+        .join(".pi")
+        .join("agents")
+        .join(format!("{name}.md"));
     let text = std::fs::read_to_string(&path).map_err(|e| {
         std::io::Error::new(
             e.kind(),
@@ -83,7 +86,9 @@ pub fn load_agent_spec(repo_root: &Path, name: &str) -> std::io::Result<AgentSpe
 /// frontmatter delimiters are missing — caller treats as a failure.
 fn parse_agent_md(text: &str) -> Option<AgentSpec> {
     // The file MUST open with `---\n` and contain a closing `---` line.
-    let rest = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n"))?;
+    let rest = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))?;
     // Find the closing `---` line at the start of a line.
     let close_idx = rest.find("\n---\n").or_else(|| rest.find("\n---\r\n"))?;
     let frontmatter = &rest[..close_idx];

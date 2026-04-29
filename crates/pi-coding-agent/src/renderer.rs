@@ -168,19 +168,25 @@ impl Transcript {
                     for line in md_lines {
                         if first {
                             // Prefix first line with "pi>"
-                            let mut prefixed_spans = vec![
-                                Span::coloured(format!("pi> "), theme.assistant.to_crossterm()),
-                            ];
+                            let mut prefixed_spans = vec![Span::coloured(
+                                format!("pi> "),
+                                theme.assistant.to_crossterm(),
+                            )];
                             prefixed_spans.extend(line.spans);
-                            lines.push(Line { spans: prefixed_spans });
+                            lines.push(Line {
+                                spans: prefixed_spans,
+                            });
                             first = false;
                         } else {
                             // Continuation lines with padding
-                            let mut padded_spans = vec![
-                                Span::coloured("    ".to_string(), theme.assistant.to_crossterm()),
-                            ];
+                            let mut padded_spans = vec![Span::coloured(
+                                "    ".to_string(),
+                                theme.assistant.to_crossterm(),
+                            )];
                             padded_spans.extend(line.spans);
-                            lines.push(Line { spans: padded_spans });
+                            lines.push(Line {
+                                spans: padded_spans,
+                            });
                         }
                     }
                 }
@@ -295,7 +301,10 @@ impl Transcript {
         }
         // Separator before the input area.
         lines.push(Line::default());
-        Frame { lines, cursor_at: None }
+        Frame {
+            lines,
+            cursor_at: None,
+        }
     }
 
     pub fn footer(&self, theme: &Theme, model: &str, cwd: &std::path::Path) -> Line {
@@ -339,7 +348,14 @@ impl Transcript {
         available_colors: Option<u16>,
     ) -> Line {
         if available_colors.unwrap_or_else(crossterm::style::available_color_count) < 256 {
-            return self.footer_powerline_fallback(theme, model, cwd, git, route_mode, context_window);
+            return self.footer_powerline_fallback(
+                theme,
+                model,
+                cwd,
+                git,
+                route_mode,
+                context_window,
+            );
         }
 
         let mut spans: Vec<Span> = vec![Span::plain(" ")];
@@ -357,23 +373,22 @@ impl Transcript {
         let divider_fg = theme.bg.to_crossterm();
 
         let mut segment_index = 0usize;
-        let push_segment = |spans: &mut Vec<Span>, label: String, fg: Color, bg: Color, next_bg: Option<Color>| {
-            spans.push(Span::styled(format!(" {label} "), fg, bg));
-            match next_bg {
-                Some(next) => spans.push(Span::styled("", bg, next)),
-                None => spans.push(Span::styled("", bg, divider_fg)),
-            }
-        };
+        let push_segment =
+            |spans: &mut Vec<Span>, label: String, fg: Color, bg: Color, next_bg: Option<Color>| {
+                spans.push(Span::styled(format!(" {label} "), fg, bg));
+                match next_bg {
+                    Some(next) => spans.push(Span::styled("", bg, next)),
+                    None => spans.push(Span::styled("", bg, divider_fg)),
+                }
+            };
 
         let cwd_display = cwd
             .file_name()
             .and_then(|n| n.to_str())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| compact_cwd(cwd));
-        let mut segments: Vec<(String, Color)> = vec![
-            (model.to_string(), text_fg),
-            (cwd_display, accent_fg),
-        ];
+        let mut segments: Vec<(String, Color)> =
+            vec![(model.to_string(), text_fg), (cwd_display, accent_fg)];
         if let Some(g) = git {
             segments.push((crate::footer::format_git(g), text_fg));
         }
@@ -388,7 +403,9 @@ impl Transcript {
 
         for (idx, (label, fg)) in segments.iter().enumerate() {
             let bg = segment_bgs[segment_index % segment_bgs.len()];
-            let next_bg = segments.get(idx + 1).map(|_| segment_bgs[(segment_index + 1) % segment_bgs.len()]);
+            let next_bg = segments
+                .get(idx + 1)
+                .map(|_| segment_bgs[(segment_index + 1) % segment_bgs.len()]);
             push_segment(&mut spans, label.clone(), *fg, bg, next_bg);
             segment_index += 1;
         }
@@ -422,14 +439,23 @@ impl Transcript {
             spans.push(Span::coloured(crate::footer::format_git(g), muted));
         }
         push_sep(&mut spans);
-        spans.push(Span::coloured(format!("route:{}", route_mode_label(route_mode)), muted));
+        spans.push(Span::coloured(
+            format!("route:{}", route_mode_label(route_mode)),
+            muted,
+        ));
         push_sep(&mut spans);
-        spans.push(Span::coloured(format!("${:.4}", self.usage_total.cost_usd), muted));
+        spans.push(Span::coloured(
+            format!("${:.4}", self.usage_total.cost_usd),
+            muted,
+        ));
         if let Some(cw) = context_window {
             if cw > 0 {
                 let pct = (self.usage_total.input_tokens as f64 / cw as f64) * 100.0;
                 push_sep(&mut spans);
-                spans.push(Span::coloured(format!("ctx:{:.0}%", pct.clamp(0.0, 100.0)), muted));
+                spans.push(Span::coloured(
+                    format!("ctx:{:.0}%", pct.clamp(0.0, 100.0)),
+                    muted,
+                ));
             }
         }
         spans.push(Span::plain(" ".to_string()));
@@ -461,11 +487,31 @@ fn push_welcome_banner(lines: &mut Vec<Line>, theme: &Theme, cols: u16, model_la
     // bottom row is dark patina — like the colour shift on weathered
     // steel.
     let rust_palette: [Color; 5] = [
-        Color::Rgb { r: 0xe8, g: 0x88, b: 0x4d }, // bright copper
-        Color::Rgb { r: 0xd9, g: 0x6b, b: 0x3a }, // amber rust
-        Color::Rgb { r: 0xce, g: 0x42, b: 0x2b }, // Rust language brand
-        Color::Rgb { r: 0xa7, g: 0x36, b: 0x1d }, // oxidised iron
-        Color::Rgb { r: 0x7a, g: 0x28, b: 0x12 }, // dark patina
+        Color::Rgb {
+            r: 0xe8,
+            g: 0x88,
+            b: 0x4d,
+        }, // bright copper
+        Color::Rgb {
+            r: 0xd9,
+            g: 0x6b,
+            b: 0x3a,
+        }, // amber rust
+        Color::Rgb {
+            r: 0xce,
+            g: 0x42,
+            b: 0x2b,
+        }, // Rust language brand
+        Color::Rgb {
+            r: 0xa7,
+            g: 0x36,
+            b: 0x1d,
+        }, // oxidised iron
+        Color::Rgb {
+            r: 0x7a,
+            g: 0x28,
+            b: 0x12,
+        }, // dark patina
     ];
     let logo_width = 14u16; // visible width of each row above
     let pad = ((cols.saturating_sub(logo_width)) / 2) as usize;
@@ -501,11 +547,31 @@ fn push_welcome_banner(lines: &mut Vec<Line>, theme: &Theme, cols: u16, model_la
     // Bright trigger ◆ then muted explanation, separator dots in
     // the dimmest tone.
     let muted = theme.muted.to_crossterm();
-    let dim_dot = Color::Rgb { r: 0x4a, g: 0x4a, b: 0x4a };
-    let slash_c = Color::Rgb { r: 0xce, g: 0x42, b: 0x2b }; // Rust orange
-    let at_c = Color::Rgb { r: 0x6c, g: 0xa0, b: 0xdc };    // user blue
-    let bang_c = Color::Rgb { r: 0xc4, g: 0xa6, b: 0x4d };  // tool yellow
-    let quit_c = Color::Rgb { r: 0x9a, g: 0x4a, b: 0x4a };  // dim red
+    let dim_dot = Color::Rgb {
+        r: 0x4a,
+        g: 0x4a,
+        b: 0x4a,
+    };
+    let slash_c = Color::Rgb {
+        r: 0xce,
+        g: 0x42,
+        b: 0x2b,
+    }; // Rust orange
+    let at_c = Color::Rgb {
+        r: 0x6c,
+        g: 0xa0,
+        b: 0xdc,
+    }; // user blue
+    let bang_c = Color::Rgb {
+        r: 0xc4,
+        g: 0xa6,
+        b: 0x4d,
+    }; // tool yellow
+    let quit_c = Color::Rgb {
+        r: 0x9a,
+        g: 0x4a,
+        b: 0x4a,
+    }; // dim red
     let make_tip = |spans: &mut Vec<Span>| {
         spans.push(Span::coloured("/help".to_string(), slash_c));
         spans.push(Span::coloured(" commands  ".to_string(), muted));
@@ -534,7 +600,11 @@ fn push_welcome_banner(lines: &mut Vec<Line>, theme: &Theme, cols: u16, model_la
                 Span::coloured("connected to ".to_string(), muted),
                 Span::coloured(
                     model_label.to_string(),
-                    Color::Rgb { r: 0xe8, g: 0x88, b: 0x4d },
+                    Color::Rgb {
+                        r: 0xe8,
+                        g: 0x88,
+                        b: 0x4d,
+                    },
                 ),
             ],
         });

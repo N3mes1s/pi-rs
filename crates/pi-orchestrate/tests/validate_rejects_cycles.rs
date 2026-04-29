@@ -47,5 +47,9 @@ fn cycle_error_mentions_involved_milestone() {
     assert!(!cycle_errors.is_empty(), "expected DependencyCycle variant");
     // The cycle involves m1 and m2; the error should mention one of them.
     let mentioned = cycle_errors.iter().any(|id| id == "m1" || id == "m2");
-    assert!(mentioned, "cycle error should mention m1 or m2, got: {:?}", cycle_errors);
+    assert!(
+        mentioned,
+        "cycle error should mention m1 or m2, got: {:?}",
+        cycle_errors
+    );
 }

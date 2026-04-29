@@ -41,11 +41,7 @@ pub fn validate(campaign: &Campaign) -> Result<(), Vec<ValidationError>> {
     }
 
     // Build id → milestone index for subsequent checks.
-    let id_set: HashSet<&str> = campaign
-        .milestones
-        .iter()
-        .map(|m| m.id.as_str())
-        .collect();
+    let id_set: HashSet<&str> = campaign.milestones.iter().map(|m| m.id.as_str()).collect();
 
     // --- (b) every depends_on refers to a defined id ----------------------
     for m in &campaign.milestones {

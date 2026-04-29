@@ -230,15 +230,14 @@ impl AgentSessionRuntime {
         // as such in the transcript.
         let mut messages: Vec<Message> = Vec::new();
         let mut current_tool_results: Vec<ContentBlock> = Vec::new();
-        let flush =
-            |msgs: &mut Vec<Message>, results: &mut Vec<ContentBlock>| {
-                if !results.is_empty() {
-                    msgs.push(Message {
-                        role: Role::User,
-                        content: std::mem::take(results),
-                    });
-                }
-            };
+        let flush = |msgs: &mut Vec<Message>, results: &mut Vec<ContentBlock>| {
+            if !results.is_empty() {
+                msgs.push(Message {
+                    role: Role::User,
+                    content: std::mem::take(results),
+                });
+            }
+        };
         for entry in history {
             match entry.kind {
                 SessionEntryKind::User { message } => {
@@ -442,8 +441,11 @@ struct AgentSessionInner {
 impl AgentSession {
     fn routing_force_override(&self) -> Option<ForceOverride> {
         let settings = &self.cfg.settings;
-        if matches!(settings.route, RouteMode::Static | RouteMode::Auto | RouteMode::Learned)
-            && (settings.route_model_override.is_some() || settings.route_thinking_override.is_some())
+        if matches!(
+            settings.route,
+            RouteMode::Static | RouteMode::Auto | RouteMode::Learned
+        ) && (settings.route_model_override.is_some()
+            || settings.route_thinking_override.is_some())
         {
             Some(ForceOverride::CliFlag {
                 provider: settings.route_provider_override.clone(),
@@ -721,7 +723,15 @@ impl AgentSession {
                 )
             };
             let (provider_name, model_name, thinking) = self
-                .apply_routing(router_mode, force_override, provider_name, model_name, thinking, &messages, &tools)
+                .apply_routing(
+                    router_mode,
+                    force_override,
+                    provider_name,
+                    model_name,
+                    thinking,
+                    &messages,
+                    &tools,
+                )
                 .await?;
 
             let (provider_cfg, model_info) = self
@@ -1148,7 +1158,10 @@ fn extract_message_text(message: &Message) -> String {
     let mut text = String::new();
     for block in &message.content {
         match block {
-            ContentBlock::Text { text: block_text } | ContentBlock::Thinking { text: block_text, .. } => {
+            ContentBlock::Text { text: block_text }
+            | ContentBlock::Thinking {
+                text: block_text, ..
+            } => {
                 if !text.is_empty() {
                     text.push('\n');
                 }

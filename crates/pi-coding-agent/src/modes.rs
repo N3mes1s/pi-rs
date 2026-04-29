@@ -62,9 +62,7 @@ pub(crate) fn build_session(
                     // with a fresh session — that swallowed-error path is
                     // why "pi -r <bad id>" used to succeed-with-no-output
                     // and look identical to "no resume happened".
-                    return Err(anyhow::anyhow!(
-                        "failed to resume session '{id}': {e}"
-                    ));
+                    return Err(anyhow::anyhow!("failed to resume session '{id}': {e}"));
                 }
             }
         }

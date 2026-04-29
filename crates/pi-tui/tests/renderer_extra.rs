@@ -84,8 +84,8 @@ fn second_render_of_same_frame_still_succeeds() {
                 spans: vec![Span::coloured("beta", Color::Magenta)],
             },
         ],
-            cursor_at: None,
-        };
+        cursor_at: None,
+    };
     let w = SharedWriter::default();
     let mut r = DiffRenderer::new(w.clone());
     r.render(&frame).unwrap();
@@ -95,7 +95,10 @@ fn second_render_of_same_frame_still_succeeds() {
     // Ratatui redraws the full frame each render (unlike the old hand-rolled diff renderer).
     // The important contract is that both renders succeed and output the frame.
     // We verify the second render wrote something (may not be smaller, but it succeeds).
-    assert!(after_second_total >= after_first, "second render should have written output");
+    assert!(
+        after_second_total >= after_first,
+        "second render should have written output"
+    );
 }
 
 #[test]
@@ -106,12 +109,12 @@ fn rendering_different_sized_frames_succeeds() {
     let mut r = DiffRenderer::new(w.clone());
     let big = Frame {
         lines: vec![Line::plain("one"), Line::plain("two"), Line::plain("three")],
-            cursor_at: None,
-        };
+        cursor_at: None,
+    };
     let small = Frame {
         lines: vec![Line::plain("one"), Line::plain("two")],
-            cursor_at: None,
-        };
+        cursor_at: None,
+    };
     r.render(&big).unwrap();
     let _mid = w.snapshot().len();
     r.render(&small).unwrap();
@@ -154,8 +157,8 @@ fn resize_changes_width_and_render_still_succeeds() {
     r.resize(40);
     r.render(&Frame {
         lines: vec![Line::plain("xx")],
-            cursor_at: None,
-        })
+        cursor_at: None,
+    })
     .unwrap();
     r.resize(120);
 }

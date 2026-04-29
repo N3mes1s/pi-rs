@@ -53,7 +53,11 @@ pub fn topological_order(campaign: &Campaign) -> Vec<&Milestone> {
             .iter()
             .filter_map(|&v| {
                 in_degree[v] -= 1;
-                if in_degree[v] == 0 { Some(v) } else { None }
+                if in_degree[v] == 0 {
+                    Some(v)
+                } else {
+                    None
+                }
             })
             .collect();
         next.sort_unstable();
@@ -87,11 +91,7 @@ pub fn format_plan(campaign: &Campaign) -> String {
         let reviewer = m.effective_reviewer(&campaign.defaults);
         let flm = m.effective_fix_loop_max(&campaign.defaults);
 
-        out.push_str(&format!(
-            "  {}. [{}]\n",
-            idx + 1,
-            m.id,
-        ));
+        out.push_str(&format!("  {}. [{}]\n", idx + 1, m.id,));
         out.push_str(&format!("     branch      : {}\n", m.branch));
         out.push_str(&format!("     implementer : {}\n", m.implementer));
         out.push_str(&format!("     reviewer    : {}\n", reviewer));

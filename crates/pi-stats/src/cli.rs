@@ -25,7 +25,6 @@ impl StatsVerb {
     }
 }
 
-
 pub struct StatsConfig {
     pub db_path: PathBuf,
     pub sessions_root: PathBuf,
@@ -64,14 +63,16 @@ pub async fn run(verb: StatsVerb, cfg: StatsConfig) -> anyhow::Result<()> {
         StatsVerb::RouteSavings => {
             let mut savings = aggregate::route_savings(&conn)?;
             savings.sort_by(|a, b| a.route_id.cmp(&b.route_id));
-            
+
             // Print table header
-            println!("{:<15} {:<10} {:<12} {:<14} {:<12} {:<10}",
-                "route_id", "turns", "actual_$", "if_sonnet_$", "delta_$", "delta_%");
-            
+            println!(
+                "{:<15} {:<10} {:<12} {:<14} {:<12} {:<10}",
+                "route_id", "turns", "actual_$", "if_sonnet_$", "delta_$", "delta_%"
+            );
+
             let mut total_actual = 0.0_f64;
             let mut total_counterfactual = 0.0_f64;
-            
+
             // Print each route row
             for row in &savings {
                 let delta = row.actual_cost_usd - row.counterfactual_cost_usd;
@@ -80,7 +81,8 @@ pub async fn run(verb: StatsVerb, cfg: StatsConfig) -> anyhow::Result<()> {
                 } else {
                     0.0
                 };
-                println!("{:<15} {:<10} {:<12.4} {:<14.4} {:<12.4} {:<10.1}%",
+                println!(
+                    "{:<15} {:<10} {:<12.4} {:<14.4} {:<12.4} {:<10.1}%",
                     row.route_id,
                     row.turns,
                     row.actual_cost_usd,
@@ -91,7 +93,7 @@ pub async fn run(verb: StatsVerb, cfg: StatsConfig) -> anyhow::Result<()> {
                 total_actual += row.actual_cost_usd;
                 total_counterfactual += row.counterfactual_cost_usd;
             }
-            
+
             // Print total row
             let total_delta = total_actual - total_counterfactual;
             let total_delta_pct = if total_counterfactual > 1e-9 {
@@ -99,13 +101,9 @@ pub async fn run(verb: StatsVerb, cfg: StatsConfig) -> anyhow::Result<()> {
             } else {
                 0.0
             };
-            println!("{:<15} {:<10} {:<12.4} {:<14.4} {:<12.4} {:<10.1}%",
-                "TOTAL",
-                "",
-                total_actual,
-                total_counterfactual,
-                total_delta,
-                total_delta_pct
+            println!(
+                "{:<15} {:<10} {:<12.4} {:<14.4} {:<12.4} {:<10.1}%",
+                "TOTAL", "", total_actual, total_counterfactual, total_delta, total_delta_pct
             );
             Ok(())
         }
