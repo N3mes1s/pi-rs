@@ -11,7 +11,7 @@ fn parse(args: &[&str]) -> Cli {
 #[test]
 fn route_flag_accepts_auto() {
     let cli = parse(&["--route", "auto"]);
-    assert_eq!(cli.route, "auto");
+    assert_eq!(cli.route.as_deref(), Some("auto"));
 }
 
 #[test]
@@ -53,12 +53,12 @@ fn at_files_extracts_at_prefixed_paths() {
 }
 
 #[test]
-fn route_flag_defaults_to_static_and_accepts_off() {
+fn route_flag_defaults_to_none_and_accepts_off() {
     let cli = parse(&[]);
-    assert_eq!(cli.route, "static");
+    assert_eq!(cli.route, None);
 
     let cli = parse(&["--route", "off"]);
-    assert_eq!(cli.route, "off");
+    assert_eq!(cli.route.as_deref(), Some("off"));
 }
 
 #[test]
@@ -105,17 +105,17 @@ fn session_and_session_dir_coexist() {
 fn continue_recent_and_resume_are_independent_booleans() {
     let cli = parse(&["-c"]);
     assert!(cli.continue_recent);
-    assert!(!cli.resume);
+    assert_eq!(cli.resume, None);
 
     let cli = parse(&["-r"]);
-    assert!(cli.resume);
+    assert_eq!(cli.resume, Some(String::new()));
     assert!(!cli.continue_recent);
 
     let cli = parse(&["-c", "-r"]);
     assert!(cli.continue_recent);
-    assert!(cli.resume);
+    assert_eq!(cli.resume, Some(String::new()));
 
     let cli = parse(&[]);
     assert!(!cli.continue_recent);
-    assert!(!cli.resume);
+    assert_eq!(cli.resume, None);
 }

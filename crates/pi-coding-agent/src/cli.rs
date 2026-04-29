@@ -221,9 +221,11 @@ pub struct Cli {
     #[arg(long, action = ArgAction::SetTrue)]
     pub worktree: bool,
 
-    /// Route mode: off, static, auto, learned.
-    #[arg(long = "route", value_parser = clap::builder::PossibleValuesParser::new(["off","static","auto","learned"]), default_value = "static")]
-    pub route: String,
+    /// Route mode override: off, static, auto, learned.
+    /// When omitted, pi keeps the value from settings.json (whose default
+    /// is still `static`).
+    #[arg(long = "route", value_parser = clap::builder::PossibleValuesParser::new(["off","static","auto","learned"]))]
+    pub route: Option<String>,
 
     /// Reconciliation mode for `--worktree`: `branch` (default) or
     /// `patch`.
