@@ -2804,9 +2804,8 @@ mod tests {
     #[test]
     fn shift_tab_returns_cycle_thinking_outcome() {
         let mut v = fresh_view();
-        // The default binding parses as Shift+Tab but is stored against
-        // the `Tab` keycode (not `BackTab`); see parse_chord above.
-        let r = handle_key(&mut v, &ke(KeyCode::Tab, KeyModifiers::SHIFT));
+        // Shift+Tab bindings normalize to BackTab in parse_chord / chord_from_event.
+        let r = handle_key(&mut v, &ke(KeyCode::BackTab, KeyModifiers::NONE));
         assert_eq!(r, KeyOutcome::CycleThinking);
     }
 
