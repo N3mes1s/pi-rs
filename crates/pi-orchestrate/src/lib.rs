@@ -4,10 +4,12 @@
 //! (RFD 0021 M1 slice).
 
 pub mod plan;
+pub mod runner;
 pub mod schema;
 pub mod validate;
 
 pub use plan::{format_plan, topological_order};
+pub use runner::{replay, run, state_path_for, MilestoneOutcome, RunSummary, StateEvent};
 pub use schema::{Campaign, Defaults, Milestone, OverrideRule};
 pub use validate::{validate, ValidationError};
 

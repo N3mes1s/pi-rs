@@ -134,6 +134,44 @@ fn main() -> anyhow::Result<()> {
         print!("{}", pi_orchestrate::format_plan(&campaign));
         return Ok(());
     }
+    if let Some(path) = &cli.orchestrate {
+        let text = std::fs::read_to_string(path)?;
+        let campaign = match pi_orchestrate::parse_campaign(&text) {
+            Ok(c) => c,
+            Err(err) => {
+                eprintln!("error: failed to parse campaign TOML at {}", path.display());
+                eprintln!("  {err}");
+                std::process::exit(2);
+            }
+        };
+        if let Err(errors) = pi_orchestrate::validate(&campaign) {
+            eprintln!(
+                "error: campaign validation failed for {} ({} error(s))",
+                path.display(),
+                errors.len()
+            );
+            for error in errors {
+                eprintln!("  - {error}");
+            }
+            std::process::exit(2);
+        }
+        let state_root = cli.orchestrate_state_root.clone().unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".pi")
+                .join("orchestrate")
+        });
+        let summary = pi_orchestrate::run(&campaign, &state_root)
+            .map_err(|e| anyhow::anyhow!("orchestrate run failed: {e}"))?;
+        println!();
+        println!("=== Run summary ===");
+        println!("Campaign : {}", summary.campaign);
+        println!("State    : {}", summary.state_path.display());
+        for outcome in &summary.outcomes {
+            println!("  - {} → {}", outcome.id, outcome.final_state);
+        }
+        return Ok(());
+    }
     if let Some(verb) = cli.stats.clone() {
         let parsed = pi_stats::cli::StatsVerb::parse(&verb)?;
         let cfg = pi_stats::cli::StatsConfig {

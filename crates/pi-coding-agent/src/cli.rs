@@ -239,6 +239,19 @@ pub struct Cli {
     /// Zero side effects. Exit 0 on success, exit 2 on validation errors.
     #[arg(long = "orchestrate-dry-run", value_name = "PATH")]
     pub orchestrate_dry_run: Option<PathBuf>,
+
+    /// Run a campaign TOML: walk milestones in topo order, emit
+    /// transitions to `<state-root>/<campaign>/state.jsonl`.
+    /// v0 stub-dispatches each milestone (no real implementer/reviewer
+    /// pi spawned yet — that's v1). Exit 0 on success, 2 on
+    /// validation/IO errors.
+    #[arg(long = "orchestrate", value_name = "PATH")]
+    pub orchestrate: Option<PathBuf>,
+
+    /// Override the state root directory for `--orchestrate`.
+    /// Defaults to `~/.pi/orchestrate/`.
+    #[arg(long = "orchestrate-state-root", value_name = "PATH")]
+    pub orchestrate_state_root: Option<PathBuf>,
 }
 
 impl Cli {
