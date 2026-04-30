@@ -55,6 +55,16 @@ use std::time::Instant;
 pub struct AgentSpec {
     pub model: Option<String>,
     pub thinking: Option<String>,
+    /// Optional `--route` flag value: `static` / `auto` / `learned`.
+    /// When set, the orchestrator passes `--route <value>` to the
+    /// spawned pi subprocess so the embedding router (or learned
+    /// router) picks the (provider, model, thinking) tuple based on
+    /// the prompt instead of pinning to the agent's `model:` field.
+    /// Mutually exclusive with `model:` in spirit (the spawned pi
+    /// will resolve model via the route table when --route auto is
+    /// in effect), but we still pass `-m` if both are set so the
+    /// operator can pin a fallback.
+    pub route: Option<String>,
     pub system_prompt: String,
 }
 
@@ -104,6 +114,7 @@ fn parse_agent_md(text: &str) -> Option<AgentSpec> {
     let mut spec = AgentSpec {
         model: None,
         thinking: None,
+        route: None,
         system_prompt: body.trim_start_matches('\n').to_string(),
     };
     // Single-pass YAML-lite parse: only pull out top-level
@@ -121,6 +132,7 @@ fn parse_agent_md(text: &str) -> Option<AgentSpec> {
         match key.trim() {
             "model" => spec.model = Some(value.to_string()),
             "thinking" => spec.thinking = Some(value.to_string()),
+            "route" => spec.route = Some(value.to_string()),
             _ => {}
         }
     }
@@ -255,6 +267,16 @@ impl Dispatch for RealDispatch {
         }
         if let Some(thinking) = &agent.thinking {
             cmd.arg("--thinking").arg(thinking);
+        }
+        // Optional `route:` field on the agent flips the spawned
+        // pi into the embedding router (or learned router) instead
+        // of pinning a concrete model. Lets a single subagent
+        // delegate model selection to the route table — useful when
+        // the operator wants the orchestrator's implementer to fan
+        // out to fast/default/hard fireworks/anthropic/etc tuples
+        // configured in `<repo>/.pi/router/router.toml`.
+        if let Some(route) = &agent.route {
+            cmd.arg("--route").arg(route);
         }
 
         let mut child = cmd.spawn()?;
