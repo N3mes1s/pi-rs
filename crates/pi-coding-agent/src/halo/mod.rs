@@ -7,17 +7,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 
-// ── Bundled-agent bootstrap ───────────────────────────────────────────────────
-
 use include_dir::{include_dir, Dir};
 
-// Bundle the agents directory into the binary via `include_dir!` as required
-// by the RFD. The macro expands to a `Dir` which we can query for files.
 static AGENTS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/agents");
 
-/// Write bundled agent files to `<repo>/.pi/agents/` if they don't exist yet.
-/// Uses `include_dir!` to find all files embedded in the `agents/` directory.
-/// Operator-managed files are left untouched.
+/// Write bundled agents to `<repo>/.pi/agents/` (skip-if-exists).
 pub fn bootstrap_bundled_agents(repo_root: &Path) -> Result<Vec<PathBuf>> {
     let dir = repo_root.join(".pi").join("agents");
     std::fs::create_dir_all(&dir)?;
@@ -33,8 +27,6 @@ pub fn bootstrap_bundled_agents(repo_root: &Path) -> Result<Vec<PathBuf>> {
     }
     Ok(written)
 }
-
-// ── JSONL parsing helpers ─────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize, Default, Clone)]
 #[serde(default)]
@@ -71,20 +63,15 @@ fn parse_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
         .collect()
 }
 
-// ── Status snapshot ───────────────────────────────────────────────────────────
-
 /// Full status snapshot that mirrors the §Status surface in RFD 0025.
 #[derive(Debug, Default, serde::Serialize)]
 pub struct HaloStatusSnapshot {
     pub repo: String,
     pub halo_dir: String,
-    /// Canonical state string: e.g. "SUPERVISOR_NOT_RUNNING", "RUNNING",
-    /// "CYCLE_47 (step: STEP_ORCHESTRATE)", "PAUSED", etc.
     pub state: String,
     pub name: String,
     pub last_cycle: Option<u64>,
     pub last_cycle_outcome: Option<String>,
-    /// Last step in an active cycle.
     pub active_step: Option<String>,
     pub backlog_pending:    u32,
     pub backlog_dispatched: u32,
@@ -95,19 +82,12 @@ pub struct HaloStatusSnapshot {
     pub failed_streak:   u32,
     pub paused:  bool,
     pub pid: Option<String>,
-    /// Commit-rate (merged commits) in the trailing 60m window.
     pub commit_rate_60m: u32,
-    /// Commit-rate cap (from halo.toml guardrails).
     pub commits_per_hour_cap: u32,
-    /// Cycles executed since UTC midnight.
     pub cycles_today: u32,
-    /// Cycles-per-day cap from config.
     pub cycles_per_day_cap: u32,
-    /// Daily budget cap from config.
     pub daily_budget_cap_usd: f64,
-    /// Failed-build streak cap from config.
     pub failed_build_streak_cap: u32,
-    /// Last N (up to 5) completed cycles: (cycle_n, outcome, cost, ts, title).
     pub last_cycles: Vec<CycleSummary>,
 }
 
@@ -143,10 +123,8 @@ fn today_spend(rows: &[UsageRow]) -> f64 {
     total
 }
 
-/// Reconstruct failed-build streak from STREAK_* meta events.
 fn replay_streak(events: &[StateEvent]) -> u32 {
     let mut streak = 0u32;
-    // Find the last STREAK_RESET, then count STREAK_INCREMENTED after it.
     let reset_pos = events.iter().enumerate().rev()
         .find(|(_, e)| e.kind == "meta" && e.meta.as_deref() == Some("STREAK_RESET"))
         .map(|(i, _)| i)
@@ -163,7 +141,6 @@ fn replay_streak(events: &[StateEvent]) -> u32 {
     streak
 }
 
-/// Build last-5-cycles list from state events.
 fn last_five_cycles(events: &[StateEvent]) -> Vec<CycleSummary> {
     let mut cycles: Vec<CycleSummary> = Vec::new();
     for e in events {
@@ -186,13 +163,11 @@ fn last_five_cycles(events: &[StateEvent]) -> Vec<CycleSummary> {
             }
         }
     }
-    // Return last 5, newest first.
     cycles.reverse();
     cycles.truncate(5);
     cycles
 }
 
-/// Attempt to load `halo.toml` from `<cwd>/.pi/halo.toml` or the path provided.
 fn try_load_config(cwd: &Path, override_path: Option<&Path>) -> Option<config::Config> {
     let path = if let Some(p) = override_path {
         p.to_path_buf()
@@ -203,7 +178,6 @@ fn try_load_config(cwd: &Path, override_path: Option<&Path>) -> Option<config::C
         .and_then(|s| config::parse(&s).ok())
 }
 
-/// Count how many CYCLE_DONE events landed since UTC midnight.
 fn cycles_today(events: &[StateEvent]) -> u32 {
     let midnight = Utc::now().date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
     events.iter().filter(|e| {
@@ -213,8 +187,6 @@ fn cycles_today(events: &[StateEvent]) -> u32 {
     }).count() as u32
 }
 
-/// Count merged commits on the configured target_branch in the trailing 60m window.
-/// This is a best-effort count derived from CYCLE_DONE { outcome:"applied" } events.
 fn commit_rate_60m(events: &[StateEvent]) -> u32 {
     let cutoff = Utc::now() - chrono::Duration::minutes(60);
     events.iter().filter(|e| {
@@ -228,8 +200,7 @@ fn commit_rate_60m(events: &[StateEvent]) -> u32 {
     }).count() as u32
 }
 
-/// Build a snapshot from the three halo log files for the repo containing `cwd`.
-/// Optionally takes a config override path for `--halo-config`.
+/// Build a snapshot from `~/.pi/halo/<repo>/{state,backlog,usage}.jsonl` + `paused`/`pid`.
 pub fn snapshot_with_config(cwd: &Path, config_path: Option<&Path>) -> Result<HaloStatusSnapshot> {
     let repo = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf())
         .display().to_string();
@@ -250,7 +221,6 @@ pub fn snapshot_with_config(cwd: &Path, config_path: Option<&Path>) -> Result<Ha
         .and_then(|s| s.lines().next().map(str::to_string))
         .filter(|s| !s.is_empty());
 
-    // Try to load halo.toml for config values.
     let cfg = try_load_config(cwd, config_path);
     let (name, daily_budget_cap_usd, commits_per_hour_cap, cycles_per_day_cap,
          failed_build_streak_max) = cfg.as_ref().map_or(
@@ -262,14 +232,9 @@ pub fn snapshot_with_config(cwd: &Path, config_path: Option<&Path>) -> Result<Ha
              c.guardrails.failed_build_streak_max)
     );
 
-    // Derive state string and cycle info from events + flag files.
     let (state, last_cycle, last_cycle_outcome, active_step) =
         derive_state(&state_events, paused, &pid_p);
 
-    // failed_build_streak_max pulled from config earlier
-    let failed_build_streak_max = cfg.as_ref().map(|c| c.guardrails.failed_build_streak_max).unwrap_or(2u32);
-
-    // Backlog counts.
     let mut proposal_status: std::collections::HashMap<String, String> = Default::default();
     for ev in &backlog_events {
         let Some(id) = &ev.id else { continue };
@@ -328,7 +293,6 @@ pub fn snapshot_with_config(cwd: &Path, config_path: Option<&Path>) -> Result<Ha
     })
 }
 
-/// Build a snapshot from the three halo log files for the repo containing `cwd`.
 pub fn snapshot(cwd: &Path) -> Result<HaloStatusSnapshot> {
     snapshot_with_config(cwd, None)
 }
@@ -395,40 +359,32 @@ fn derive_state(
 
 /// Render a status snapshot in the §Status surface layout from RFD 0025.
 pub fn render_snapshot_human(s: &HaloStatusSnapshot) {
-    // Header: "halo  <name>  cycle <n>"
     let header_name = if s.name.is_empty() { s.repo.as_str() } else { s.name.as_str() };
     if let Some(c) = s.last_cycle {
         println!("halo  {}  cycle {c}", header_name);
     } else {
         println!("halo  {}", header_name);
     }
-    // State line includes active campaign/milestone when running
     if let (Some(c), Some(step)) = (s.last_cycle, &s.active_step) {
         println!("state: {}  (campaign halo-cycle-{c}, step: {})", s.state, step);
     } else {
         println!("state: {}", s.state);
     }
-    // Spend / cycles-today line (uses config values from snapshot)
     println!(
         "spend today: ${:.2} / ${:.2}       cycles today: {} / {}",
         s.spend_today_usd, s.daily_budget_cap_usd,
         s.cycles_today, s.cycles_per_day_cap
     );
-    // Commit-rate line (derived from applied CYCLE_DONE events in last 60m)
     println!("commit-rate (60m): {} / {}", s.commit_rate_60m, s.commits_per_hour_cap);
-    // Failed-build streak
     println!(
         "failed-build streak: {} / {}",
-        s.failed_streak, /* max cap from config or default 2 */
-        if s.failed_streak > 0 { s.failed_streak.max(2) } else { 2 }
+        s.failed_streak, s.failed_build_streak_cap,
     );
-    // Backlog summary
     println!(
         "backlog: {} pending, {} dispatched, {} merged, {} failed, {} dropped",
         s.backlog_pending, s.backlog_dispatched, s.backlog_merged,
         s.backlog_failed,  s.backlog_dropped
     );
-    // Last 5 cycles table
     if !s.last_cycles.is_empty() {
         println!("last {} cycle(s):", s.last_cycles.len());
         for c in &s.last_cycles {
@@ -446,21 +402,12 @@ pub fn render_snapshot_human(s: &HaloStatusSnapshot) {
     }
 }
 
-/// Thin wrapper that returns a single-line state string (used by tests).
 pub fn render_status(repo_root: &Path) -> Result<String> {
     let snap = snapshot(repo_root)?;
     Ok(format!("state: {}", snap.state))
 }
 
-// ── Halo-owned-clone precondition validator ───────────────────────────────────
-
 /// Verify halo-owned-clone preconditions (RFD 0025 §Halo-owned clone precondition).
-///
-/// Returns `Ok(())` iff:
-/// 1. `clone.expected_root` is set and the repo path matches the glob.
-/// 2. `git status --porcelain` is empty (clean working tree).
-/// 3. Local `target_branch` exists (`git rev-parse --verify`).
-/// 4. `<repo_root>/AGENTS.md` exists.
 pub fn check_halo_clone_preconditions(repo_root: &Path, cfg: &config::Config) -> Result<()> {
     let expected = cfg.clone_config.expected_root.as_ref()
         .ok_or_else(|| anyhow!("clone.expected_root not set"))?;

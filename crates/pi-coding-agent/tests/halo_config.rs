@@ -475,3 +475,53 @@ fn clone_precondition_rejects_non_matching_path() {
         err
     );
 }
+
+#[test]
+fn clone_precondition_rejects_dirty_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    let path_s = path.to_string_lossy().to_string();
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "halo-test@example.com"][..],
+        &["config", "user.name", "halo-test"][..],
+        &["config", "commit.gpgsign", "false"][..],
+        &["commit", "--allow-empty", "-m", "init", "-q"][..],
+    ] {
+        let st = std::process::Command::new("git").arg("-C").arg(&path_s).args(args).status().unwrap();
+        assert!(st.success(), "git {args:?} failed");
+    }
+    let agents = path.join("AGENTS.md");
+    std::fs::write(&agents, "# AGENTS\n").unwrap();
+    let dirty = path.join("dirty.txt");
+    std::fs::write(&dirty, "untracked\n").unwrap();
+    let cfg = config::Config {
+        name: "test".into(),
+        target_branch: "main".into(),
+        clone_config: config::CloneConfig { expected_root: Some(format!("{path_s}*")) },
+        guardrails: Default::default(),
+        supervisor: Default::default(),
+        smoke: Default::default(),
+        proposer: Default::default(),
+        cycle: Default::default(),
+        orchestrate: Default::default(),
+    };
+    let err = pi_coding_agent::halo::check_halo_clone_preconditions(path, &cfg).unwrap_err();
+    assert!(
+        err.to_string().contains("not clean"),
+        "expected dirty-tree error, got: {err}"
+    );
+}
+
+#[test]
+fn run_halo_status_cli_produces_json_when_state_empty() {
+    use std::sync::Mutex;
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
+    let _g = CWD_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let prev = std::env::current_dir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+    let result = pi_coding_agent::cmd::run_halo_status(false, true, None);
+    std::env::set_current_dir(prev).unwrap();
+    assert!(result.is_ok(), "run_halo_status failed: {:?}", result.err());
+}

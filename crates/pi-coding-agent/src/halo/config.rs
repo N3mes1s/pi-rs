@@ -5,8 +5,6 @@
 use serde::{Deserialize, Serialize};
 use anyhow::Result;
 
-// ── Top-level ────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -31,20 +29,15 @@ pub struct Config {
 
 fn default_target_branch() -> String { "halo/auto-merge".into() }
 
-// ── [clone] ──────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CloneConfig {
     pub expected_root: Option<String>,
 }
 
-// ── [guardrails] ─────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Guardrails {
-    /// v0.27: renamed from daily_cost_cap_usd.
     #[serde(default = "d_daily_budget")]
     pub daily_spend_budget_usd: f64,
     #[serde(default = "d_commits_per_hour")]
@@ -78,8 +71,6 @@ impl Default for Guardrails {
     }
 }
 
-// ── [supervisor] ─────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Supervisor {
@@ -92,8 +83,6 @@ fn d_grace_secs() -> u64 { 30 }
 impl Default for Supervisor {
     fn default() -> Self { Self { interrupt_grace_seconds: d_grace_secs() } }
 }
-
-// ── [smoke] ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,8 +103,6 @@ impl Default for Smoke {
         Self { cmd: d_smoke_cmd(), timeout_seconds: d_smoke_timeout() }
     }
 }
-
-// ── [proposer] ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -167,8 +154,6 @@ impl Default for Proposer {
     }
 }
 
-// ── [cycle] ──────────────────────────────────────────────────────────────────
-
 /// Canonical eight-step list, in required order.
 pub const CANONICAL_STEPS: &[&str] = &[
     "pick_proposal", "synthesise_campaign", "prep_branch", "orchestrate",
@@ -191,8 +176,6 @@ impl Default for Cycle {
     fn default() -> Self { Self { steps: d_steps(), keep_branches: d_keep_branches() } }
 }
 
-// ── [orchestrate] ─────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Orchestrate {
@@ -200,7 +183,6 @@ pub struct Orchestrate {
     pub auto_approve: String,
     #[serde(default = "d_reviewer_agent")]
     pub reviewer_agent: String,
-    /// v0.27: renamed from per_cycle_cost_cap_usd.
     #[serde(default = "d_per_cycle_threshold")]
     pub per_cycle_overspend_threshold_usd: f64,
     #[serde(default = "d_budget_per_min")]
@@ -222,8 +204,6 @@ impl Default for Orchestrate {
         }
     }
 }
-
-// ── Parse + Validate ──────────────────────────────────────────────────────────
 
 /// Parse a TOML string into a [`Config`].
 pub fn parse(toml_str: &str) -> Result<Config> {
