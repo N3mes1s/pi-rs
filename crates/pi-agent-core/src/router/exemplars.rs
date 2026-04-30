@@ -10,8 +10,39 @@
 //! bundled defaults: blank/`#` lines ignored, `-line` subtracts a
 //! bundled exemplar, anything else appends (deduped). Override-merge
 //! semantics are pinned by `tests/router_overrides.rs`.
+//!
+//! ## Route destination overrides via `router.toml`
+//!
+//! In addition to per-route exemplar files, the override directory
+//! may contain a `router.toml` that overrides the (provider, model,
+//! thinking) tuple bound to each route id. Schema:
+//!
+//! ```toml
+//! [routes.fast]
+//! provider = "fireworks"
+//! model    = "accounts/fireworks/models/glm-5p1-instruct"
+//! thinking = "off"
+//!
+//! [routes.default]
+//! provider = "fireworks"
+//! model    = "accounts/fireworks/models/kimi-2p6"
+//! thinking = "medium"
+//!
+//! [routes.hard]
+//! provider = "fireworks"
+//! model    = "accounts/fireworks/models/deepseek-v4-pro"
+//! thinking = "high"
+//! ```
+//!
+//! Each route block is fully optional: any field that is absent
+//! falls through to the bundled default. Adding a route id that
+//! isn't in the bundled set creates a new route — the embedding
+//! router will simply have no exemplars for it (cosine score 0)
+//! unless a `<id>.txt` exemplar file lands in the same directory.
 
 use crate::router::RouteEntry;
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Bundled route example text files — included at compile time so the binary
@@ -141,28 +172,220 @@ fn materialise_bundled_routes(dir: &Path) {
     }
 }
 
+/// Per-route destination override loaded from `router.toml`. Every
+/// field is optional — an absent field falls back to the bundled
+/// default for that route id.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouteOverride {
+    provider: Option<String>,
+    model: Option<String>,
+    thinking: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoutesToml {
+    #[serde(default)]
+    routes: HashMap<String, RouteOverride>,
+}
+
+/// Parse a `router.toml` body. Returns an empty map if the input is
+/// empty or malformed (caller decides whether to surface the error).
+fn parse_routes_toml(text: &str) -> Result<HashMap<String, RouteOverride>, toml::de::Error> {
+    let parsed: RoutesToml = toml::from_str(text)?;
+    Ok(parsed.routes)
+}
+
 /// Load routes from an override directory, merging with the bundled defaults.
 /// Files that don't exist are silently skipped (falls through to bundled only).
-/// The merge is additive: user lines extend the bundled set.  A `-line` prefix
-/// subtracts the matching example from the bundled set (same convention as
-/// `pi --policy` deny-regex).
+///
+/// Two override mechanisms layer on top of `default_routes()`:
+///
+///   1. **Exemplar text files** at `<dir>/{<route-id>}.txt`. The merge
+///      is additive: user lines extend the bundled set; a `-line`
+///      prefix subtracts a matching bundled exemplar.
+///   2. **Destination overrides** at `<dir>/router.toml`. Each
+///      `[routes.<id>]` table can override `provider` / `model` /
+///      `thinking` for that route. Unknown route ids create new
+///      routes (with empty exemplar lists unless a matching `.txt`
+///      file exists alongside).
 pub(super) fn load_routes_from_dir(dir: &Path) -> Vec<RouteEntry> {
-    default_routes()
+    // 1. Load destination overrides first so we know whether new
+    //    route ids exist.
+    let overrides: HashMap<String, RouteOverride> = std::fs::read_to_string(dir.join("router.toml"))
+        .ok()
+        .and_then(|text| parse_routes_toml(&text).ok())
+        .unwrap_or_default();
+
+    // 2. Start with the bundled set, extended by any new route ids
+    //    introduced by router.toml that aren't in default_routes().
+    let mut routes = default_routes();
+    let bundled_ids: std::collections::HashSet<String> =
+        routes.iter().map(|r| r.id.clone()).collect();
+    for new_id in overrides.keys() {
+        if !bundled_ids.contains(new_id) {
+            routes.push(RouteEntry {
+                id: new_id.clone(),
+                examples: Vec::new(),
+                threshold: 0.0,
+                provider: String::new(),
+                model: String::new(),
+                thinking: "off".into(),
+            });
+        }
+    }
+
+    // 3. For each route, layer exemplar overrides + destination
+    //    overrides.
+    routes
         .into_iter()
         .map(|mut route| {
+            // Exemplar text file (existing behaviour).
             let file = dir.join(format!("{}.txt", route.id));
             if let Ok(text) = std::fs::read_to_string(&file) {
                 let (additions, subtractions) = parse_route_file(&text);
-                // Remove subtracted examples.
                 route.examples.retain(|e| !subtractions.contains(e));
-                // Append new examples (avoid exact duplicates).
                 for add in additions {
                     if !route.examples.contains(&add) {
                         route.examples.push(add);
                     }
                 }
             }
+            // Destination overrides (new behaviour).
+            if let Some(o) = overrides.get(&route.id) {
+                if let Some(p) = &o.provider {
+                    route.provider = p.clone();
+                }
+                if let Some(m) = &o.model {
+                    route.model = m.clone();
+                }
+                if let Some(t) = &o.thinking {
+                    route.thinking = t.clone();
+                }
+            }
             route
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_routes_toml_full_override() {
+        let text = r#"
+[routes.fast]
+provider = "fireworks"
+model = "accounts/fireworks/models/glm-5p1"
+thinking = "off"
+
+[routes.default]
+provider = "fireworks"
+model = "accounts/fireworks/models/kimi-2p6"
+thinking = "medium"
+
+[routes.hard]
+provider = "fireworks"
+model = "accounts/fireworks/models/deepseek-v4-pro"
+thinking = "high"
+"#;
+        let map = parse_routes_toml(text).unwrap();
+        assert_eq!(map.len(), 3);
+        let fast = &map["fast"];
+        assert_eq!(fast.provider.as_deref(), Some("fireworks"));
+        assert_eq!(fast.model.as_deref(), Some("accounts/fireworks/models/glm-5p1"));
+        assert_eq!(fast.thinking.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn parse_routes_toml_partial_override_keeps_unset_fields_none() {
+        let text = r#"
+[routes.fast]
+model = "fireworks/glm-5p1"
+"#;
+        let map = parse_routes_toml(text).unwrap();
+        let fast = &map["fast"];
+        assert!(fast.provider.is_none());
+        assert!(fast.thinking.is_none());
+        assert_eq!(fast.model.as_deref(), Some("fireworks/glm-5p1"));
+    }
+
+    #[test]
+    fn parse_routes_toml_unknown_field_rejected() {
+        let text = r#"
+[routes.fast]
+provider = "fireworks"
+unknown_field = "ignored"
+"#;
+        // `deny_unknown_fields` makes typos loud rather than silent.
+        assert!(parse_routes_toml(text).is_err());
+    }
+
+    #[test]
+    fn parse_routes_toml_empty_string_returns_empty_map() {
+        assert_eq!(parse_routes_toml("").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn load_routes_from_dir_router_toml_overrides_bundled_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("router.toml"),
+            r#"
+[routes.hard]
+provider = "fireworks"
+model = "accounts/fireworks/models/deepseek-v4-pro"
+thinking = "high"
+"#,
+        )
+        .unwrap();
+        let routes = load_routes_from_dir(dir.path());
+        let hard = routes.iter().find(|r| r.id == "hard").unwrap();
+        assert_eq!(hard.provider, "fireworks");
+        assert_eq!(hard.model, "accounts/fireworks/models/deepseek-v4-pro");
+        assert_eq!(hard.thinking, "high");
+        // Other routes still hold their bundled destinations.
+        let fast = routes.iter().find(|r| r.id == "fast").unwrap();
+        assert_eq!(fast.provider, "anthropic");
+    }
+
+    #[test]
+    fn load_routes_from_dir_router_toml_can_introduce_new_route_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("router.toml"),
+            r#"
+[routes.thinking-heavy]
+provider = "anthropic"
+model = "claude-opus-4-7"
+thinking = "high"
+"#,
+        )
+        .unwrap();
+        let routes = load_routes_from_dir(dir.path());
+        let new_route = routes.iter().find(|r| r.id == "thinking-heavy").unwrap();
+        assert_eq!(new_route.provider, "anthropic");
+        assert!(new_route.examples.is_empty());
+    }
+
+    #[test]
+    fn load_routes_from_dir_partial_override_falls_back_to_bundled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("router.toml"),
+            r#"
+[routes.fast]
+model = "accounts/fireworks/models/glm-5p1"
+"#,
+        )
+        .unwrap();
+        let routes = load_routes_from_dir(dir.path());
+        let fast = routes.iter().find(|r| r.id == "fast").unwrap();
+        // model overridden, provider+thinking inherited from bundled.
+        assert_eq!(fast.model, "accounts/fireworks/models/glm-5p1");
+        assert_eq!(fast.provider, "anthropic");
+        assert_eq!(fast.thinking, "off");
+    }
 }
