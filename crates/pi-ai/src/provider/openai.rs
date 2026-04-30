@@ -29,7 +29,7 @@ impl OpenAiProvider {
         Self {
             config,
             auth,
-            client: Client::new(),
+            client: crate::http::streaming_client_or_default(),
         }
     }
 

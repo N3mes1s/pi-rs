@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod cost;
 pub mod discover;
+pub mod http;
 pub mod message;
 pub mod oauth;
 pub mod provider;

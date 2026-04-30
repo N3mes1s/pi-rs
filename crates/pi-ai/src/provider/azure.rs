@@ -32,7 +32,7 @@ impl AzureOpenAiProvider {
         Self {
             config,
             auth,
-            client: Client::new(),
+            client: crate::http::streaming_client_or_default(),
             api_version: "2024-10-21".to_string(),
         }
     }

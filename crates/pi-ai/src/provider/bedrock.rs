@@ -37,7 +37,7 @@ impl BedrockAnthropicProvider {
         Self {
             config,
             auth,
-            client: Client::new(),
+            client: crate::http::streaming_client_or_default(),
             region,
         }
     }
