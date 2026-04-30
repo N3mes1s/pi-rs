@@ -61,6 +61,7 @@ unicode-segmentation = "1"
 serde_yaml = "0.9"
 tiktoken-rs = "0.5"
 toml = "0.8"
+include_dir = "0.7"
 textwrap = "0.16"
 pulldown-cmark = "0.9"
 syntect = { version = "5", features = ["parsing"] }

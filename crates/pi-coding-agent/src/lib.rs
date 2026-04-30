@@ -45,6 +45,8 @@ pub mod skills;
 pub mod slash;
 pub mod slash_cost;
 pub mod startup;
+
+pub mod halo;
 pub mod telemetry;
 pub mod themes;
 

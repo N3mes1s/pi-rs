@@ -714,3 +714,48 @@ fn print_policy(path: &std::path::Path, policy: &crate::auto_approve::Policy) {
         }
     }
 }
+
+// -- halo (RFD 0025 M1) -----------------------------------------------------
+
+/// `pi --halo-bootstrap-agents` — write bundled halo agents to
+/// `<cwd>/.pi/agents/` if they don't already exist. Exit 0.
+pub fn run_halo_bootstrap_agents() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let written = crate::halo::bootstrap_bundled_agents(&cwd)?;
+    if written.is_empty() {
+        println!("halo: no agent files written (all already present)");
+    } else {
+        println!("halo: bootstrapped {} agent file(s):", written.len());
+        for p in &written {
+            println!("  {}", p.display());
+        }
+    }
+    Ok(())
+}
+
+/// `pi --halo-status` — read-only snapshot of halo supervisor state for the
+/// repo containing the cwd.
+pub fn run_halo_status(watch: bool, json: bool, config_path: Option<&std::path::Path>) -> anyhow::Result<()> {
+    use std::time::Duration;
+    loop {
+        let cwd = std::env::current_dir()?;
+        let snap = crate::halo::snapshot_with_config(&cwd, config_path)?;
+        if json {
+            println!("{}", serde_json::to_string(&snap)?);
+        } else {
+            crate::halo::render_snapshot_human(&snap);
+        }
+        if !watch {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_secs(5));
+        if !json {
+            // crude clear so successive renders don't pile up
+            println!("\x1b[2J\x1b[H");
+        }
+    }
+}
+
+// (legacy halo status snapshot helpers removed in M1 v2 — replaced by
+//  `crate::halo::snapshot_with_config` + `crate::halo::render_snapshot_human`.)
+

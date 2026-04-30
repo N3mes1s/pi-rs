@@ -254,6 +254,31 @@ pub struct Cli {
     /// Defaults to `~/.pi/orchestrate/`.
     #[arg(long = "orchestrate-state-root", value_name = "PATH")]
     pub orchestrate_state_root: Option<PathBuf>,
+
+    // ---- halo flags (RFD 0025 M1) ----
+
+    /// Read-only snapshot of halo supervisor state. Exit 0. Use with
+    /// --watch or --json.
+    #[arg(long = "halo-status", action = ArgAction::SetTrue)]
+    pub halo_status: bool,
+
+    /// Config path for --halo-status (default <repo>/.pi/halo.toml).
+    #[arg(long = "halo-config", value_name = "PATH")]
+    pub halo_config: Option<PathBuf>,
+
+    /// With --halo-status: re-render every 5s (like `top`).
+    #[arg(long = "watch", action = ArgAction::SetTrue)]
+    pub watch: bool,
+
+    /// Write bundled halo agent files (halo-proposer.md, halo-implementer.md,
+    /// code-reviewer.md) to <repo>/.pi/agents/ if they don't already exist,
+    /// then exit. Tests the M1 bundled-agent bootstrap.
+    #[arg(long = "halo-bootstrap-agents", action = ArgAction::SetTrue)]
+    pub halo_bootstrap_agents: bool,
+
+    /// Allow target_branch = "main" (normally refused by halo validator).
+    #[arg(long = "halo-allow-main", action = ArgAction::SetTrue)]
+    pub halo_allow_main: bool,
 }
 
 impl Cli {

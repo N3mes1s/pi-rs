@@ -110,6 +110,13 @@ fn main() -> anyhow::Result<()> {
     if let Some(spec) = &cli.policy {
         return cmd::run_policy(spec);
     }
+    // ---- halo fast paths (RFD 0025 M1) ----
+    if cli.halo_bootstrap_agents {
+        return cmd::run_halo_bootstrap_agents();
+    }
+    if cli.halo_status {
+        return cmd::run_halo_status(cli.watch, cli.json, cli.halo_config.as_deref());
+    }
     if let Some(path) = &cli.orchestrate_dry_run {
         let text = std::fs::read_to_string(path)?;
         let campaign = match pi_orchestrate::parse_campaign(&text) {
