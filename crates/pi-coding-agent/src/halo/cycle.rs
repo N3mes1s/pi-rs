@@ -1061,19 +1061,141 @@ fn step_rollback_if_regress(ctx: &mut CycleCtx) -> StepResult {
 }
 
 fn step_evolve_tick(ctx: &mut CycleCtx) -> StepResult {
-    // M2: evolve tick stub.
-    // TODO(M3): replace with direct `crate::evolve::run_tick(...)` call.
-    // The full evolve integration requires async context and orchestrated
-    // subprocess management. For M2 we emit the step event and proceed.
-    state::append_step(
-        &ctx.state_jsonl,
-        ctx.cycle,
-        "evolve_tick",
-        "STEP_EVOLVE_TICK_DONE",
-        json!({"skipped_reason": "m2_stub"}),
-    )
-    .ok();
+    // v0.27 fix (canary bug #11): wire the real evolve::run_tick.
+    // Halo's supervisor loop is sync; run_tick is async + needs a
+    // tokio runtime + a Replay backend. Build the inputs the same
+    // way `run_internal_evolve_tick` does, block_on the call, log
+    // outcome to state.jsonl. On `applied`, follow up with the
+    // RFD §evolve_tick git-commit dance: `git add AGENTS.md &&
+    // git commit -m "..." -m "Halo-Evolve: ..."`.
+    use crate::context::{agent_dir, auth_path, sessions_dir, settings_paths};
+    use crate::evolve::{run_tick, SubprocessReplay, TickInputs, TickReport};
+    use pi_agent_core::Settings;
+    use pi_ai::{AuthStorage, ModelRegistry};
+    use std::time::Duration;
+
+    let cwd = ctx.repo_root.to_path_buf();
+
+    // Load settings (global + project).
+    let (global, project) = settings_paths();
+    let mut settings = Settings::load(&global);
+    settings.merge_project(&project);
+
+    // Auth: file then env.
+    let auth = AuthStorage::open(auth_path()).unwrap_or_else(|_| AuthStorage::in_memory());
+    let env = AuthStorage::from_env();
+    for (p, _) in AuthStorage::ENV_KEYS {
+        if let Some(m) = env.get(p) {
+            auth.set(p, m);
+        }
+    }
+    let registry = ModelRegistry::new(auth.clone());
+    let agents_md_path = locate_agents_md_for_evolve(&cwd, &agent_dir());
+    let pi_binary = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("pi"));
+    let replay = SubprocessReplay {
+        pi_binary,
+        timeout: Duration::from_secs(180),
+        auto_approve: "auto-policy".into(),
+        cwd: Some(cwd.clone()),
+    };
+    let inputs = TickInputs {
+        cwd: &cwd,
+        sessions_root: &sessions_dir(),
+        agents_md_path: agents_md_path.clone(),
+        settings: &settings,
+        registry: &registry,
+        auth: &auth,
+    };
+
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            state::append_step(
+                &ctx.state_jsonl,
+                ctx.cycle,
+                "evolve_tick",
+                "STEP_EVOLVE_TICK_DONE",
+                json!({"skipped_reason": format!("tokio_runtime_build_failed: {e}")}),
+            )
+            .ok();
+            return Ok(());
+        }
+    };
+
+    let report = rt.block_on(async { run_tick(inputs, &replay).await });
+
+    match report {
+        Ok(TickReport::Skipped(why)) => {
+            state::append_step(
+                &ctx.state_jsonl,
+                ctx.cycle,
+                "evolve_tick",
+                "STEP_EVOLVE_TICK_DONE",
+                json!({"skipped_reason": format!("{:?}", why)}),
+            )
+            .ok();
+        }
+        Ok(TickReport::Ran { baseline, generations, applied_hash }) => {
+            // On applied: commit AGENTS.md onto target_branch with
+            // Halo-Evolve trailer per RFD §evolve_tick. The apply
+            // step already wrote AGENTS.md to disk; we checkout
+            // target_branch + add + commit. RFD's `<pre>→<post>`
+            // format requires both hashes; we only get post (the
+            // applied) from TickReport, so the trailer encodes just
+            // the post-hash (still grep-friendly for bisect).
+            if let Some(post) = &applied_hash {
+                let _ = std::process::Command::new("git")
+                    .args(["-C", &cwd.display().to_string(), "checkout", &ctx.target_branch])
+                    .status();
+                let _ = std::process::Command::new("git")
+                    .args(["-C", &cwd.display().to_string(), "add", "AGENTS.md"])
+                    .status();
+                let msg1 = format!("halo cycle {}: evolve apply (post-hash {})", ctx.cycle, post);
+                let msg2 = format!("Halo-Evolve: {}", post);
+                let _ = std::process::Command::new("git")
+                    .args([
+                        "-C", &cwd.display().to_string(),
+                        "commit", "-m", &msg1, "-m", &msg2,
+                    ])
+                    .status();
+            }
+            state::append_step(
+                &ctx.state_jsonl,
+                ctx.cycle,
+                "evolve_tick",
+                "STEP_EVOLVE_TICK_DONE",
+                json!({
+                    "applied_hash": applied_hash,
+                    "baseline_pass_rate": baseline.pass_rate,
+                    "n_generations": generations.len(),
+                }),
+            )
+            .ok();
+        }
+        Err(e) => {
+            state::append_step(
+                &ctx.state_jsonl,
+                ctx.cycle,
+                "evolve_tick",
+                "STEP_EVOLVE_TICK_DONE",
+                json!({"skipped_reason": format!("error: {e}")}),
+            )
+            .ok();
+        }
+    }
+
     Ok(())
+}
+
+/// Locate AGENTS.md: project ancestors first, then global.
+fn locate_agents_md_for_evolve(cwd: &Path, agent_dir: &Path) -> std::path::PathBuf {
+    for dir in cwd.ancestors() {
+        let p = dir.join("AGENTS.md");
+        if p.is_file() {
+            return p;
+        }
+    }
+    agent_dir.join("AGENTS.md")
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
