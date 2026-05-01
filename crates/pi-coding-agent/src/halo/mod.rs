@@ -1,8 +1,10 @@
 //! halo — M1 helpers: config, bundled-agent bootstrap, status surface,
 //! and halo-owned-clone precondition validator.
 
+pub mod backlog;
 pub mod config;
 pub mod cycle;
+pub mod proposer;
 pub mod run;
 pub mod spend;
 pub mod state;

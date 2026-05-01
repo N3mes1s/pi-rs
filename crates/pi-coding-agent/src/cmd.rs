@@ -761,8 +761,60 @@ pub fn run_halo_status(watch: bool, json: bool, config_path: Option<&std::path::
 
 /// `pi --halo` — run the halo supervisor.
 /// M2: runs `max_cycles` cycles (default 1) then exits.
-pub fn run_halo_supervisor(max_cycles: u64, config_path: Option<&std::path::Path>) -> anyhow::Result<()> {
+pub fn run_halo_add_proposal(
+    title: &str,
+    rationale: Option<&str>,
+    files: Option<&str>,
+    priority: Option<f64>,
+    est_cost: Option<f64>,
+) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
-    crate::halo::run::run_supervisor(&cwd, config_path, max_cycles)
+    let halo_dir = crate::halo::cycle::halo_dir_for_repo(&cwd)
+        .ok_or_else(|| anyhow::anyhow!("no home dir"))?;
+    let cfg_path = cwd.join(".pi").join("halo.toml");
+    if !cfg_path.is_file() {
+        anyhow::bail!("halo.toml not found; initialise halo first");
+    }
+    let backlog_jsonl = halo_dir.join("backlog.jsonl");
+    let id = crate::halo::proposer::generate_proposal_id();
+    let files: Vec<String> = files
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    crate::halo::backlog::append_proposal_created(
+        &backlog_jsonl,
+        &id,
+        title,
+        rationale.unwrap_or(""),
+        &files,
+        priority.unwrap_or(0.5),
+        est_cost.unwrap_or(0.0),
+        "operator:cli",
+    )?;
+    println!("added proposal {id}");
+    Ok(())
+}
+
+pub fn run_halo_drop_proposal(id: &str) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let halo_dir = crate::halo::cycle::halo_dir_for_repo(&cwd)
+        .ok_or_else(|| anyhow::anyhow!("no home dir"))?;
+    let backlog_jsonl = halo_dir.join("backlog.jsonl");
+    let map = crate::halo::backlog::replay(&backlog_jsonl);
+    let Some(prop) = map.get(id) else {
+        anyhow::bail!("error: proposal {id} unknown");
+    };
+    let pid = halo_dir.join("pid");
+    let live = pid.is_file();
+    if live && prop.status == "dispatched" {
+        let cycle = crate::halo::backlog::latest_dispatched_cycle(&backlog_jsonl, id).unwrap_or(0);
+        anyhow::bail!(
+            "error: proposal {id} is currently dispatched in cycle {cycle}; wait for cycle terminal or run pi --halo-pause first"
+        );
+    }
+    crate::halo::backlog::append_proposal_dropped(&backlog_jsonl, id, "operator:cli")?;
+    Ok(())
 }
 

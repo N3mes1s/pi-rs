@@ -117,6 +117,18 @@ fn main() -> anyhow::Result<()> {
     if cli.halo_status {
         return cmd::run_halo_status(cli.watch, cli.json, cli.halo_config.as_deref());
     }
+    if cli.halo_add_proposal {
+        return cmd::run_halo_add_proposal(
+            cli.halo_title.as_deref().unwrap_or("untitled"),
+            cli.halo_rationale.as_deref(),
+            cli.halo_files.as_deref(),
+            cli.halo_priority,
+            cli.halo_est_cost,
+        );
+    }
+    if let Some(id) = &cli.halo_drop_proposal {
+        return cmd::run_halo_drop_proposal(id);
+    }
     if let Some(path) = &cli.orchestrate_dry_run {
         let text = std::fs::read_to_string(path)?;
         let campaign = match pi_orchestrate::parse_campaign(&text) {

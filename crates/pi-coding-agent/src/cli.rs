@@ -285,10 +285,33 @@ pub struct Cli {
     #[arg(long = "halo", action = ArgAction::SetTrue)]
     pub halo: bool,
 
-    /// Maximum number of cycles for `--halo`. Default 1 in M2 (canary aid).
-    /// 0 = run forever.
-    #[arg(long = "halo-max-cycles", value_name = "N", default_value_t = 1)]
-    pub halo_max_cycles: u64,
+    /// Add a proposal directly to the backlog.
+    #[arg(long = "halo-add-proposal", action = ArgAction::SetTrue)]
+    pub halo_add_proposal: bool,
+
+    /// Drop a proposal by id.
+    #[arg(long = "halo-drop-proposal", value_name = "ID")]
+    pub halo_drop_proposal: Option<String>,
+
+    /// Proposal title for --halo-add-proposal.
+    #[arg(long = "title", value_name = "TITLE")]
+    pub halo_title: Option<String>,
+
+    /// Proposal rationale for --halo-add-proposal.
+    #[arg(long = "rationale", value_name = "RATIONALE")]
+    pub halo_rationale: Option<String>,
+
+    /// CSV file list for --halo-add-proposal.
+    #[arg(long = "files", value_name = "CSV")]
+    pub halo_files: Option<String>,
+
+    /// Priority for --halo-add-proposal.
+    #[arg(long = "priority", value_name = "0..1")]
+    pub halo_priority: Option<f64>,
+
+    /// Estimated cost for --halo-add-proposal.
+    #[arg(long = "est-cost", value_name = "USD")]
+    pub halo_est_cost: Option<f64>,
 }
 
 impl Cli {

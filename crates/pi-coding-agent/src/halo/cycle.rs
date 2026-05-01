@@ -12,13 +12,13 @@
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::halo::{spend, state};
+use crate::halo::{backlog, proposer, spend, state};
 
 /// Outcome of a single halo cycle.
 #[derive(Debug, Clone, PartialEq)]
@@ -65,7 +65,11 @@ pub struct CycleCtx<'a> {
     pub orchestrate_start: Option<Instant>,
     /// Orchestrate elapsed seconds.
     pub orchestrate_elapsed_secs: f64,
-    /// Config reference for estimations.
+    /// Config reference for refill + budget gating.
+    pub cfg: crate::halo::config::Config,
+    pub daily_budget_usd: f64,
+    pub orchestrate_overspend_threshold: f64,
+    pub refill_threshold: u32,
     pub budget_per_minute: f64,
     pub proposer_cost: f64,
     pub smoke_cmd: String,
@@ -175,6 +179,10 @@ pub fn build_ctx<'a>(
         orchestrate_exit: 0,
         orchestrate_start: None,
         orchestrate_elapsed_secs: 0.0,
+        cfg: cfg.clone(),
+        daily_budget_usd: cfg.guardrails.daily_spend_budget_usd,
+        orchestrate_overspend_threshold: cfg.orchestrate.per_cycle_overspend_threshold_usd,
+        refill_threshold: cfg.proposer.refill_threshold,
         budget_per_minute: cfg.orchestrate.budget_dollars_per_minute_estimate,
         proposer_cost: cfg.proposer.estimated_cost_usd_per_call,
         smoke_cmd: cfg.smoke.cmd.clone(),
@@ -202,15 +210,10 @@ pub fn run_cycle_with_ctx(
         json!({"cycle": cycle_n}),
     )?;
 
-    // 0. Tree-clean check (pre-step guard).
-    if let Err(e) = step_tree_clean_check(&mut ctx) {
-        return finish_aborted(
-            &ctx,
-            match e {
-                StepError::Aborted(m) | StepError::Failed(m) => m,
-            },
-        );
+    if let Err(e) = step_check_budget(&mut ctx) {
+        return finish_aborted(&ctx, match e { StepError::Aborted(m) | StepError::Failed(m) => m });
     }
+
 
     // Check signal after each step.
     macro_rules! check_signal {
@@ -417,6 +420,7 @@ pub fn run_cycle_with_ctx(
 
 // ── Step implementations ─────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 fn step_tree_clean_check(ctx: &mut CycleCtx) -> StepResult {
     let out = std::process::Command::new("git")
         .args(["-C", &ctx.repo_root.display().to_string(), "status", "--porcelain"])
@@ -444,11 +448,36 @@ fn step_tree_clean_check(ctx: &mut CycleCtx) -> StepResult {
     Ok(())
 }
 
+fn step_check_budget(ctx: &mut CycleCtx) -> StepResult {
+    let today = crate::halo::spend::today_spend(&ctx.usage_jsonl);
+    if proposer::budget_exceeded(&ctx.cfg, today) {
+        state::cycle_aborted(
+            &ctx.state_jsonl,
+            ctx.cycle,
+            json!({"reason": "cost_cap"}),
+        )?;
+        return Err(StepError::Aborted("cost_cap".into()));
+    }
+    Ok(())
+}
+
 fn step_pick_proposal(ctx: &mut CycleCtx) -> StepResult {
-    // M2: read the first `pending` proposal from backlog.jsonl.
-    // The full proposer LLM call is M3; here we just pick from what's there.
-    let backlog = read_pending_proposals(&ctx.backlog_jsonl);
-    if backlog.is_empty() {
+    let mut backlog = crate::halo::backlog::replay(&ctx.backlog_jsonl);
+    let pending = crate::halo::backlog::pending_proposals(&backlog).len();
+    if pending < ctx.refill_threshold as usize {
+        let _ = proposer::run_proposer_if_due(
+            ctx.repo_root,
+            ctx.halo_dir,
+            &ctx.backlog_jsonl,
+            &ctx.state_jsonl,
+            &ctx.cfg,
+            ctx.cycle,
+            pending,
+        );
+        backlog = crate::halo::backlog::replay(&ctx.backlog_jsonl);
+    }
+    let pending = crate::halo::backlog::pending_proposals(&backlog);
+    if pending.is_empty() {
         state::append_step(
             &ctx.state_jsonl,
             ctx.cycle,
@@ -459,32 +488,21 @@ fn step_pick_proposal(ctx: &mut CycleCtx) -> StepResult {
         .ok();
         return Err(StepError::Failed("no proposal available".into()));
     }
-    let proposal = &backlog[0];
-    let id = proposal
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    ctx.proposal_id = Some(id.clone());
-
-    // Mark as dispatched in backlog.
+    let proposal = pending[0];
+    ctx.proposal_id = Some(proposal.id.clone());
     append_proposal_status(
         &ctx.backlog_jsonl,
-        &id,
+        &proposal.id,
         "dispatched",
         json!({"cycle": ctx.cycle}),
-    )
-    .map_err(|e| StepError::Failed(e.to_string()))?;
-
-    // Write proposer cost row (M2: fixed overhead per cycle).
+    )?;
     let _ = spend::write_proposer_row(&ctx.usage_jsonl, ctx.cycle, ctx.proposer_cost);
-
     state::append_step(
         &ctx.state_jsonl,
         ctx.cycle,
         "pick_proposal",
         "STEP_PICK_PROPOSAL_DONE",
-        json!({"proposal_id": id}),
+        json!({"proposal_id": proposal.id}),
     )
     .ok();
     Ok(())
@@ -1102,21 +1120,7 @@ pub fn append_proposal_status(
     status: &str,
     detail: Value,
 ) -> Result<()> {
-    let evt = serde_json::json!({
-        "kind": "proposal_status_changed",
-        "ts": chrono::Utc::now().to_rfc3339(),
-        "id": id,
-        "status": status,
-        "detail": detail,
-    });
-    let mut line = serde_json::to_string(&evt)?;
-    line.push('\n');
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(backlog_jsonl)?;
-    f.write_all(line.as_bytes())?;
-    Ok(())
+    backlog::append_proposal_status_changed(backlog_jsonl, id, status, detail)
 }
 
 fn run_smoke_once(ctx: &CycleCtx) -> bool {
