@@ -78,6 +78,7 @@ fn clone_branch_returns_new_id_and_replays_entries() {
             SessionEntryKind::ContextLoad { .. } => "context_load",
             SessionEntryKind::Outcome { .. } => "outcome",
             SessionEntryKind::EvolveMarker { .. } => "evolve_marker",
+            SessionEntryKind::RoutingDecision { .. } => "routing_decision",
         })
         .collect();
     assert_eq!(

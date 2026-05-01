@@ -35,6 +35,7 @@ fn priced_model() -> ModelInfo {
         alias: Some("gpt-5".into()),
         context_window: 1024,
         max_output_tokens: 256,
+        tier: 1,
         supports_thinking: true,
         supports_tools: true,
         supports_vision: false,

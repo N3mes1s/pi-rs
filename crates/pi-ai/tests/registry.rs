@@ -96,6 +96,7 @@ fn install_adds_provider_retrievable_via_get() {
             alias: Some("mine".into()),
             context_window: 8192,
             max_output_tokens: 1024,
+            tier: 1,
             supports_thinking: false,
             supports_tools: true,
             supports_vision: false,

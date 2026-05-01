@@ -27,6 +27,7 @@ fn model() -> ModelInfo {
         alias: Some("test".into()),
         context_window: 1024,
         max_output_tokens: 256,
+        tier: 1,
         supports_thinking: false,
         supports_tools: true,
         supports_vision: false,

@@ -71,6 +71,7 @@ fn clone_branch_replays_multiple_tool_pairs_in_order() {
             SessionEntryKind::ContextLoad { .. } => "context_load",
             SessionEntryKind::Outcome { .. } => "outcome",
             SessionEntryKind::EvolveMarker { .. } => "evolve_marker",
+            SessionEntryKind::RoutingDecision { .. } => "routing_decision",
         })
         .collect();
     assert_eq!(

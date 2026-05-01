@@ -33,6 +33,7 @@ fn model() -> ModelInfo {
         alias: None,
         context_window: 128_000,
         max_output_tokens: 4096,
+        tier: 1,
         supports_thinking: false,
         supports_tools: true,
         supports_vision: false,

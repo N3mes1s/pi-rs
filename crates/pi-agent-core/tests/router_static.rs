@@ -1,4 +1,4 @@
-use pi_agent_core::router::{ForceOverride, Router, RoutingContext, StaticRouter};
+use pi_agent_core::router::{ForceOverride, Router, RoutingContext, RoutingDecision, StaticRouter};
 use pi_ai::{AuthStorage, ModelRegistry, ThinkingLevel};
 
 fn context<'a>(registry: &'a ModelRegistry, force: Option<ForceOverride>) -> RoutingContext<'a> {
@@ -15,7 +15,12 @@ fn context<'a>(registry: &'a ModelRegistry, force: Option<ForceOverride>) -> Rou
 #[test]
 fn static_router_compat() {
     let registry = ModelRegistry::new(AuthStorage::in_memory());
-    let router = StaticRouter::new("anthropic", "claude-sonnet-4-6", ThinkingLevel::Medium);
+    let router = StaticRouter::new(RoutingDecision {
+        route_id: "static".to_string(),
+        provider: "anthropic".to_string(),
+        model: "claude-sonnet-4-6".to_string(),
+        thinking: ThinkingLevel::Medium,
+    });
     let decision = router
         .route("rename foo", &[], &[], &context(&registry, None))
         .unwrap();
@@ -25,81 +30,14 @@ fn static_router_compat() {
     assert_eq!(decision.route_id, "static");
 }
 
-#[test]
-fn router_no_config_falls_back() {
-    let registry = ModelRegistry::new(AuthStorage::in_memory());
-    let temp = tempfile::tempdir().unwrap();
-    let user = temp.path().join("user-router.toml");
-    let repo = temp.path().join("repo-router.toml");
-    let router =
-        StaticRouter::from_paths("openai", "gpt-4o", ThinkingLevel::Low, &user, &repo).unwrap();
-    let decision = router
-        .route("prompt", &[], &[], &context(&registry, None))
-        .unwrap();
-    assert_eq!(decision.provider, "openai");
-    assert_eq!(decision.model, "gpt-4o");
-    assert_eq!(decision.thinking, ThinkingLevel::Low);
-}
-
-#[test]
-fn router_resolve_failure() {
-    let registry = ModelRegistry::new(AuthStorage::in_memory());
-    let temp = tempfile::tempdir().unwrap();
-    let repo = temp.path().join("router.toml");
-    std::fs::write(
-        &repo,
-        "[[route]]\nid = \"fast\"\nprovider = \"ollama\"\nmodel = \"missing\"\nthinking = \"off\"\n",
-    )
-    .unwrap();
-    let router = StaticRouter::from_paths(
-        "anthropic",
-        "claude-sonnet-4-6",
-        ThinkingLevel::Medium,
-        temp.path().join("user.toml"),
-        &repo,
-    )
-    .unwrap();
-    let err = router
-        .route("prompt", &[], &[], &context(&registry, None))
-        .unwrap_err();
-    assert!(err.to_string().contains("unknown model: ollama/missing"));
-}
-
-#[test]
-fn router_force_override() {
-    let registry = ModelRegistry::new(AuthStorage::in_memory());
-    let temp = tempfile::tempdir().unwrap();
-    let repo = temp.path().join("router.toml");
-    std::fs::write(
-        &repo,
-        "[[route]]\nid = \"fast\"\nprovider = \"anthropic\"\nmodel = \"claude-haiku-4-5-20251001\"\nthinking = \"off\"\n",
-    )
-    .unwrap();
-    let router = StaticRouter::from_paths(
-        "anthropic",
-        "claude-sonnet-4-6",
-        ThinkingLevel::Medium,
-        temp.path().join("user.toml"),
-        &repo,
-    )
-    .unwrap();
-    let decision = router
-        .route(
-            "prompt",
-            &[],
-            &[],
-            &context(
-                &registry,
-                Some(ForceOverride {
-                    provider: "openai".to_string(),
-                    model: "gpt-5.4".to_string(),
-                    thinking: ThinkingLevel::XHigh,
-                }),
-            ),
-        )
-        .unwrap();
-    assert_eq!(decision.provider, "openai");
-    assert_eq!(decision.model, "gpt-5.4");
-    assert_eq!(decision.thinking, ThinkingLevel::XHigh);
-    assert_eq!(decision.route_id, "forced");
-}
+// NOTE: tests `router_no_config_falls_back`, `router_resolve_failure`,
+// and `router_force_override` were deleted as part of the RFD 0020
+// StaticRouter simplification. They tested the old `from_paths` API
+// which loaded `router.toml` from user/repo paths and resolved models
+// against the registry. The new `StaticRouter::new(decision)` is a
+// minimal wrapper that just emits a fixed decision; file-based routing
+// is provided by other Router impls (e.g. `EmbeddingRouter`).
+//
+// The force-override behavior tested by `router_force_override` is now
+// covered by the unit tests in `crates/pi-agent-core/src/router/mod.rs`
+// (force.rs / mod.rs).

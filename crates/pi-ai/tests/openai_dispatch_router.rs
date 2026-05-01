@@ -33,6 +33,7 @@ fn model(id: &str) -> ModelInfo {
         alias: Some(id.into()),
         context_window: 1024,
         max_output_tokens: 256,
+        tier: 1,
         supports_thinking: id.starts_with("gpt-5"),
         supports_tools: true,
         supports_vision: false,

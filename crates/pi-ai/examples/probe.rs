@@ -23,6 +23,7 @@ async fn main() {
         alias: Some("haiku".into()),
         context_window: 200_000,
         max_output_tokens: 1024,
+        tier: 1,
         supports_thinking: false,
         supports_tools: true,
         supports_vision: true,
