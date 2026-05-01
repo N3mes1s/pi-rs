@@ -86,16 +86,29 @@ pub async fn run_tick<R: Replay>(
     inputs: TickInputs<'_>,
     replay: &R,
 ) -> Result<TickReport, TickError> {
+    let cwd_display = inputs.cwd.display();
+    tracing::debug!(cwd = %cwd_display, "evolve: tick starting");
+
     // 1. Lock.
     let lock = Lock::try_acquire(inputs.cwd)?;
     let _lock_guard = match lock {
         Some(l) => l,
-        None => return Ok(TickReport::Skipped(SkipReason::LockHeld)),
+        None => {
+            tracing::debug!(cwd = %cwd_display, "evolve: tick skipped — lock already held");
+            return Ok(TickReport::Skipped(SkipReason::LockHeld));
+        }
     };
 
     // 2. State + cost.
     let state = State::load(inputs.cwd);
     let mut cost = CostLedger::load(inputs.cwd);
+    tracing::debug!(
+        cwd = %cwd_display,
+        ticks_run = state.ticks_run,
+        outcomes_seen = state.outcomes_seen_lifetime,
+        spend_today_usd = cost.today_spend(),
+        "evolve: loaded state and cost ledger",
+    );
 
     // 3. Locate AGENTS.md.
     let has_agents_md = inputs.agents_md_path.is_file();
@@ -107,6 +120,11 @@ pub async fn run_tick<R: Replay>(
         &cwd_slug,
         inputs.settings.evolve.benchmark_size as usize,
     )?;
+    tracing::debug!(
+        cwd = %cwd_display,
+        n_cases = cases.len(),
+        "evolve: loaded benchmark cases",
+    );
 
     // 5. Gate.
     let decision = should_run(
@@ -117,12 +135,19 @@ pub async fn run_tick<R: Replay>(
         cases.len() as u32,
         has_agents_md,
     );
-    if let TickDecision::Skip(why) = decision {
-        return Ok(TickReport::Skipped(why));
+    if let TickDecision::Skip(ref why) = decision {
+        tracing::info!(cwd = %cwd_display, reason = ?why, "evolve: tick skipped");
+        return Ok(TickReport::Skipped(why.clone()));
     }
 
     // 6. Build evidence.
     let evidence = build_evidence(&cases);
+    tracing::debug!(
+        cwd = %cwd_display,
+        wins = evidence.wins.len(),
+        losses = evidence.losses.len(),
+        "evolve: built mutation evidence",
+    );
 
     // 7. Build Mutator (only if we'll actually mutate). When no
     // generations are configured we still run the baseline benchmark
@@ -132,18 +157,37 @@ pub async fn run_tick<R: Replay>(
     let mutator: Option<Mutator> = if n_gens > 0 {
         let mutator_cfg = mutator_config_from_settings(&inputs.settings.evolve, inputs.settings);
         match Mutator::build(inputs.registry, inputs.auth, mutator_cfg) {
-            Ok(m) => Some(m),
-            Err(_) => return Ok(TickReport::Skipped(SkipReason::NotEnabled)),
+            Ok(m) => {
+                tracing::debug!(cwd = %cwd_display, n_gens, "evolve: mutator ready");
+                Some(m)
+            }
+            Err(e) => {
+                tracing::warn!(cwd = %cwd_display, error = %e, "evolve: mutator build failed — skipping tick");
+                return Ok(TickReport::Skipped(SkipReason::NotEnabled));
+            }
         }
     } else {
+        tracing::debug!(cwd = %cwd_display, "evolve: no generations configured; baseline-only run");
         None
     };
 
     // 8. Load + parse AGENTS.md, run baseline benchmark.
+    tracing::info!(
+        cwd = %cwd_display,
+        n_cases = cases.len(),
+        "evolve: running baseline benchmark",
+    );
     let baseline_text = std::fs::read_to_string(&inputs.agents_md_path)?;
     let baseline_doc = AgentsMd::parse(&baseline_text);
     let baseline_results = run_all(replay, &cases, &baseline_doc.render()).await?;
     let baseline_summary = summarize(&baseline_results);
+    tracing::info!(
+        cwd = %cwd_display,
+        pass_rate = baseline_summary.pass_rate,
+        mean_score = baseline_summary.mean_score,
+        total_cost_usd = baseline_summary.total_cost_usd,
+        "evolve: baseline benchmark complete",
+    );
 
     let mut candidates: Vec<Candidate> = vec![Candidate {
         hash: baseline_doc.hash(),
@@ -159,6 +203,10 @@ pub async fn run_tick<R: Replay>(
     if mutable_indices.is_empty() {
         // Nothing we're allowed to touch (entire file pi:keep, or only
         // preamble). Log + return without applying.
+        tracing::info!(
+            cwd = %cwd_display,
+            "evolve: no mutable sections found in AGENTS.md — skipping mutations",
+        );
         log_candidates(inputs.cwd, &candidates);
         return Ok(TickReport::Ran {
             baseline: baseline_summary,
@@ -166,6 +214,12 @@ pub async fn run_tick<R: Replay>(
             applied_hash: None,
         });
     }
+    tracing::debug!(
+        cwd = %cwd_display,
+        n_mutable = mutable_indices.len(),
+        n_gens,
+        "evolve: starting mutation generations",
+    );
 
     let poisoned = super::apply::poisoned_hashes(inputs.cwd);
 
@@ -174,18 +228,36 @@ pub async fn run_tick<R: Replay>(
             break; // no mutator → can't mutate; skip the loop
         };
         // Cost cap mid-loop.
-        if cost.today_spend() >= inputs.settings.evolve.daily_cost_cap_usd {
+        let today_spend = cost.today_spend();
+        if today_spend >= inputs.settings.evolve.daily_cost_cap_usd {
+            tracing::info!(
+                cwd = %cwd_display,
+                gen,
+                spend_usd = today_spend,
+                cap_usd = inputs.settings.evolve.daily_cost_cap_usd,
+                "evolve: daily cost cap reached — stopping generations early",
+            );
             break;
         }
 
         // Pick target section: cycle through mutable sections by gen.
         let target_idx = mutable_indices[gen % mutable_indices.len()];
+        tracing::debug!(cwd = %cwd_display, gen, target_section = target_idx, "evolve: mutating section");
         let new_body = match mutator
             .mutate_section(&baseline_doc, target_idx, &evidence)
             .await
         {
             Ok(b) => b,
-            Err(_) => continue, // mutation failed — try next gen
+            Err(e) => {
+                tracing::warn!(
+                    cwd = %cwd_display,
+                    gen,
+                    target_section = target_idx,
+                    error = %e,
+                    "evolve: mutation failed — skipping generation",
+                );
+                continue;
+            }
         };
 
         let mut candidate_doc = baseline_doc.clone();
@@ -194,12 +266,27 @@ pub async fn run_tick<R: Replay>(
 
         // Skip if we've poisoned this exact body before.
         if poisoned.iter().any(|h| h == &cand_hash) {
+            tracing::debug!(
+                cwd = %cwd_display,
+                gen,
+                hash = %cand_hash,
+                "evolve: candidate hash is poisoned — skipping",
+            );
             continue;
         }
 
         let cand_results = run_all(replay, &cases, &candidate_doc.render()).await?;
         let cand_summary = summarize(&cand_results);
         cost.add(cand_summary.total_cost_usd);
+        tracing::info!(
+            cwd = %cwd_display,
+            gen,
+            target_section = target_idx,
+            pass_rate = cand_summary.pass_rate,
+            mean_score = cand_summary.mean_score,
+            cost_usd = cand_summary.total_cost_usd,
+            "evolve: generation benchmark complete",
+        );
 
         candidate_scores.push(rollout_scores(&cand_results));
         candidates.push(Candidate {
@@ -214,6 +301,12 @@ pub async fn run_tick<R: Replay>(
     // 10. Pareto + winner pick.
     let _frontier = pareto_frontier(&candidates);
     let winner_idx = best_strict_improvement(&candidates, 0);
+    tracing::debug!(
+        cwd = %cwd_display,
+        n_candidates = candidates.len(),
+        winner_idx = ?winner_idx,
+        "evolve: pareto selection complete",
+    );
 
     // 11. Apply winner if any. RFD 0013 gate: candidate's mean rollout
     // score must beat the baseline's by at least DEFAULT_MIN_MARGIN.
@@ -226,6 +319,14 @@ pub async fn run_tick<R: Replay>(
         );
         if decision.apply {
             let winner = &candidates[idx];
+            tracing::info!(
+                cwd = %cwd_display,
+                winner_hash = %winner.hash,
+                baseline_mean = decision.current_mean,
+                candidate_mean = decision.candidate_mean,
+                margin = decision.margin,
+                "evolve: applying winning candidate",
+            );
             let backup = backup_and_apply(
                 inputs.cwd,
                 &inputs.agents_md_path,
@@ -264,8 +365,18 @@ pub async fn run_tick<R: Replay>(
             pending.save(inputs.cwd)?;
             applied_hash = Some(winner.hash.clone());
         } else {
-            tracing::info!(reason = %decision.reason, "evolve: candidate failed margin gate");
+            tracing::info!(
+                cwd = %cwd_display,
+                reason = %decision.reason,
+                current_mean = decision.current_mean,
+                candidate_mean = decision.candidate_mean,
+                margin = decision.margin,
+                min_margin = DEFAULT_MIN_MARGIN,
+                "evolve: candidate failed margin gate — not applying",
+            );
         }
+    } else {
+        tracing::info!(cwd = %cwd_display, "evolve: no strict improvement found among candidates");
     }
 
     // 12. Persist state + log.
@@ -278,6 +389,14 @@ pub async fn run_tick<R: Replay>(
     new_state.save(inputs.cwd)?;
     cost.save(inputs.cwd)?;
     log_candidates_with_apply(inputs.cwd, &candidates, applied_hash.as_deref());
+
+    tracing::info!(
+        cwd = %cwd_display,
+        n_candidates = candidates.len(),
+        applied = applied_hash.is_some(),
+        ticks_run = new_state.ticks_run,
+        "evolve: tick complete",
+    );
 
     Ok(TickReport::Ran {
         baseline: baseline_summary,
@@ -303,7 +422,15 @@ pub fn check_rollback(
     let Some(pending) = PendingApply::load(cwd) else {
         return Ok(false);
     };
-    if (post_apply_outcomes.len() as u32) < min_window_size {
+    let window_size = post_apply_outcomes.len() as u32;
+    if window_size < min_window_size {
+        tracing::debug!(
+            cwd = %cwd.display(),
+            window_size,
+            min_window_size,
+            applied_hash = %pending.applied_hash,
+            "evolve: rollback check deferred — window too small",
+        );
         return Ok(false);
     }
     let pass_rate = post_apply_outcomes.iter().filter(|b| **b).count() as f32
@@ -315,11 +442,31 @@ pub fn check_rollback(
         min_window_size,
         regression_threshold,
     ) {
+        tracing::debug!(
+            cwd = %cwd.display(),
+            applied_hash = %pending.applied_hash,
+            baseline_pass_rate = pending.baseline_pass_rate,
+            post_apply_pass_rate = pass_rate,
+            "evolve: no rollback needed — pass rate is acceptable",
+        );
         return Ok(false);
     }
+    tracing::warn!(
+        cwd = %cwd.display(),
+        applied_hash = %pending.applied_hash,
+        baseline_pass_rate = pending.baseline_pass_rate,
+        post_apply_pass_rate = pass_rate,
+        regression_threshold,
+        "evolve: regression detected — rolling back AGENTS.md",
+    );
     super::apply::rollback(agents_md_path, &pending.backup_path)?;
     add_poison(cwd, &pending.applied_hash)?;
     PendingApply::clear(cwd)?;
+    tracing::info!(
+        cwd = %cwd.display(),
+        poisoned_hash = %pending.applied_hash,
+        "evolve: rollback complete — hash poisoned",
+    );
     Ok(true)
 }
 
