@@ -252,6 +252,39 @@
       ]
     },
     {
+      "provider": "fireworks",
+      "model": "accounts/fireworks/models/glm-5p1",
+      "input_cost_per_mtok": 0.60,
+      "output_cost_per_mtok": 2.20,
+      "verified": "estimate",
+      "verified_at": "2026-04-30",
+      "sources": [
+        "https://fireworks.ai/pricing"
+      ]
+    },
+    {
+      "provider": "fireworks",
+      "model": "accounts/fireworks/models/kimi-k2p6",
+      "input_cost_per_mtok": 2.0,
+      "output_cost_per_mtok": 5.0,
+      "verified": "estimate",
+      "verified_at": "2026-04-30",
+      "sources": [
+        "https://fireworks.ai/pricing"
+      ]
+    },
+    {
+      "provider": "fireworks",
+      "model": "accounts/fireworks/models/deepseek-v4-pro",
+      "input_cost_per_mtok": 8.0,
+      "output_cost_per_mtok": 8.0,
+      "verified": "estimate",
+      "verified_at": "2026-04-30",
+      "sources": [
+        "https://fireworks.ai/pricing"
+      ]
+    },
+    {
       "provider": "bedrock",
       "model": "anthropic.claude-opus-4-7",
       "input_cost_per_mtok": 5.0,
