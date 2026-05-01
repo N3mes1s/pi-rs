@@ -36,12 +36,43 @@ pub fn run_supervisor(repo_root: &Path, config_path: Option<&Path>, max_cycles: 
     // it impossible to correlate state.jsonl events across runs
     // (everything showed cycle:1).
     let mut cycle_n = highest_recorded_cycle(&halo_dir).map_or(1, |n| n + 1);
+    let mut last_cycle_start: Option<std::time::Instant> = None;
     loop {
         if max_cycles != 0 && cycle_n > max_cycles { break; }
         if sig_any.load(Ordering::SeqCst) { std::process::exit(130); }
+        // v0.27 fix (canary bugs #14 + #15): enforce
+        // min_seconds_between_cycles. Prior versions parsed it but
+        // never honored it, so a NO_PROPOSAL_AVAILABLE cycle (or
+        // any fast-skip cycle) would immediately trigger the next
+        // one — burning the cycles_per_day_max budget on hot-spin.
+        // Honor the gate by sleeping the remainder before each
+        // cycle, with paused/pause.req/stop.req checks every second
+        // so operator commands aren't blocked.
+        if let Some(prev) = last_cycle_start {
+            let min = std::time::Duration::from_secs(cfg.guardrails.min_seconds_between_cycles);
+            let elapsed = prev.elapsed();
+            if elapsed < min {
+                let mut remaining = min - elapsed;
+                while remaining > std::time::Duration::ZERO {
+                    if sig_any.load(Ordering::SeqCst) { std::process::exit(130); }
+                    if paused_path(&halo_dir).exists()
+                        || pause_req_path(&halo_dir).exists()
+                        || stop_req_path(&halo_dir).exists()
+                    {
+                        break;
+                    }
+                    let tick = std::cmp::min(remaining, std::time::Duration::from_secs(1));
+                    std::thread::sleep(tick);
+                    remaining = remaining.saturating_sub(tick);
+                }
+            }
+        }
         maybe_wait_guardrails(repo_root, &halo_dir, &cfg, &mut cycle_n)?;
         if sig_any.load(Ordering::SeqCst) { std::process::exit(130); }
         if paused_path(&halo_dir).exists() { break; }
+        if pause_req_path(&halo_dir).exists() { let _ = fs::rename(pause_req_path(&halo_dir), paused_path(&halo_dir)); break; }
+        if stop_req_path(&halo_dir).exists() { let _ = fs::remove_file(stop_req_path(&halo_dir)); let _ = fs::remove_file(lock_path(&halo_dir)); break; }
+        last_cycle_start = Some(std::time::Instant::now());
         let ctx = cycle::build_ctx(repo_root, &halo_dir, cycle_n, &cfg, sig_any.clone(), sigint.clone(), sigterm.clone(), orchestrate_pid_shared.clone());
         match cycle::run_cycle_with_ctx(repo_root, cycle_n, ctx) { Ok(_) | Err(_) => {} }
         if pause_req_path(&halo_dir).exists() { let _ = fs::rename(pause_req_path(&halo_dir), paused_path(&halo_dir)); break; }
