@@ -86,8 +86,11 @@ pub async fn run_tick<R: Replay>(
     inputs: TickInputs<'_>,
     replay: &R,
 ) -> Result<TickReport, TickError> {
+    let tick_start = std::time::Instant::now();
     let cwd_display = inputs.cwd.display();
-    tracing::debug!(cwd = %cwd_display, "evolve: tick starting");
+    let span = tracing::info_span!("evolve::tick", cwd = %cwd_display);
+    let _enter = span.enter();
+    tracing::info!(cwd = %cwd_display, "evolve: tick starting");
 
     // 1. Lock.
     let lock = Lock::try_acquire(inputs.cwd)?;
@@ -136,7 +139,11 @@ pub async fn run_tick<R: Replay>(
         has_agents_md,
     );
     if let TickDecision::Skip(ref why) = decision {
-        tracing::info!(cwd = %cwd_display, reason = ?why, "evolve: tick skipped");
+        tracing::info!(
+            cwd = %cwd_display,
+            reason = %skip_reason_display(why),
+            "evolve: tick skipped",
+        );
         return Ok(TickReport::Skipped(why.clone()));
     }
 
@@ -156,6 +163,12 @@ pub async fn run_tick<R: Replay>(
     let n_gens = inputs.settings.evolve.generations_per_tick as usize;
     let mutator: Option<Mutator> = if n_gens > 0 {
         let mutator_cfg = mutator_config_from_settings(&inputs.settings.evolve, inputs.settings);
+        tracing::debug!(
+            cwd = %cwd_display,
+            provider = %mutator_cfg.provider,
+            model = %mutator_cfg.model,
+            "evolve: building mutator",
+        );
         match Mutator::build(inputs.registry, inputs.auth, mutator_cfg) {
             Ok(m) => {
                 tracing::debug!(cwd = %cwd_display, n_gens, "evolve: mutator ready");
@@ -339,7 +352,7 @@ pub async fn run_tick<R: Replay>(
             if let Some(parent) = history_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let _ = super::apply::append_history(
+            if let Err(e) = super::apply::append_history(
                 &history_path,
                 &super::apply::HistoryEntry {
                     ts: Utc::now().to_rfc3339(),
@@ -353,7 +366,13 @@ pub async fn run_tick<R: Replay>(
                     trigger: None,
                     prev_body: Some(candidates[0].body.clone()),
                 },
-            );
+            ) {
+                tracing::warn!(
+                    cwd = %cwd_display,
+                    error = %e,
+                    "evolve: failed to append apply entry to history log",
+                );
+            }
             let pending = PendingApply {
                 applied_hash: winner.hash.clone(),
                 previous_hash: candidates[0].hash.clone(),
@@ -395,6 +414,7 @@ pub async fn run_tick<R: Replay>(
         n_candidates = candidates.len(),
         applied = applied_hash.is_some(),
         ticks_run = new_state.ticks_run,
+        elapsed_secs = tick_start.elapsed().as_secs_f64(),
         "evolve: tick complete",
     );
 
@@ -480,6 +500,27 @@ fn rollout_scores(results: &[RolloutResult]) -> Vec<f32> {
     results.iter().map(|r| r.score).collect()
 }
 
+/// Human-readable one-liner for a [`SkipReason`] (used in log messages
+/// so operators don't have to decode the debug representation).
+fn skip_reason_display(reason: &SkipReason) -> String {
+    match reason {
+        SkipReason::NotEnabled => "evolve not enabled in settings".into(),
+        SkipReason::Disabled => "evolution disabled for this cwd (pi evolve off)".into(),
+        SkipReason::LockHeld => "another tick is already in progress (lock held)".into(),
+        SkipReason::CostCapExceeded => "daily cost cap already reached".into(),
+        SkipReason::InsufficientSamples { have, need } => {
+            format!("insufficient outcome samples ({have}/{need})")
+        }
+        SkipReason::TooSoon { hours_left } => {
+            format!("rate-limited: {hours_left}h until next tick is allowed")
+        }
+        SkipReason::NotEnoughNewOutcomes { since, need } => {
+            format!("not enough new outcomes since last tick ({since}/{need})")
+        }
+        SkipReason::NoAgentsMd => "no AGENTS.md found in cwd or global location".into(),
+    }
+}
+
 fn build_evidence(cases: &[BenchmarkCase]) -> MutationEvidence {
     let mut wins = Vec::new();
     let mut losses = Vec::new();
@@ -531,6 +572,13 @@ fn log_candidates_with_apply(cwd: &Path, candidates: &[Candidate], applied_hash:
             applied: applied_hash == Some(&c.hash),
             note: c.note.clone(),
         };
-        let _ = append_generation(cwd, &entry);
+        if let Err(e) = append_generation(cwd, &entry) {
+            tracing::warn!(
+                cwd = %cwd.display(),
+                generation_note = %entry.note,
+                error = %e,
+                "evolve: failed to append generation log entry",
+            );
+        }
     }
 }

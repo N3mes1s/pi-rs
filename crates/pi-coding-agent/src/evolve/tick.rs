@@ -106,6 +106,11 @@ impl Lock {
         }
         // Lock exists. Is it stale? If yes, reap and retry once.
         if Self::is_stale(&path) {
+            tracing::warn!(
+                cwd = %cwd.display(),
+                lock_path = %path.display(),
+                "evolve: reaping stale lock file",
+            );
             let _ = fs::remove_file(&path);
             return Self::create(&path);
         }
