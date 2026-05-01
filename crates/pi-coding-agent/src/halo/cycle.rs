@@ -556,7 +556,7 @@ target_branch = "{target_branch}"
 
 [defaults]
 reviewer = "{reviewer}"
-fix_loop_max = 2
+fix_loop_max = 5
 
 [[milestones]]
 id = "{proposal_id}"
