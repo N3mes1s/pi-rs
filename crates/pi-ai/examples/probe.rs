@@ -7,8 +7,9 @@ use pi_ai::{
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
     let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY");
-    eprintln!("[probe] starting");
+    tracing::warn!("[probe] starting");
     let cfg = ProviderConfig {
         name: "anthropic".into(),
         kind: ProviderKind::Anthropic,
@@ -43,37 +44,37 @@ async fn main() {
         max_output_tokens: Some(64),
         extras: serde_json::Value::Null,
     };
-    eprintln!("[probe] doing direct reqwest test");
+    tracing::warn!("[probe] doing direct reqwest test");
     let client = reqwest::Client::new();
     match client
         .get("https://api.anthropic.com/v1/health")
         .send()
         .await
     {
-        Ok(r) => eprintln!("[probe] reqwest GET ok: {}", r.status()),
+        Ok(r) => tracing::warn!("[probe] reqwest GET ok: {}", r.status()),
         Err(e) => {
-            eprintln!("[probe] reqwest GET error: {e:?}");
+            tracing::warn!("[probe] reqwest GET error: {e:?}");
             if let Some(src) = std::error::Error::source(&e) {
-                eprintln!("[probe]   source: {src:?}");
+                tracing::warn!("[probe]   source: {src:?}");
                 if let Some(s2) = std::error::Error::source(src) {
-                    eprintln!("[probe]   source2: {s2:?}");
+                    tracing::warn!("[probe]   source2: {s2:?}");
                 }
             }
         }
     }
-    eprintln!("[probe] calling stream");
+    tracing::warn!("[probe] calling stream");
     let mut s = match pi_ai::Provider::stream(&provider, req, &model).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[probe] stream error: {e}");
+            tracing::warn!("[probe] stream error: {e}");
             return;
         }
     };
-    eprintln!("[probe] got stream, polling");
+    tracing::warn!("[probe] got stream, polling");
     let mut count = 0;
     while let Some(ev) = s.next().await {
         count += 1;
-        eprintln!("[probe] event #{count}: {:?}", ev.map(|e| e.kind));
+        tracing::warn!("[probe] event #{count}: {:?}", ev.map(|e| e.kind));
     }
-    eprintln!("[probe] stream ended after {count} events");
+    tracing::warn!("[probe] stream ended after {count} events");
 }
