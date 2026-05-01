@@ -53,6 +53,12 @@ pub struct CycleCtx<'a> {
     pub post_target_head: Option<String>,
     /// Proposal id currently dispatched.
     pub proposal_id: Option<String>,
+    /// Proposal title (captured at pick_proposal).
+    pub proposal_title: Option<String>,
+    /// Proposal rationale (captured at pick_proposal).
+    pub proposal_rationale: Option<String>,
+    /// Proposal files_touched (captured at pick_proposal).
+    pub proposal_files: Vec<String>,
     /// Did orchestrate produce at least one MERGED milestone?
     pub orchestrate_merged: bool,
     /// Was there a keep-marker violation?
@@ -173,6 +179,9 @@ pub fn build_ctx<'a>(
         pre_target_head: None,
         post_target_head: None,
         proposal_id: None,
+        proposal_title: None,
+        proposal_rationale: None,
+        proposal_files: Vec::new(),
         orchestrate_merged: false,
         keep_marker_violated: false,
         smoke_failed: false,
@@ -490,6 +499,9 @@ fn step_pick_proposal(ctx: &mut CycleCtx) -> StepResult {
     }
     let proposal = pending[0];
     ctx.proposal_id = Some(proposal.id.clone());
+    ctx.proposal_title = Some(proposal.title.clone());
+    ctx.proposal_rationale = Some(proposal.rationale.clone());
+    ctx.proposal_files = proposal.files.clone();
     append_proposal_status(
         &ctx.backlog_jsonl,
         &proposal.id,
@@ -509,25 +521,61 @@ fn step_pick_proposal(ctx: &mut CycleCtx) -> StepResult {
 }
 
 fn step_synthesise_campaign(ctx: &mut CycleCtx) -> StepResult {
-    // Build a minimal campaign.toml for this proposal.
+    // Build a complete campaign.toml for the picked proposal — filled in
+    // with implementer/reviewer agents from halo.toml plus the proposal's
+    // title/rationale/files in the assignment.
     let proposal_id = ctx.proposal_id.as_deref().unwrap_or("unknown");
+    let title = ctx.proposal_title.as_deref().unwrap_or("untitled");
+    let rationale = ctx.proposal_rationale.as_deref().unwrap_or("");
     let campaign_name = format!("halo-cycle-{}", ctx.cycle);
     let branch = format!("halo/cycle-{}-{}", ctx.cycle, &ctx.slug);
     let campaign_path = ctx.halo_dir.join(format!("cycle-{}-campaign.toml", ctx.cycle));
+    let reviewer = ctx.cfg.orchestrate.reviewer_agent.as_str();
+    let files_block = if ctx.proposal_files.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nFiles mentioned in the proposal:\n{}\n",
+            ctx.proposal_files
+                .iter()
+                .map(|f| format!("- {f}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    };
+    // Escape triple-quotes in the assignment by replacing `"""` with `\"\"\"`.
+    let assignment = format!(
+        "{title}\n\n{rationale}\n{files_block}\nStay tightly scoped: this is one cycle of the halo autonomous loop. If the change is larger than estimated, leave the rest as a follow-up proposal.",
+    )
+    .replace("\"\"\"", "\\\"\\\"\\\"");
 
     let campaign_toml = format!(
         r#"name = "{campaign_name}"
+description = "halo cycle {cycle} — {title} (proposal {proposal_id})"
 target_branch = "{target_branch}"
+
+[defaults]
+reviewer = "{reviewer}"
+fix_loop_max = 2
 
 [[milestones]]
 id = "{proposal_id}"
 branch = "{branch}"
-assignment = "Implement the proposal: {proposal_id}"
+depends_on = []
+implementer = "halo-implementer"
+reviewer = "{reviewer}"
+assignment = """
+{assignment}
+"""
 "#,
         campaign_name = campaign_name,
-        target_branch = ctx.target_branch,
-        branch = branch,
+        cycle = ctx.cycle,
+        title = title,
         proposal_id = proposal_id,
+        target_branch = ctx.target_branch,
+        reviewer = reviewer,
+        branch = branch,
+        assignment = assignment,
     );
 
     std::fs::create_dir_all(ctx.halo_dir)

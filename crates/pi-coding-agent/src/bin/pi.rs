@@ -138,6 +138,14 @@ fn main() -> anyhow::Result<()> {
     if cli.halo_stop {
         return cmd::run_halo_stop();
     }
+    if cli.halo {
+        let cwd = std::env::current_dir()?;
+        return pi_coding_agent::halo::run::run_supervisor(
+            &cwd,
+            cli.halo_config.as_deref(),
+            cli.halo_max_cycles,
+        );
+    }
     if let Some(path) = &cli.orchestrate_dry_run {
         let text = std::fs::read_to_string(path)?;
         let campaign = match pi_orchestrate::parse_campaign(&text) {

@@ -285,6 +285,10 @@ pub struct Cli {
     #[arg(long = "halo", action = ArgAction::SetTrue)]
     pub halo: bool,
 
+    /// Max cycles to run before exiting (default 1; 0 = unlimited).
+    #[arg(long = "halo-max-cycles", value_name = "N", default_value_t = 1)]
+    pub halo_max_cycles: u64,
+
     /// Add a proposal directly to the backlog.
     #[arg(long = "halo-add-proposal", action = ArgAction::SetTrue)]
     pub halo_add_proposal: bool,
