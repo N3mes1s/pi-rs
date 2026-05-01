@@ -182,6 +182,18 @@
     },
     {
       "provider": "openai",
+      "model": "gpt-5.4-mini",
+      "input_cost_per_mtok": 0.25,
+      "output_cost_per_mtok": 2.0,
+      "cache_read_cost_per_mtok": 0.125,
+      "verified": "estimated",
+      "verified_at": "2026-04-30",
+      "sources": [
+        "Estimate: same shape as gpt-5-mini; live discovery (~/.pi/agent/discovered-models.json) returns placeholder $0/$0 — needs operator confirmation before billing-critical use."
+      ]
+    },
+    {
+      "provider": "openai",
       "model": "gpt-5-nano",
       "input_cost_per_mtok": 0.05,
       "output_cost_per_mtok": 0.40,
