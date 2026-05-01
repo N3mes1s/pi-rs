@@ -412,10 +412,18 @@ pub fn run_cycle_with_ctx(
         "skipped"
     };
 
-    // Update proposal status.
+    // Update proposal status. v0.27 fix: only mark `merged` when
+    // orchestrate actually merged (outcome=="applied"); a `skipped`
+    // outcome means orchestrate ran but produced no merged commit
+    // (merged_count==0), so the proposal was NOT applied — mark it
+    // `failed` so cooldown-based retry kicks in. Prior versions
+    // mapped `skipped` to `merged` which made the backlog status
+    // diverge from branch truth (canary day-1 surfaced this as bug
+    // #10: "1 cycle applied, 7 marked merged in backlog").
     if let Some(ref pid) = ctx.proposal_id {
         let status = match outcome {
-            "applied" | "skipped" => "merged",
+            "applied" => "merged",
+            "skipped" => "failed",
             "rolled_back" => "rolled_back",
             "blocked" => "blocked",
             _ => "failed",
