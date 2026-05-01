@@ -36,9 +36,17 @@ pub fn run_supervisor(repo_root: &Path, config_path: Option<&Path>, max_cycles: 
     // it impossible to correlate state.jsonl events across runs
     // (everything showed cycle:1).
     let mut cycle_n = highest_recorded_cycle(&halo_dir).map_or(1, |n| n + 1);
+    // v0.27 fix (canary bug #17): max_cycles is operator-RELATIVE,
+    // not state.jsonl-ABSOLUTE. Prior versions compared cycle_n
+    // (which continues from prior runs after the bug #12 fix) to
+    // max_cycles directly, so an operator running halo a second time
+    // with `--halo-max-cycles 5` would get 0 cycles (cycle_n already
+    // > 5 from yesterday's run). Track the starting cycle and gate
+    // on the delta.
+    let start_cycle_n = cycle_n;
     let mut last_cycle_start: Option<std::time::Instant> = None;
     loop {
-        if max_cycles != 0 && cycle_n > max_cycles { break; }
+        if max_cycles != 0 && (cycle_n - start_cycle_n) >= max_cycles { break; }
         if sig_any.load(Ordering::SeqCst) { std::process::exit(130); }
         // v0.27 fix (canary bugs #14 + #15): enforce
         // min_seconds_between_cycles. Prior versions parsed it but
