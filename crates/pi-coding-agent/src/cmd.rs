@@ -818,3 +818,23 @@ pub fn run_halo_drop_proposal(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- halo M4 operator commands ----
+
+/// `pi --halo-pause` — write pause.req; supervisor picks it up at cycle boundary.
+pub fn run_halo_pause() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    crate::halo::run::operator_pause(&cwd)
+}
+
+/// `pi --halo-resume` — clear paused flag + append STREAK_RESET.
+pub fn run_halo_resume() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    crate::halo::run::operator_resume(&cwd)
+}
+
+/// `pi --halo-stop` — write stop.req; supervisor exits cleanly after current cycle.
+pub fn run_halo_stop() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    crate::halo::run::operator_stop(&cwd)
+}
+

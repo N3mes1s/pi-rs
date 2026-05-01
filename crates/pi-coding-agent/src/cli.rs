@@ -312,6 +312,20 @@ pub struct Cli {
     /// Estimated cost for --halo-add-proposal.
     #[arg(long = "est-cost", value_name = "USD")]
     pub halo_est_cost: Option<f64>,
+
+    // ---- halo operator controls (RFD 0025 M4) ----
+
+    /// Write pause.req — supervisor finishes current cycle then pauses.
+    #[arg(long = "halo-pause", action = ArgAction::SetTrue)]
+    pub halo_pause: bool,
+
+    /// Clear paused flag + append STREAK_RESET. Run `pi --halo` afterwards.
+    #[arg(long = "halo-resume", action = ArgAction::SetTrue)]
+    pub halo_resume: bool,
+
+    /// Write stop.req — supervisor finishes current cycle then exits cleanly.
+    #[arg(long = "halo-stop", action = ArgAction::SetTrue)]
+    pub halo_stop: bool,
 }
 
 impl Cli {

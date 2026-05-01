@@ -129,6 +129,15 @@ fn main() -> anyhow::Result<()> {
     if let Some(id) = &cli.halo_drop_proposal {
         return cmd::run_halo_drop_proposal(id);
     }
+    if cli.halo_pause {
+        return cmd::run_halo_pause();
+    }
+    if cli.halo_resume {
+        return cmd::run_halo_resume();
+    }
+    if cli.halo_stop {
+        return cmd::run_halo_stop();
+    }
     if let Some(path) = &cli.orchestrate_dry_run {
         let text = std::fs::read_to_string(path)?;
         let campaign = match pi_orchestrate::parse_campaign(&text) {

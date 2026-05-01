@@ -8,6 +8,7 @@ pub mod proposer;
 pub mod run;
 pub mod spend;
 pub mod state;
+pub mod streak;
 
 use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
