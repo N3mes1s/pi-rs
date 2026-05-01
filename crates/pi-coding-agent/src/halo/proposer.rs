@@ -101,10 +101,99 @@ pub fn run_proposer_if_due(
 }
 
 pub fn run_proposer(repo_root: &Path, cfg: &Config) -> Result<Vec<ProposalDraft>> {
-    let _ = repo_root;
-    let agent_path = Path::new(".pi").join("agents").join("halo-proposer.md");
-    let response = std::fs::read_to_string(&agent_path).with_context(|| format!("read proposer agent {}", agent_path.display()))?;
-    Ok(parse_proposals(&response, cfg.proposer.proposals_per_refill))
+    // v0.27 fix (canary bug #16): the M3 implementation read the
+    // bundled halo-proposer.md as static-bullet content and re-emitted
+    // its hardcoded exemplars on every call. With cooldown=60s this
+    // produced an infinite "burst" of duplicate proposals and zero
+    // diverse work. The proper fix is to invoke the bundled agent's
+    // system prompt against a real LLM, with the repo's AGENTS.md +
+    // recent commit log as context, and parse `## Proposals` bullets
+    // out of the LLM's actual response.
+    //
+    // Implementation: shell out to `pi -p --no-tools` (read-only,
+    // single-shot), pass the agent file content + repo context + a
+    // diversity-aware ask as the user message. The LLM generates
+    // fresh proposals with the format the bullet parser expects.
+    //
+    // Falls back to the M3 static-file-read on any subprocess failure
+    // so the supervisor keeps making forward progress even if the
+    // proposer subprocess is broken (e.g. no LLM credentials).
+    let agent_path = repo_root.join(".pi").join("agents").join("halo-proposer.md");
+    let agent_md = std::fs::read_to_string(&agent_path)
+        .with_context(|| format!("read proposer agent {}", agent_path.display()))?;
+    let context = build_repo_context(repo_root);
+    let ask = format!(
+        "You are the halo proposer subagent. Below is your system prompt (the bundled \
+         halo-proposer.md), followed by repo context (AGENTS.md head + recent commit log).\n\n\
+         Your task: emit a markdown response with a `## Proposals` heading followed by \
+         exactly {n} bullet items. Each bullet MUST end in `(priority: <0..1>, est_cost: \
+         $<float>, files: <comma-separated paths>)`. AVOID re-proposing work that already \
+         appears in the recent commit log — that's already done.\n\n\
+         === BUNDLED halo-proposer.md ===\n{agent}\n\n\
+         === Repo context ===\n{ctx}",
+        n = cfg.proposer.proposals_per_refill,
+        agent = agent_md.trim(),
+        ctx = context,
+    );
+    let pi_bin = std::env::current_exe()
+        .with_context(|| "locating pi binary for proposer subprocess")?;
+    let output = std::process::Command::new(&pi_bin)
+        .args(["-p", "--no-tools"])
+        .arg(&ask)
+        .current_dir(repo_root)
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let response = String::from_utf8_lossy(&o.stdout).to_string();
+            let parsed = parse_proposals(&response, cfg.proposer.proposals_per_refill);
+            if parsed.is_empty() {
+                warn!(
+                    response_len = response.len(),
+                    "proposer LLM returned no parseable bullets; falling back to bundled file"
+                );
+                return Ok(parse_proposals(&agent_md, cfg.proposer.proposals_per_refill));
+            }
+            Ok(parsed)
+        }
+        Ok(o) => {
+            warn!(
+                exit_code = ?o.status.code(),
+                stderr = %String::from_utf8_lossy(&o.stderr).chars().take(200).collect::<String>(),
+                "proposer subprocess exited non-zero; falling back to bundled file"
+            );
+            Ok(parse_proposals(&agent_md, cfg.proposer.proposals_per_refill))
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "proposer subprocess spawn failed; falling back to bundled file"
+            );
+            Ok(parse_proposals(&agent_md, cfg.proposer.proposals_per_refill))
+        }
+    }
+}
+
+/// Build a compact repo-context string for the proposer's user message:
+/// AGENTS.md head + last 20 git commits + a brief workspace summary.
+fn build_repo_context(repo_root: &Path) -> String {
+    let mut buf = String::with_capacity(4096);
+    if let Ok(agents_md) = std::fs::read_to_string(repo_root.join("AGENTS.md")) {
+        buf.push_str("--- AGENTS.md (first 4 KiB) ---\n");
+        let head = if agents_md.len() > 4096 { &agents_md[..4096] } else { agents_md.as_str() };
+        buf.push_str(head);
+        buf.push_str("\n\n");
+    }
+    let log = std::process::Command::new("git")
+        .args(["-C", repo_root.to_string_lossy().as_ref(), "log", "--oneline", "-20"])
+        .output();
+    if let Ok(o) = log {
+        if o.status.success() {
+            buf.push_str("--- git log --oneline -20 ---\n");
+            buf.push_str(&String::from_utf8_lossy(&o.stdout));
+            buf.push('\n');
+        }
+    }
+    buf
 }
 
 pub fn budget_exceeded(cfg: &Config, today_spend: f64) -> bool {
