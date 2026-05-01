@@ -30,7 +30,12 @@ pub fn run_supervisor(repo_root: &Path, config_path: Option<&Path>, max_cycles: 
     signal_flag::register(SIGINT, Arc::clone(&sig_any))?; signal_flag::register(SIGTERM, Arc::clone(&sig_any))?; signal_flag::register(SIGINT, Arc::clone(&sigint))?; signal_flag::register(SIGTERM, Arc::clone(&sigterm))?;
     let orchestrate_pid_shared = Arc::new(AtomicI32::new(0));
     startup_reconciliation(repo_root, &halo_dir)?; cycle::prune_old_cycle_branches(repo_root, cfg.cycle.keep_branches);
-    let mut cycle_n = 1u64;
+    // v0.27 fix (canary bug #12): continue cycle numbering from
+    // the highest CYCLE_DONE/CYCLE_ABORTED in state.jsonl. Prior
+    // versions reset cycle_n=1 on every supervisor restart, making
+    // it impossible to correlate state.jsonl events across runs
+    // (everything showed cycle:1).
+    let mut cycle_n = highest_recorded_cycle(&halo_dir).map_or(1, |n| n + 1);
     loop {
         if max_cycles != 0 && cycle_n > max_cycles { break; }
         if sig_any.load(Ordering::SeqCst) { std::process::exit(130); }
@@ -73,6 +78,29 @@ fn wait_for_window_end_or_flags(halo_dir: &Path, cfg: &config::Config) -> Result
 }
 
 pub fn startup_reconciliation(_repo_root: &Path, _halo_dir: &Path) -> Result<()> { Ok(()) }
+
+/// Find the highest cycle number recorded as CYCLE_DONE or
+/// CYCLE_ABORTED in `state.jsonl`. Returns `None` for a fresh
+/// supervisor (no prior cycles).
+fn highest_recorded_cycle(halo_dir: &Path) -> Option<u64> {
+    let path = halo_dir.join("state.jsonl");
+    let text = fs::read_to_string(&path).ok()?;
+    let mut highest: Option<u64> = None;
+    for line in text.lines() {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("kind").and_then(|k| k.as_str()) != Some("meta") { continue; }
+        let meta = v.get("meta").and_then(|m| m.as_str()).unwrap_or("");
+        if meta != "CYCLE_DONE" && meta != "CYCLE_ABORTED" { continue; }
+        let cycle = v.get("detail").and_then(|d| d.get("cycle")).and_then(|c| c.as_u64());
+        if let Some(c) = cycle {
+            highest = Some(highest.map_or(c, |h| h.max(c)));
+        }
+    }
+    highest
+}
 
 fn lock_pid(lock: &Path) -> Option<i32> {
     let text = fs::read_to_string(lock).ok()?;
