@@ -121,7 +121,10 @@ pub async fn finalize_for_runtime(
     let outcome = finalize_session(&cfg.session_manager, session_id, judge.as_ref()).await;
 
     if settings.evolve.enabled {
-        spawn_evolve_tick_detached();
+        // Skip spawning detached evolve ticks when running under halo orchestration.
+        if std::env::var("PI_HALO_SUPPRESS_DETACHED_EVOLVE").ok().as_deref() != Some("1") {
+            spawn_evolve_tick_detached();
+        }
     }
 
     outcome

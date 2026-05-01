@@ -279,6 +279,16 @@ pub struct Cli {
     /// Allow target_branch = "main" (normally refused by halo validator).
     #[arg(long = "halo-allow-main", action = ArgAction::SetTrue)]
     pub halo_allow_main: bool,
+
+    /// Run halo in long-running supervisor mode. M2 runs `--halo-max-cycles`
+    /// cycles (default 1) then exits. M3+ will run forever (until paused/stopped).
+    #[arg(long = "halo", action = ArgAction::SetTrue)]
+    pub halo: bool,
+
+    /// Maximum number of cycles for `--halo`. Default 1 in M2 (canary aid).
+    /// 0 = run forever.
+    #[arg(long = "halo-max-cycles", value_name = "N", default_value_t = 1)]
+    pub halo_max_cycles: u64,
 }
 
 impl Cli {

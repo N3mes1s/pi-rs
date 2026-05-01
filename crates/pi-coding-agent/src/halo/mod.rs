@@ -2,6 +2,10 @@
 //! and halo-owned-clone precondition validator.
 
 pub mod config;
+pub mod cycle;
+pub mod run;
+pub mod spend;
+pub mod state;
 
 use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};

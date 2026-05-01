@@ -759,3 +759,10 @@ pub fn run_halo_status(watch: bool, json: bool, config_path: Option<&std::path::
 // (legacy halo status snapshot helpers removed in M1 v2 — replaced by
 //  `crate::halo::snapshot_with_config` + `crate::halo::render_snapshot_human`.)
 
+/// `pi --halo` — run the halo supervisor.
+/// M2: runs `max_cycles` cycles (default 1) then exits.
+pub fn run_halo_supervisor(max_cycles: u64, config_path: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    crate::halo::run::run_supervisor(&cwd, config_path, max_cycles)
+}
+

@@ -52,6 +52,7 @@ include_dir.workspace = true
 textwrap.workspace = true
 pulldown-cmark.workspace = true
 syntect.workspace = true
+signal-hook = "0.4.4"
 
 [dev-dependencies]
 wiremock.workspace = true
