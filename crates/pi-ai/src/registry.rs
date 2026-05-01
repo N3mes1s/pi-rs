@@ -465,6 +465,27 @@ pub(crate) fn default_providers() -> Vec<ProviderConfig> {
                     Some(0.125),
                     None,
                 )),
+                // gpt-5.4-mini — Responses-only reasoning mini.
+                // Same context/cost shape as gpt-5-mini, same Responses API
+                // discipline as the rest of the gpt-5.4 family.
+                with_responses_api(with_cache(
+                    with_tier(
+                        m(
+                            "openai",
+                            "gpt-5.4-mini",
+                            Some("gpt-5.4-mini"),
+                            400_000,
+                            100_000,
+                            true,
+                            true,
+                            0.25,
+                            2.0,
+                        ),
+                        2,
+                    ),
+                    Some(0.125),
+                    None,
+                )),
                 with_responses_api(with_cache(
                     with_tier(
                         m(

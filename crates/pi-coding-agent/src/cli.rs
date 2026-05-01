@@ -254,6 +254,82 @@ pub struct Cli {
     /// Defaults to `~/.pi/orchestrate/`.
     #[arg(long = "orchestrate-state-root", value_name = "PATH")]
     pub orchestrate_state_root: Option<PathBuf>,
+
+    // ---- halo flags (RFD 0025 M1) ----
+
+    /// Read-only snapshot of halo supervisor state. Exit 0. Use with
+    /// --watch or --json.
+    #[arg(long = "halo-status", action = ArgAction::SetTrue)]
+    pub halo_status: bool,
+
+    /// Config path for --halo-status (default <repo>/.pi/halo.toml).
+    #[arg(long = "halo-config", value_name = "PATH")]
+    pub halo_config: Option<PathBuf>,
+
+    /// With --halo-status: re-render every 5s (like `top`).
+    #[arg(long = "watch", action = ArgAction::SetTrue)]
+    pub watch: bool,
+
+    /// Write bundled halo agent files (halo-proposer.md, halo-implementer.md,
+    /// code-reviewer.md) to <repo>/.pi/agents/ if they don't already exist,
+    /// then exit. Tests the M1 bundled-agent bootstrap.
+    #[arg(long = "halo-bootstrap-agents", action = ArgAction::SetTrue)]
+    pub halo_bootstrap_agents: bool,
+
+    /// Allow target_branch = "main" (normally refused by halo validator).
+    #[arg(long = "halo-allow-main", action = ArgAction::SetTrue)]
+    pub halo_allow_main: bool,
+
+    /// Run halo in long-running supervisor mode. M2 runs `--halo-max-cycles`
+    /// cycles (default 1) then exits. M3+ will run forever (until paused/stopped).
+    #[arg(long = "halo", action = ArgAction::SetTrue)]
+    pub halo: bool,
+
+    /// Max cycles to run before exiting (default 1; 0 = unlimited).
+    #[arg(long = "halo-max-cycles", value_name = "N", default_value_t = 1)]
+    pub halo_max_cycles: u64,
+
+    /// Add a proposal directly to the backlog.
+    #[arg(long = "halo-add-proposal", action = ArgAction::SetTrue)]
+    pub halo_add_proposal: bool,
+
+    /// Drop a proposal by id.
+    #[arg(long = "halo-drop-proposal", value_name = "ID")]
+    pub halo_drop_proposal: Option<String>,
+
+    /// Proposal title for --halo-add-proposal.
+    #[arg(long = "title", value_name = "TITLE")]
+    pub halo_title: Option<String>,
+
+    /// Proposal rationale for --halo-add-proposal.
+    #[arg(long = "rationale", value_name = "RATIONALE")]
+    pub halo_rationale: Option<String>,
+
+    /// CSV file list for --halo-add-proposal.
+    #[arg(long = "files", value_name = "CSV")]
+    pub halo_files: Option<String>,
+
+    /// Priority for --halo-add-proposal.
+    #[arg(long = "priority", value_name = "0..1")]
+    pub halo_priority: Option<f64>,
+
+    /// Estimated cost for --halo-add-proposal.
+    #[arg(long = "est-cost", value_name = "USD")]
+    pub halo_est_cost: Option<f64>,
+
+    // ---- halo operator controls (RFD 0025 M4) ----
+
+    /// Write pause.req — supervisor finishes current cycle then pauses.
+    #[arg(long = "halo-pause", action = ArgAction::SetTrue)]
+    pub halo_pause: bool,
+
+    /// Clear paused flag + append STREAK_RESET. Run `pi --halo` afterwards.
+    #[arg(long = "halo-resume", action = ArgAction::SetTrue)]
+    pub halo_resume: bool,
+
+    /// Write stop.req — supervisor finishes current cycle then exits cleanly.
+    #[arg(long = "halo-stop", action = ArgAction::SetTrue)]
+    pub halo_stop: bool,
 }
 
 impl Cli {

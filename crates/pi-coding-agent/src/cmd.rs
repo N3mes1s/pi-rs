@@ -714,3 +714,127 @@ fn print_policy(path: &std::path::Path, policy: &crate::auto_approve::Policy) {
         }
     }
 }
+
+// -- halo (RFD 0025 M1) -----------------------------------------------------
+
+/// `pi --halo-bootstrap-agents` — write bundled halo agents to
+/// `<cwd>/.pi/agents/` if they don't already exist. Exit 0.
+pub fn run_halo_bootstrap_agents() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let written = crate::halo::bootstrap_bundled_agents(&cwd)?;
+    if written.is_empty() {
+        println!("halo: no agent files written (all already present)");
+    } else {
+        println!("halo: bootstrapped {} agent file(s):", written.len());
+        for p in &written {
+            println!("  {}", p.display());
+        }
+    }
+    Ok(())
+}
+
+/// `pi --halo-status` — read-only snapshot of halo supervisor state for the
+/// repo containing the cwd.
+pub fn run_halo_status(watch: bool, json: bool, config_path: Option<&std::path::Path>) -> anyhow::Result<()> {
+    use std::time::Duration;
+    loop {
+        let cwd = std::env::current_dir()?;
+        let snap = crate::halo::snapshot_with_config(&cwd, config_path)?;
+        if json {
+            println!("{}", serde_json::to_string(&snap)?);
+        } else {
+            crate::halo::render_snapshot_human(&snap);
+        }
+        if !watch {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_secs(5));
+        if !json {
+            // crude clear so successive renders don't pile up
+            println!("\x1b[2J\x1b[H");
+        }
+    }
+}
+
+// (legacy halo status snapshot helpers removed in M1 v2 — replaced by
+//  `crate::halo::snapshot_with_config` + `crate::halo::render_snapshot_human`.)
+
+/// `pi --halo` — run the halo supervisor.
+/// M2: runs `max_cycles` cycles (default 1) then exits.
+pub fn run_halo_add_proposal(
+    title: &str,
+    rationale: Option<&str>,
+    files: Option<&str>,
+    priority: Option<f64>,
+    est_cost: Option<f64>,
+) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let halo_dir = crate::halo::cycle::halo_dir_for_repo(&cwd)
+        .ok_or_else(|| anyhow::anyhow!("no home dir"))?;
+    let cfg_path = cwd.join(".pi").join("halo.toml");
+    if !cfg_path.is_file() {
+        anyhow::bail!("halo.toml not found; initialise halo first");
+    }
+    let backlog_jsonl = halo_dir.join("backlog.jsonl");
+    let id = crate::halo::proposer::generate_proposal_id();
+    let files: Vec<String> = files
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    crate::halo::backlog::append_proposal_created(
+        &backlog_jsonl,
+        &id,
+        title,
+        rationale.unwrap_or(""),
+        &files,
+        priority.unwrap_or(0.5),
+        est_cost.unwrap_or(0.0),
+        "operator:cli",
+    )?;
+    println!("added proposal {id}");
+    Ok(())
+}
+
+pub fn run_halo_drop_proposal(id: &str) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let halo_dir = crate::halo::cycle::halo_dir_for_repo(&cwd)
+        .ok_or_else(|| anyhow::anyhow!("no home dir"))?;
+    let backlog_jsonl = halo_dir.join("backlog.jsonl");
+    let map = crate::halo::backlog::replay(&backlog_jsonl);
+    let Some(prop) = map.get(id) else {
+        anyhow::bail!("error: proposal {id} unknown");
+    };
+    let pid = halo_dir.join("pid");
+    let live = pid.is_file();
+    if live && prop.status == "dispatched" {
+        let cycle = crate::halo::backlog::latest_dispatched_cycle(&backlog_jsonl, id).unwrap_or(0);
+        anyhow::bail!(
+            "error: proposal {id} is currently dispatched in cycle {cycle}; wait for cycle terminal or run pi --halo-pause first"
+        );
+    }
+    crate::halo::backlog::append_proposal_dropped(&backlog_jsonl, id, "operator:cli")?;
+    Ok(())
+}
+
+// ---- halo M4 operator commands ----
+
+/// `pi --halo-pause` — write pause.req; supervisor picks it up at cycle boundary.
+pub fn run_halo_pause() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    crate::halo::run::operator_pause(&cwd)
+}
+
+/// `pi --halo-resume` — clear paused flag + append STREAK_RESET.
+pub fn run_halo_resume() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    crate::halo::run::operator_resume(&cwd)
+}
+
+/// `pi --halo-stop` — write stop.req; supervisor exits cleanly after current cycle.
+pub fn run_halo_stop() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    crate::halo::run::operator_stop(&cwd)
+}
+
