@@ -40,6 +40,10 @@ mod linux_tests {
         );
     }
 
+    /// BusyBox `timeout 1 sh -c 'sleep 5'` fires after 1 second and returns
+    /// exit 124. The worker timeout budget is 100 ms (sub-second), but the
+    /// outer guard is set to ceil(100/1000)*1000 + 1000 = 2000 ms so the OS
+    /// kill completes before the worker can drop the future. Test takes ~1 s.
     #[tokio::test]
     async fn bash_timeout_returns_exit_124() {
         let req = ToolRequest {
@@ -48,13 +52,13 @@ mod linux_tests {
             tool_name: "bash".to_string(),
             tool_input: serde_json::json!({ "command": "sleep 5" }),
             max_output_bytes: 4096,
-            timeout_ms: 2_000, // 2 s budget — harden_bash_input wraps with timeout 2s
+            timeout_ms: 100, // sub-second: BusyBox rounds up to 1 s
         };
         let work_dir = std::path::Path::new("/tmp");
         let resp = dispatch_request(req, work_dir).await;
 
         assert!(resp.is_error, "expected is_error=true for timed-out bash");
-        // BashTool sets exit_status based on `timeout` command's exit code (124).
+        // BusyBox `timeout` exits 124; BashTool surfaces the child exit code.
         assert_eq!(resp.exit_status, 124, "expected exit_status 124 for timeout");
     }
 

@@ -16,14 +16,17 @@
 //!
 //! 3. **Bash process cleanup** — `BashTool` uses `tokio::process::Command`
 //!    without `kill_on_drop`, so dropping the future on timeout leaves the
-//!    child running. We work around this by injecting a `timeout_ms` budget
-//!    into bash inputs (so BashTool's own timer fires slightly after the OS)
-//!    **and** by wrapping the command with BusyBox-compatible
-//!    `timeout <secs> sh -c '<cmd>'` so the `timeout` utility sends SIGTERM
-//!    to the child's process group. Single-quotes in the original command are
-//!    escaped, preserving shell syntax. The integer-seconds rounding
-//!    (required by BusyBox `timeout`) means the effective kill boundary is up
-//!    to 999 ms earlier than `timeout_ms`.
+//!    child running. We work around this by wrapping the bash command with
+//!    BusyBox-compatible `timeout SECS sh -c '<cmd>'` (so the OS sends
+//!    SIGTERM to the child process group), and by setting **both** BashTool's
+//!    internal timer and the outer worker timeout to fire *after* BusyBox's
+//!    whole-second boundary. This guarantees the OS kill completes before
+//!    either Rust timeout can drop the future.
+//!
+//!    Concretely: BusyBox `timeout` fires at `ceil(timeout_ms / 1000)`
+//!    seconds. We set BashTool's internal timer to that value + 500 ms, and
+//!    the outer worker guard timeout to that value + 1000 ms. The overall
+//!    worst-case latency is `ceil(timeout_ms / 1000) + 1` seconds.
 
 use pi_sandbox_protocol::{ToolRequest, ToolResponse};
 use pi_tools_core::{ToolContext, ToolRegistry};
@@ -104,27 +107,40 @@ fn validate_paths(tool_name: &str, input: &serde_json::Value, work_dir: &Path) -
 // Bash process-kill hardening
 // --------------------------------------------------------------------------
 
-/// Wrap the bash command so child processes are killed when the budget runs out.
+/// Compute the BusyBox whole-second timeout ceiling for a given `timeout_ms`.
+/// This is the number of seconds after which the OS `timeout` command fires.
+fn busybox_secs(timeout_ms: u32) -> u64 {
+    ((timeout_ms as u64 + 999) / 1000).max(1)
+}
+
+/// Wrap the bash command so child processes are killed when the budget runs out,
+/// and set BashTool's internal timer high enough that it never fires before
+/// BusyBox's `timeout` command kills the child.
 ///
-/// BusyBox `timeout` (Alpine guest) accepts: `timeout [-t SECS] SECS CMD [ARGS…]`
-/// where `SECS` is a whole number. The GNU `--kill-after` long option is *not*
-/// available. BusyBox also does not accept `timeout SECS sh -c 'compound cmd'`
-/// natively when the command contains shell builtins, so we delegate the whole
-/// original command string to `sh -c` to preserve shell syntax:
+/// BusyBox `timeout` (Alpine guest) accepts: `timeout SECS CMD [ARGS…]` where
+/// `SECS` is a whole number. The `timeout` utility exits 124 when it kills the
+/// process, which `BashTool` surfaces verbatim. We delegate the entire original
+/// command string to `sh -c` to preserve shell syntax (builtins, pipes, `&&`):
 ///
 ///   timeout SECS sh -c '<original_command>'
 ///
-/// The `timeout` utility exits 124 when it kills the process, which `BashTool`
-/// surfaces verbatim (it passes the child exit code through). We add a small
-/// grace window on BashTool's internal timer so it doesn't race with the OS kill.
-fn harden_bash_input(input: serde_json::Value, timeout_ms: u32) -> serde_json::Value {
+/// Single-quotes in the original command are escaped as `'\''`.
+///
+/// **Timer ordering guarantee**: BusyBox fires at `SECS` seconds.  We set
+/// BashTool's internal `timeout_ms` to `SECS * 1000 + 500` so it never races
+/// with the OS kill. The caller (`dispatch_request`) uses `outer_bash_timeout`
+/// for the outer guard.
+fn harden_bash_input(input: serde_json::Value, timeout_ms: u32) -> (serde_json::Value, std::time::Duration) {
     let mut obj = match input {
         serde_json::Value::Object(m) => m,
-        other => return other, // not an object — let BashTool reject it
+        other => {
+            // Not an object — pass through; outer timeout is just req timeout.
+            let outer = std::time::Duration::from_millis(timeout_ms as u64);
+            return (other, outer);
+        }
     };
 
-    // BusyBox `timeout` accepts only whole seconds; round up, minimum 1 s.
-    let secs = ((timeout_ms + 999) / 1000).max(1);
+    let secs = busybox_secs(timeout_ms);
 
     // Wrap original command via `sh -c` so compound shell syntax is preserved.
     // BusyBox form: `timeout <secs> sh -c '<cmd>'`
@@ -137,14 +153,18 @@ fn harden_bash_input(input: serde_json::Value, timeout_ms: u32) -> serde_json::V
         }
     }
 
-    // Give BashTool's internal tokio timer 500 ms extra headroom so the OS
-    // `timeout` command fires first and returns exit 124, rather than
-    // BashTool's future being dropped while the child is still alive.
-    let inner_ms = timeout_ms.saturating_add(500);
+    // BashTool's internal tokio timer: fires secs * 1000 + 500 ms after start.
+    // This is always > the BusyBox SECS boundary, so BusyBox kills the child
+    // first and BashTool sees exit 124 rather than its own timeout path.
+    let bash_internal_ms: u64 = secs * 1000 + 500;
     obj.entry("timeout_ms".to_string())
-        .or_insert(serde_json::Value::Number(inner_ms.into()));
+        .or_insert(serde_json::Value::Number(bash_internal_ms.into()));
 
-    serde_json::Value::Object(obj)
+    // Outer worker guard: fires secs * 1000 + 1000 ms, still after BusyBox.
+    // This ensures the child is already dead before we can ever drop the future.
+    let outer = std::time::Duration::from_millis(secs * 1000 + 1000);
+
+    (serde_json::Value::Object(obj), outer)
 }
 
 // --------------------------------------------------------------------------
@@ -182,11 +202,12 @@ pub async fn dispatch_request(req: ToolRequest, work_dir: &Path) -> ToolResponse
     }
 
     // For bash, harden the input so child processes are reliably killed on
-    // timeout (Linux `timeout` utility + BashTool's own internal timer).
-    let tool_input = if req.tool_name == "bash" {
+    // timeout. `harden_bash_input` also returns the outer timeout duration
+    // that guarantees the OS kill has fired before we can drop the future.
+    let (tool_input, outer_timeout) = if req.tool_name == "bash" {
         harden_bash_input(req.tool_input, req.timeout_ms)
     } else {
-        req.tool_input
+        (req.tool_input, std::time::Duration::from_millis(req.timeout_ms as u64))
     };
 
     // Build a ToolContext scoped to work_dir.
@@ -195,19 +216,27 @@ pub async fn dispatch_request(req: ToolRequest, work_dir: &Path) -> ToolResponse
         max_output_bytes: req.max_output_bytes as usize,
     };
 
-    // Outer worker-level timeout as a safety net (bash is handled above;
-    // this catches non-bash tools that run too long).
-    let timeout = std::time::Duration::from_millis(req.timeout_ms as u64);
     let invoke_fut = tool.invoke(&ctx, &req.call_id, tool_input);
-    match tokio::time::timeout(timeout, invoke_fut).await {
-        Ok(Ok(result)) => ToolResponse {
-            call_id,
-            stdout: result.model_output,
-            stderr: String::new(),
-            exit_status: if result.is_error { 1 } else { 0 },
-            guest_duration_ms: 0, // listener overrides
-            is_error: result.is_error,
-        },
+    match tokio::time::timeout(outer_timeout, invoke_fut).await {
+        Ok(Ok(result)) => {
+            // Extract the precise exit code if the tool embedded it in `display`
+            // (BashTool does: `"exit": code`). Fall back to 0/1 from is_error.
+            let exit_status = result
+                .display
+                .as_ref()
+                .and_then(|d| d.get("exit"))
+                .and_then(|v| v.as_i64())
+                .map(|n| n as i32)
+                .unwrap_or(if result.is_error { 1 } else { 0 });
+            ToolResponse {
+                call_id,
+                stdout: result.model_output,
+                stderr: String::new(),
+                exit_status,
+                guest_duration_ms: 0, // listener overrides
+                is_error: result.is_error,
+            }
+        }
         Ok(Err(e)) => {
             let msg = format!("tool error: {e}");
             ToolResponse {
