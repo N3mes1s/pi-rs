@@ -125,10 +125,12 @@ where
                 // Consume through the newline itself.
                 let consume_len = pos + 1;
                 reader.consume(consume_len);
-                // Strip optional leading '\r'.
-                let text = String::from_utf8_lossy(&buf);
-                let trimmed = text.trim_end_matches('\r');
-                return Ok(trimmed.to_string());
+                // Strip optional trailing '\r' (CRLF support).
+                let payload = buf.strip_suffix(b"\r").unwrap_or(&buf);
+                // Strict UTF-8: reject frames with invalid byte sequences.
+                let s = String::from_utf8(payload.to_vec())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                return Ok(s);
             }
             None => {
                 // No newline in window — absorb and keep reading.

@@ -241,3 +241,39 @@ async fn read_request_rejects_oversized_frame() {
         other => panic!("expected FrameTooLarge, got {:?}", other),
     }
 }
+
+// --- Invalid UTF-8 rejection test ---
+
+#[tokio::test]
+async fn read_request_rejects_invalid_utf8_frame() {
+    // Construct a frame that looks like valid JSON structure but contains
+    // an invalid UTF-8 byte (0xFF) in the tool_name field value.
+    // The bytes below are: {"proto_version":1,"call_id":"x","tool_name":"ba\xFFsh",...}\n
+    // We build it manually to inject a raw 0xFF byte.
+    let prefix = br#"{"proto_version":1,"call_id":"x","tool_name":"ba"#;
+    let suffix = br#"sh","tool_input":null,"max_output_bytes":1024,"timeout_ms":1000}"#;
+    let invalid_byte: &[u8] = &[0xFF]; // not valid UTF-8
+    let mut frame: Vec<u8> = Vec::new();
+    frame.extend_from_slice(prefix);
+    frame.extend_from_slice(invalid_byte);
+    frame.extend_from_slice(suffix);
+    frame.push(b'\n');
+
+    let mut buf_reader = BufReader::new(frame.as_slice());
+    let result = read_request(&mut buf_reader).await;
+
+    // Must be an error — not Ok with a mutated tool_name containing U+FFFD.
+    assert!(
+        result.is_err(),
+        "expected error for invalid UTF-8 frame, got Ok({:?})",
+        result.ok()
+    );
+    // It must NOT be a successful parse with a replacement character.
+    if let Ok(req) = result {
+        assert!(
+            !req.tool_name.contains('\u{FFFD}'),
+            "invalid UTF-8 was silently replaced instead of rejected: tool_name={:?}",
+            req.tool_name
+        );
+    }
+}
