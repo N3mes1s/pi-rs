@@ -8,8 +8,13 @@
 
 pub mod cache;
 pub mod local;
+pub mod microvm;
 pub mod provider;
 
 pub use cache::RootfsCache;
 pub use local::LocalProcessProvider;
+pub use microvm::{
+    CallLimits, MicroVmLauncher, NetworkPolicy, ProbeCheck, ProbeReport,
+    RootfsVersion, VmCeiling, VmExecution, VmHandle, VmSpec,
+};
 pub use provider::{SandboxError, SandboxExecution, SandboxProvider};
