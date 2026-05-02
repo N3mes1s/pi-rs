@@ -6,6 +6,7 @@ use pi_ai::{
     OpenAiCompatProvider, OpenAiProvider, Provider, ProviderConfig, ProviderKind, Role,
     ThinkingLevel, ToolCall, ToolResult, Usage,
 };
+use pi_sandbox::SandboxProvider;
 use pi_tools::{ToolContext, ToolRegistry};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -130,6 +131,12 @@ pub struct RuntimeConfig {
     /// delta; may signal an abort + re-injection (TTSR). `None` ⇒ no
     /// interception.
     pub stream_interceptor: Option<Arc<dyn StreamInterceptor>>,
+    /// Optional sandbox provider (RFD 0022). When `Some`, every approved
+    /// tool decision is dispatched through the sandbox boundary instead
+    /// of the inline `tool.invoke()` path. When `None` the legacy inline
+    /// invocation applies. The `ToolGate` still runs first regardless, so
+    /// rejected calls never reach the sandbox.
+    pub sandbox_provider: Option<Arc<dyn SandboxProvider>>,
 }
 
 impl RuntimeConfig {
@@ -152,6 +159,14 @@ impl RuntimeConfig {
     /// Install a stream interceptor (typically the TTSR matcher).
     pub fn with_stream_interceptor(mut self, interceptor: Arc<dyn StreamInterceptor>) -> Self {
         self.stream_interceptor = Some(interceptor);
+        self
+    }
+
+    /// Install a sandbox provider (RFD 0022). All approved tool decisions
+    /// will be dispatched through the provider's `execute_tool()` instead
+    /// of running inline.
+    pub fn with_sandbox_provider(mut self, provider: Arc<dyn SandboxProvider>) -> Self {
+        self.sandbox_provider = Some(provider);
         self
     }
 }
@@ -1064,7 +1079,35 @@ impl AgentSession {
                         continue;
                     }
                 }
-                match tool.invoke(&tool_ctx, &call.id, call.input.clone()).await {
+                let invocation = if let Some(sandbox) = &self.cfg.sandbox_provider {
+                    let started = std::time::Instant::now();
+                    let res = self
+                        .invoke_via_sandbox(sandbox.as_ref(), &tool_ctx, &call)
+                        .await;
+                    let duration_ms = started.elapsed().as_millis() as u64;
+                    // Telemetry row goes BEFORE the ToolResult so analyses
+                    // that join action↔result by ordinal still line up.
+                    let (exit_status, is_error) = match &res {
+                        Ok(r) => (if r.is_error { 1 } else { 0 }, r.is_error),
+                        Err(_) => (1, true),
+                    };
+                    let _ = self.cfg.session_manager.append(
+                        &self.id,
+                        SessionEntryKind::SandboxAction {
+                            provider: sandbox.name().to_string(),
+                            tool_name: call.name.clone(),
+                            duration_ms,
+                            exit_status,
+                            is_error,
+                        },
+                    );
+                    res
+                } else {
+                    tool.invoke(&tool_ctx, &call.id, call.input.clone())
+                        .await
+                        .map_err(|e| e.to_string())
+                };
+                match invocation {
                     Ok(result) => {
                         let _ = self.cfg.session_manager.append(
                             &self.id,
@@ -1116,6 +1159,26 @@ impl AgentSession {
                 let mut g = self.inner.lock().await;
                 g.messages.push(user_msg.clone());
             }
+        }
+    }
+
+    /// Dispatch one tool decision through the configured sandbox provider
+    /// and reshape its `(stdout, stderr, exit_status)` output into a
+    /// standard `ToolResult`. Telemetry emission happens in the caller.
+    async fn invoke_via_sandbox(
+        &self,
+        provider: &dyn SandboxProvider,
+        ctx: &ToolContext,
+        call: &ToolCall,
+    ) -> Result<ToolResult, String> {
+        match provider.execute_tool(ctx, &call.name, &call.input).await {
+            Ok(exec) => Ok(ToolResult {
+                tool_use_id: call.id.clone(),
+                model_output: exec.stdout,
+                display: None,
+                is_error: exec.exit_status != 0,
+            }),
+            Err(e) => Err(e.to_string()),
         }
     }
 

@@ -73,6 +73,17 @@ pub struct RouteStats {
     pub avg_budget_tokens: Option<f64>,
 }
 
+/// Per-provider roll-up of `sandbox_actions` rows. Powers
+/// `pi --stats sandbox-actions`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SandboxStats {
+    pub provider: String,
+    pub executions: u64,
+    pub errors: u64,
+    pub error_rate: f64,
+    pub avg_duration_ms: f64,
+}
+
 pub fn dashboard(conn: &Connection) -> rusqlite::Result<DashboardStats> {
     Ok(DashboardStats {
         overall: overall(conn)?,
@@ -82,6 +93,37 @@ pub fn dashboard(conn: &Connection) -> rusqlite::Result<DashboardStats> {
         approvals: approval_breakdown(conn)?,
         by_route_id: by_route_id(conn)?,
     })
+}
+
+pub fn by_sandbox_provider(c: &Connection) -> rusqlite::Result<Vec<SandboxStats>> {
+    let mut stmt = c.prepare(
+        "SELECT provider,
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN is_error=1 THEN 1 ELSE 0 END), 0),
+                COALESCE(AVG(duration_ms), 0.0)
+           FROM sandbox_actions
+          GROUP BY provider
+          ORDER BY COUNT(*) DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let provider: String = r.get(0)?;
+        let executions: u64 = r.get::<_, i64>(1)? as u64;
+        let errors: u64 = r.get::<_, i64>(2)? as u64;
+        let avg_duration_ms: f64 = r.get(3)?;
+        let error_rate = if executions == 0 {
+            0.0
+        } else {
+            errors as f64 / executions as f64
+        };
+        Ok(SandboxStats {
+            provider,
+            executions,
+            errors,
+            error_rate,
+            avg_duration_ms,
+        })
+    })?;
+    rows.collect()
 }
 
 pub fn by_route_id(c: &Connection) -> rusqlite::Result<Vec<RouteStats>> {

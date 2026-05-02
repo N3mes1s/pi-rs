@@ -99,6 +99,7 @@ fn cfg() -> RuntimeConfig {
         tool_gate: None,
         gate_ask_is_approve: false,
         stream_interceptor: None,
+        sandbox_provider: None,
     }
 }
 

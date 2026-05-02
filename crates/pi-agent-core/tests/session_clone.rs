@@ -79,6 +79,7 @@ fn clone_branch_returns_new_id_and_replays_entries() {
             SessionEntryKind::Outcome { .. } => "outcome",
             SessionEntryKind::EvolveMarker { .. } => "evolve_marker",
             SessionEntryKind::RoutingDecision { .. } => "routing_decision",
+            SessionEntryKind::SandboxAction { .. } => "sandbox_action",
         })
         .collect();
     assert_eq!(

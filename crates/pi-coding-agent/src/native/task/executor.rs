@@ -245,6 +245,7 @@ pub async fn run_one(
         tool_gate: parent_cfg.tool_gate.clone(),
         gate_ask_is_approve: parent_cfg.gate_ask_is_approve,
         stream_interceptor: parent_cfg.stream_interceptor.clone(),
+        sandbox_provider: parent_cfg.sandbox_provider.clone(),
     };
 
     // 7. Run a single prompt loop, with an updated ParentHandle scoped

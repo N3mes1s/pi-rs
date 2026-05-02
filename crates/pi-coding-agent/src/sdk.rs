@@ -58,5 +58,6 @@ pub fn build_runtime_config(b: BuildConfig) -> RuntimeConfig {
         tool_gate: None,
         gate_ask_is_approve: false,
         stream_interceptor: None,
+        sandbox_provider: None,
     }
 }

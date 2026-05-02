@@ -8,10 +8,12 @@ description = "Agent loop orchestration, session management, and event streaming
 tempfile.workspace = true
 futures.workspace = true
 async-trait.workspace = true
+pi-sandbox.workspace = true
 
 [dependencies]
 pi-ai.workspace = true
 pi-tools.workspace = true
+pi-sandbox.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
