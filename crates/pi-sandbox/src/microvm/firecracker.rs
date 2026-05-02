@@ -165,6 +165,10 @@ struct WarmVm {
     ceiling: VmCeiling,
     /// The host cwd virtio-fs path this VM is sharing.
     host_cwd: PathBuf,
+    /// The rootfs version this VM was booted with (for pool keying).
+    /// Required to enforce RootfsMismatch: a pool hit with a different
+    /// version must be rejected, not silently handed back.
+    rootfs_version: String,
 }
 
 impl WarmVm {
@@ -328,13 +332,32 @@ impl MicroVmLauncher for FirecrackerLauncher {
     async fn acquire(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, SandboxError> {
         let acquire_start = Instant::now();
 
-        // Try to pop a warm VM that matches the ceiling and host_cwd.
+        // ── Rootfs version check (fast-fail before pool lookup) ──────────────
+        // Reject requests whose rootfs_version doesn't match what this host
+        // binary supports. Checking early gives a clean RootfsMismatch error
+        // instead of a confusing boot failure or silent wrong-version pool hit.
+        let expected_version = CACHE_ROOTFS_VERSION;
+        let requested_version = &spec.rootfs_version.0;
+        if requested_version != expected_version {
+            return Err(SandboxError::RootfsMismatch {
+                expected: expected_version.to_string(),
+                found: requested_version.clone(),
+            });
+        }
+
+        // Try to pop a warm VM that matches the ceiling, host_cwd, AND
+        // rootfs_version. Expired entries are drained first so they don't
+        // clog the pool or inflate the capacity count.
         let warm_vm = {
             let mut pool = self.pool.lock().await;
+            // Prune all expired entries. This must happen before the match
+            // and before the capacity check in release()/refill so that
+            // "full" pool slots are only real, live VMs.
+            pool.retain(|vm| !vm.is_expired());
             let pos = pool.iter().position(|vm| {
-                !vm.is_expired()
-                    && vm.ceiling == spec.vm_ceiling
+                vm.ceiling == spec.vm_ceiling
                     && vm.host_cwd == spec.host_cwd
+                    && vm.rootfs_version == spec.rootfs_version.0
             });
             pos.map(|i| pool.remove(i).unwrap())
         };
@@ -363,8 +386,12 @@ impl MicroVmLauncher for FirecrackerLauncher {
         let spec_clone = spec.clone();
         let pool_size = self.config.pool_size;
         tokio::spawn(async move {
-            // pool.len() = VMs sitting idle; +1 = the one we just leased.
-            let idle = pool_clone.lock().await.len();
+            // Prune expired entries then check: idle + 1 leased vs capacity.
+            let idle = {
+                let mut p = pool_clone.lock().await;
+                p.retain(|vm| !vm.is_expired());
+                p.len()
+            };
             if idle + 1 < pool_size {
                 match cold_boot(&config_clone, &spec_clone).await {
                     Ok(new_vm) => pool_clone.lock().await.push_back(new_vm),
@@ -382,6 +409,7 @@ impl MicroVmLauncher for FirecrackerLauncher {
             call_count: std::sync::atomic::AtomicU32::new(vm.call_count),
             ceiling: vm.ceiling,
             host_cwd: vm.host_cwd,
+            rootfs_version: vm.rootfs_version,
             pool: Arc::clone(&self.pool),
             pool_size,
             acquire_to_ready_ms,
@@ -402,6 +430,9 @@ pub struct FirecrackerVmHandle {
     call_count: std::sync::atomic::AtomicU32,
     ceiling: VmCeiling,
     host_cwd: PathBuf,
+    /// Rootfs version this VM was booted with; stored so release() can
+    /// push a correctly-keyed WarmVm back to the pool.
+    rootfs_version: String,
     pool: Arc<Mutex<VecDeque<WarmVm>>>,
     /// Configured pool capacity (from FirecrackerConfig::pool_size).
     /// Used by release() to cap the pool before pushing back.
@@ -518,9 +549,13 @@ impl VmHandle for FirecrackerVmHandle {
             call_count: self.call_count.load(std::sync::atomic::Ordering::Relaxed),
             ceiling: self.ceiling,
             host_cwd: self.host_cwd,
+            rootfs_version: self.rootfs_version,
         };
         {
             let mut pool = self.pool.lock().await;
+            // Prune expired entries first so they don't inflate the capacity
+            // count and prevent valid live VMs from being returned.
+            pool.retain(|vm| !vm.is_expired());
             if pool.len() < self.pool_size {
                 pool.push_back(warm);
                 debug!(id = %vm_id, "VM returned to pool");
@@ -534,10 +569,14 @@ impl VmHandle for FirecrackerVmHandle {
     }
 }
 
-// ── Cold boot ───────────────────────────────────────────────────────────────
+// ── Cold boot ────────────────────────────────────────────────────────────────────────────
 
 /// Spawn a fresh Firecracker VM for the given spec and wait until the
 /// guest vsock worker is ready to accept connections.
+///
+/// Pre-condition: `acquire()` has already validated `spec.rootfs_version`
+/// against `CACHE_ROOTFS_VERSION` and returned `RootfsMismatch` if they
+/// differ, so this function focuses on booting.
 async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, SandboxError> {
     let vm_id = Uuid::new_v4().to_string();
     let run_dir = config.run_dir.join(&vm_id);
@@ -550,22 +589,14 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
 
     let kernel_path = config.resolved_kernel_path();
 
-    // ── Rootfs version enforcement (RFD 0023 §3) ──────────────────────────
-    // Reject mismatches before attempting to boot so the caller gets a clean
-    // SandboxError::RootfsMismatch rather than a cryptic guest boot failure.
-    let expected_version = CACHE_ROOTFS_VERSION;
-    let requested_version = &spec.rootfs_version.0;
-    if requested_version != expected_version {
-        return Err(SandboxError::RootfsMismatch {
-            expected: expected_version.to_string(),
-            found: requested_version.clone(),
-        });
-    }
-
-    // Ensure the rootfs artifact is present and sha256-verified, then use
-    // the *decompressed* `.img` path that Firecracker requires as a block
-    // device.  RootfsCache::ensure() returns the `.img.zst` path; we derive
-    // the decompressed sibling that build.sh writes alongside it.
+    // Resolve the decompressed rootfs image. Firecracker requires an
+    // uncompressed block device; the cache stores `.img.zst`.
+    //
+    // Priority:
+    //   1. PI_SANDBOX_ROOTFS env var  — trust the caller, use as-is.
+    //   2. config.rootfs_path         — explicit override, trust caller.
+    //   3. Default: RootfsCache::ensure() → .img.zst; decompress to .img
+    //      automatically on first use.
     let rootfs_path = if let Ok(p) = std::env::var("PI_SANDBOX_ROOTFS") {
         // Env override: maintainer supplies a ready-to-use image directly.
         PathBuf::from(p)
@@ -574,7 +605,8 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
         p.clone()
     } else {
         // Default: use the cache layer to fetch / verify the artifact, then
-        // derive the `.img` path from the `.img.zst` artifact path.
+        // decompress the .img.zst to a sibling .img if not already done.
+        let expected_version = CACHE_ROOTFS_VERSION;
         let cache = RootfsCache::with_default_dir();
         let zst_path = cache
             .ensure(
@@ -585,16 +617,11 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
             )
             .await
             .map_err(|e| SandboxError::Unavailable(format!("rootfs cache: {e}")))?;
-        // Strip `.zst` extension to get the decompressed image path that
-        // build.sh places next to the compressed artifact.
-        let img_path = zst_path.with_extension(""); // removes the trailing `.zst`
+        // Derive the decompressed image path (strips the trailing .zst).
+        let img_path = zst_path.with_extension(""); // e.g. .../rootfs.img
         if !img_path.exists() {
-            return Err(SandboxError::Unavailable(format!(
-                "decompressed rootfs image not found at {}; \
-                 run `crates/pi-sandbox-rootfs/build.sh` or \
-                 set PI_SANDBOX_ROOTFS=/path/to/rootfs.img",
-                img_path.display()
-            )));
+            // First-use: decompress in-place so subsequent boots skip this.
+            decompress_zst(&zst_path, &img_path).await?;
         }
         img_path
     };
@@ -672,7 +699,73 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
         call_count: 0,
         ceiling: spec.vm_ceiling,
         host_cwd: spec.host_cwd.clone(),
+        rootfs_version: spec.rootfs_version.0.clone(),
     })
+}
+
+/// Decompress a `.img.zst` file to a sibling `.img` file using the `zstd`
+/// crate. Writes to a temp file then renames atomically so a crash mid-write
+/// does not leave a corrupt `.img` behind.
+async fn decompress_zst(src: &std::path::Path, dst: &std::path::Path) -> Result<(), SandboxError> {
+    use std::io::{BufReader, BufWriter, Read, Write};
+
+    let src = src.to_owned();
+    let dst = dst.to_owned();
+
+    // Run synchronous decompression on a blocking thread so we do not
+    // starve the async executor on large images.
+    tokio::task::spawn_blocking(move || {
+        let src_file = std::fs::File::open(&src).map_err(|e| {
+            SandboxError::Unavailable(format!(
+                "cannot open compressed rootfs {}: {e}",
+                src.display()
+            ))
+        })?;
+        let mut decoder = zstd::Decoder::new(BufReader::new(src_file)).map_err(|e| {
+            SandboxError::Unavailable(format!("zstd decoder init failed: {e}"))
+        })?;
+
+        // Write to a temp file in the same directory, then rename atomically.
+        let dst_parent = dst.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let tmp_path = dst_parent.join(format!(".rootfs.img.tmp.{}", std::process::id()));
+        {
+            let out_file = std::fs::File::create(&tmp_path).map_err(|e| {
+                SandboxError::Unavailable(format!(
+                    "cannot create tmp rootfs {}: {e}",
+                    tmp_path.display()
+                ))
+            })?;
+            let mut writer = BufWriter::new(out_file);
+            let mut buf = vec![0u8; 256 * 1024];
+            loop {
+                let n = decoder.read(&mut buf).map_err(|e| {
+                    SandboxError::Unavailable(format!("zstd decompression error: {e}"))
+                })?;
+                if n == 0 {
+                    break;
+                }
+                writer.write_all(&buf[..n]).map_err(|e| {
+                    SandboxError::Unavailable(format!("write to tmp rootfs failed: {e}"))
+                })?;
+            }
+            writer.flush().map_err(|e| {
+                SandboxError::Unavailable(format!("flush tmp rootfs failed: {e}"))
+            })?;
+        }
+
+        std::fs::rename(&tmp_path, &dst).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            SandboxError::Unavailable(format!(
+                "rename {} to {}: {e}",
+                tmp_path.display(),
+                dst.display()
+            ))
+        })
+    })
+    .await
+    .map_err(|e| SandboxError::Unavailable(format!("blocking task panicked: {e}")))??;
+
+    Ok(())
 }
 
 /// Derive a stable CID from a UUID string. Output in [3, u32::MAX].
@@ -901,6 +994,7 @@ mod tests {
                 call_count: 0,
                 ceiling: VmCeiling::default(),
                 host_cwd: PathBuf::from("/tmp"),
+                rootfs_version: "0.1.0".to_string(),
             });
             d
         }));
@@ -915,6 +1009,7 @@ mod tests {
             call_count: std::sync::atomic::AtomicU32::new(0),
             ceiling: VmCeiling::default(),
             host_cwd: PathBuf::from("/tmp"),
+            rootfs_version: "0.1.0".to_string(),
             pool: Arc::clone(&pool),
             pool_size: 1,
             acquire_to_ready_ms: 0,
@@ -928,6 +1023,75 @@ mod tests {
         assert_eq!(
             len, 1,
             "pool must not exceed pool_size=1 after release; got {len}"
+        );
+    }
+
+    /// Verify that release() prunes expired pool entries before checking
+    /// capacity, so a slot that was "full" with expired VMs becomes available
+    /// for a returning live VM.
+    ///
+    /// Scenario: pool_size=1, pool holds one expired VM, returning a live VM.
+    /// Expected: expired VM is pruned; live VM enters the pool; len=1.
+    #[tokio::test]
+    async fn release_prunes_expired_before_capacity_check() {
+        use std::collections::VecDeque;
+        use tokio::sync::Mutex;
+
+        let dummy_child = || {
+            tokio::process::Command::new("sleep")
+                .arg("1000")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn sleep")
+        };
+
+        // Pool at capacity but with an expired entry (MAX_CALLS hit).
+        let pool: Arc<Mutex<VecDeque<WarmVm>>> = Arc::new(Mutex::new({
+            let mut d = VecDeque::new();
+            d.push_back(WarmVm {
+                id: "expired-in-pool".to_string(),
+                vsock_path: PathBuf::from("/dev/null"),
+                _fc_proc: dummy_child(),
+                _vfs_proc: None,
+                born_at: Instant::now(),
+                call_count: MAX_CALLS, // already at rotation cap
+                ceiling: VmCeiling::default(),
+                host_cwd: PathBuf::from("/tmp"),
+                rootfs_version: "0.1.0".to_string(),
+            });
+            d
+        }));
+
+        // A fresh live handle being returned.
+        let handle = Box::new(FirecrackerVmHandle {
+            id: "live-vm".to_string(),
+            vsock_path: PathBuf::from("/dev/null"),
+            _fc_proc: tokio::sync::Mutex::new(dummy_child()),
+            _vfs_proc: tokio::sync::Mutex::new(None),
+            born_at: Instant::now(),
+            call_count: std::sync::atomic::AtomicU32::new(0),
+            ceiling: VmCeiling::default(),
+            host_cwd: PathBuf::from("/tmp"),
+            rootfs_version: "0.1.0".to_string(),
+            pool: Arc::clone(&pool),
+            pool_size: 1,
+            acquire_to_ready_ms: 0,
+            cold_boot: false,
+        });
+
+        handle.release().await.expect("release should not fail");
+
+        // Expired VM should have been pruned; live VM should be in the pool.
+        let pool_guard = pool.lock().await;
+        assert_eq!(
+            pool_guard.len(),
+            1,
+            "pool should contain exactly 1 live VM after pruning expired; got {}",
+            pool_guard.len()
+        );
+        assert_eq!(
+            pool_guard[0].id, "live-vm",
+            "pool should hold the live VM after expired entry was pruned"
         );
     }
 }
