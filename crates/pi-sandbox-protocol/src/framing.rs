@@ -27,7 +27,7 @@ where
 /// Same as `read_request` with an explicit max line cap.
 pub async fn read_request_with_max<R>(
     reader: &mut BufReader<R>,
-    _max_bytes: usize,
+    max_bytes: usize,
 ) -> Result<ToolRequest, ProtocolError>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -37,8 +37,16 @@ where
     if n == 0 {
         return Err(ProtocolError::Eof);
     }
-    // Strip trailing newline.
+    // Enforce the byte ceiling *before* allocating a parser on untrusted data.
+    // `line` includes the trailing newline; strip it first so the size check
+    // reflects the actual payload length that the caller cares about.
     let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+    if trimmed.len() > max_bytes {
+        return Err(crate::ProtocolError::FrameTooLarge {
+            size: trimmed.len(),
+            limit: max_bytes,
+        });
+    }
     let req: ToolRequest = serde_json::from_str(trimmed)?;
     if req.proto_version != crate::CURRENT_PROTOCOL_VERSION {
         return Err(ProtocolError::VersionMismatch {

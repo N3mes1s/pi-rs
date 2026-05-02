@@ -79,4 +79,6 @@ pub enum ProtocolError {
     VersionMismatch { expected: u32, found: u32 },
     #[error("end of stream")]
     Eof,
+    #[error("frame too large: {size} bytes exceeds limit of {limit} bytes")]
+    FrameTooLarge { size: usize, limit: usize },
 }

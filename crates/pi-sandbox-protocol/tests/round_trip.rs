@@ -1,7 +1,7 @@
 //! Round-trip serialisation and framing tests for pi-sandbox-protocol.
 
 use pi_sandbox_protocol::{
-    framing::{read_request, read_response, write_request, write_response},
+    framing::{read_request, read_request_with_max, read_response, write_request, write_response},
     ProtocolError, ToolRequest, ToolResponse, CURRENT_PROTOCOL_VERSION,
 };
 use tokio::io::{duplex, BufReader};
@@ -170,5 +170,43 @@ async fn read_request_returns_eof_on_closed_stream() {
     match result {
         Err(ProtocolError::Eof) => {}
         other => panic!("expected Eof, got {:?}", other),
+    }
+}
+
+// --- Frame-too-large regression test ---
+
+#[tokio::test]
+async fn read_request_rejects_oversized_frame() {
+    // Build a valid request, then pad tool_name to exceed the tiny limit.
+    let req = ToolRequest {
+        proto_version: CURRENT_PROTOCOL_VERSION,
+        call_id: "x".to_string(),
+        // tool_name alone is fine, but the full JSON line will be big
+        tool_name: "a".repeat(256),
+        tool_input: serde_json::Value::Null,
+        max_output_bytes: 1024,
+        timeout_ms: 1000,
+    };
+    let mut line = serde_json::to_vec(&req).expect("serialise");
+    line.push(b'\n');
+
+    // The serialised line is > 256 bytes; cap at 64 bytes to force rejection.
+    let max_bytes = 64;
+    assert!(
+        line.len() > max_bytes,
+        "test precondition: line ({} bytes) must exceed cap ({} bytes)",
+        line.len(),
+        max_bytes
+    );
+
+    let mut buf_reader = BufReader::new(line.as_slice());
+    let result = read_request_with_max(&mut buf_reader, max_bytes).await;
+
+    match result {
+        Err(ProtocolError::FrameTooLarge { size, limit }) => {
+            assert!(size > max_bytes, "reported size ({size}) should exceed limit");
+            assert_eq!(limit, max_bytes);
+        }
+        other => panic!("expected FrameTooLarge, got {:?}", other),
     }
 }
