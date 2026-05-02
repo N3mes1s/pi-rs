@@ -138,11 +138,36 @@ impl FirecrackerConfig {
     }
 
     /// Resolve the `virtiofsd` binary path.
+    ///
+    /// Resolution order:
+    ///   1. `PI_SANDBOX_VIRTIOFSD` env var override.
+    ///   2. Explicit `virtiofsd_bin` field in config.
+    ///   3. `which virtiofsd` (PATH lookup).
+    ///   4. Hard-coded well-known path `/usr/lib/virtiofsd` (Debian/Ubuntu package).
+    ///
+    /// Returns `None` only when all four options fail.
     fn resolved_virtiofsd(&self) -> Option<PathBuf> {
+        // 1. Env override (mirrors PI_SANDBOX_KERNEL pattern).
+        if let Ok(p) = std::env::var("PI_SANDBOX_VIRTIOFSD") {
+            let path = PathBuf::from(p);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+        // 2. Explicit config field.
         if let Some(p) = &self.virtiofsd_bin {
             return Some(p.clone());
         }
-        which::which("virtiofsd").ok()
+        // 3. PATH lookup.
+        if let Some(p) = which::which("virtiofsd").ok() {
+            return Some(p);
+        }
+        // 4. Well-known fallback: Debian/Ubuntu virtiofsd package location.
+        let fallback = PathBuf::from("/usr/lib/virtiofsd");
+        if fallback.exists() {
+            return Some(fallback);
+        }
+        None
     }
 }
 
@@ -283,9 +308,13 @@ impl MicroVmLauncher for FirecrackerLauncher {
             },
         });
 
-        // 3. vsock kernel module loaded
+        // 3. vsock kernel module loaded — check multiple indicators:
+        //    - /sys/module/vsock       (module loaded as loadable .ko)
+        //    - /sys/module/vhost_vsock (vhost-vsock variant)
+        //    - /dev/vhost-vsock        (device node — kernel built-in or auto-loaded)
         let vsock_ok = std::path::Path::new("/sys/module/vsock").exists()
-            || std::path::Path::new("/sys/module/vhost_vsock").exists();
+            || std::path::Path::new("/sys/module/vhost_vsock").exists()
+            || std::path::Path::new("/dev/vhost-vsock").exists();
         if !vsock_ok {
             blockers.push("vsock kernel module not loaded".into());
             remediation.push("sudo modprobe vsock vhost-vsock".into());
@@ -294,19 +323,21 @@ impl MicroVmLauncher for FirecrackerLauncher {
             name: "vsock_module",
             passed: vsock_ok,
             detail: if vsock_ok {
-                Some("/sys/module/vsock or vhost_vsock present".into())
+                Some("/sys/module/vsock, /sys/module/vhost_vsock, or /dev/vhost-vsock present".into())
             } else {
-                Some("neither /sys/module/vsock nor vhost_vsock found".into())
+                Some("neither /sys/module/vsock nor vhost_vsock nor /dev/vhost-vsock found".into())
             },
         });
 
-        // 4. virtiofsd binary on PATH
+        // 4. virtiofsd binary (PATH, PI_SANDBOX_VIRTIOFSD, or /usr/lib/virtiofsd)
         let vfs_path = self.config.resolved_virtiofsd();
         let vfs_ok = vfs_path.is_some();
         if !vfs_ok {
-            blockers.push("virtiofsd binary not found on $PATH".into());
+            blockers.push(
+                "virtiofsd binary not found (tried $PI_SANDBOX_VIRTIOFSD, $PATH, /usr/lib/virtiofsd)".into(),
+            );
             remediation
-                .push("Install virtiofsd: https://gitlab.com/virtio-fs/virtiofsd".into());
+                .push("Install virtiofsd: https://gitlab.com/virtio-fs/virtiofsd  or  apt install virtiofsd".into());
         }
         checks.push(ProbeCheck {
             name: "virtiofsd_binary",
@@ -666,7 +697,8 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
     // boot a VM that will fail all path-sensitive tool calls.
     let vfs_bin = config.resolved_virtiofsd().ok_or_else(|| {
         SandboxError::Unavailable(
-            "virtiofsd binary not found on $PATH; cannot mount /work share in guest".into(),
+            "virtiofsd binary not found (tried $PI_SANDBOX_VIRTIOFSD, $PATH, /usr/lib/virtiofsd); \
+             cannot mount /work share in guest".into(),
         )
     })?;
 
@@ -841,7 +873,7 @@ fn build_fc_config(
         "boot-source": {
             "kernel_image_path": kernel_path.display().to_string(),
             "boot_args": format!(
-                "console=ttyS0 reboot=k panic=1 pci=off nomodules \
+                "console=ttyS0 reboot=k panic=1 pci=off \
                  i8042.nokbd i8042.noaux \
                  root=/dev/vda rw init=/init \
                  pi.proto_version={}",
