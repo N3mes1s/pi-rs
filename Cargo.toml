@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/pi-ai",
     "crates/pi-tool-types",
+    "crates/pi-tools-core",
+    "crates/pi-tools-net",
     "crates/pi-tools",
     "crates/pi-agent-core",
     "crates/pi-tui",
@@ -70,6 +72,8 @@ ratatui = { version = "0.28", features = ["crossterm"] }
 
 pi-tool-types = { path = "crates/pi-tool-types" }
 pi-ai = { path = "crates/pi-ai" }
+pi-tools-core = { path = "crates/pi-tools-core" }
+pi-tools-net = { path = "crates/pi-tools-net" }
 pi-tools = { path = "crates/pi-tools" }
 pi-agent-core = { path = "crates/pi-agent-core" }
 pi-tui = { path = "crates/pi-tui" }
