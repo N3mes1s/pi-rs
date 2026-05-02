@@ -62,12 +62,13 @@ cat > "${ROOT}/init" <<'INIT_EOF'
 mount -t proc none /proc 2>/dev/null
 mount -t sysfs none /sys 2>/dev/null
 mkdir -p /work
-mount -t virtiofs work /work || echo "WARN: virtiofs mount of /work failed; continuing"
+mount -t virtiofs work /work || { echo "FATAL: virtiofs mount of /work failed"; exit 1; }
 expected_proto=1
 cmdline_proto=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.proto_version=//p')
 if [ -n "$cmdline_proto" ] && [ "$cmdline_proto" != "$expected_proto" ]; then
   echo "FATAL: proto_version mismatch (expected $expected_proto, kernel cmdline says $cmdline_proto)"
   echo b > /proc/sysrq-trigger
+  exit 1
 fi
 exec /usr/local/bin/pi-sandbox-worker --vsock-port=5001 --work-dir=/work
 INIT_EOF
