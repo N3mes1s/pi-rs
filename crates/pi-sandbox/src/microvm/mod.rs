@@ -9,6 +9,11 @@
 pub mod launcher;
 pub mod types;
 
+#[cfg(target_os = "linux")]
+pub mod firecracker;
+#[cfg(target_os = "linux")]
+pub use firecracker::FirecrackerLauncher;
+
 pub use launcher::{MicroVmLauncher, VmHandle};
 pub use types::{
     CallLimits, NetworkPolicy, ProbeCheck, ProbeReport, RootfsVersion,
