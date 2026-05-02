@@ -92,6 +92,23 @@ mod linux_tests {
             resp.stdout
         );
     }
+
+    #[tokio::test]
+    async fn tilde_path_escape_is_rejected() {
+        // A tilde path like "~/x" expands to /home/<user>/x, which is outside
+        // /tmp/sandbox. The worker must catch this after tilde-expansion,
+        // mirroring pi_tools_core::resolve_path's behaviour.
+        let req = make_req("read", serde_json::json!({ "path": "~/secret" }));
+        let work_dir = std::path::Path::new("/tmp/sandbox");
+        let resp = dispatch_request(req, work_dir).await;
+
+        assert!(resp.is_error, "expected is_error=true for tilde-escaped path");
+        assert!(
+            resp.stdout.contains("sandbox error"),
+            "stdout should describe the sandbox boundary error, got: {}",
+            resp.stdout
+        );
+    }
 }
 
 // On non-Linux, provide a no-op test so the file compiles cleanly.

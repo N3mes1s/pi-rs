@@ -17,9 +17,13 @@
 //! 3. **Bash process cleanup** — `BashTool` uses `tokio::process::Command`
 //!    without `kill_on_drop`, so dropping the future on timeout leaves the
 //!    child running. We work around this by injecting a `timeout_ms` budget
-//!    into bash inputs (so BashTool's own timer fires first) **and** by
-//!    prepending `timeout <N>s` to the shell command so the Linux `timeout`
-//!    utility sends SIGTERM/SIGKILL to the child process tree.
+//!    into bash inputs (so BashTool's own timer fires slightly after the OS)
+//!    **and** by wrapping the command with BusyBox-compatible
+//!    `timeout <secs> sh -c '<cmd>'` so the `timeout` utility sends SIGTERM
+//!    to the child's process group. Single-quotes in the original command are
+//!    escaped, preserving shell syntax. The integer-seconds rounding
+//!    (required by BusyBox `timeout`) means the effective kill boundary is up
+//!    to 999 ms earlier than `timeout_ms`.
 
 use pi_sandbox_protocol::{ToolRequest, ToolResponse};
 use pi_tools_core::{ToolContext, ToolRegistry};
@@ -37,13 +41,18 @@ fn registry() -> &'static ToolRegistry {
 // Path boundary validation
 // --------------------------------------------------------------------------
 
-/// Normalise `p` (resolving `..` without touching the filesystem) and verify
-/// it starts with `work_dir`. Returns an error string on violation.
+/// Normalise `p` (resolving `~` and `..` without touching the filesystem)
+/// and verify it starts with `work_dir`. Returns an error string on violation.
+///
+/// We mirror `pi_tools_core::resolve_path`'s tilde expansion so that inputs
+/// like `{"path": "~/x"}` are caught before the tool sees them.
 fn check_path_within(p: &str, work_dir: &Path) -> Result<(), String> {
-    let raw = if Path::new(p).is_absolute() {
-        PathBuf::from(p)
+    // Mirror pi_tools_core::resolve_path: expand tilde first.
+    let expanded = shellexpand::tilde(p).into_owned();
+    let raw = if Path::new(expanded.as_str()).is_absolute() {
+        PathBuf::from(expanded)
     } else {
-        work_dir.join(p)
+        work_dir.join(expanded)
     };
 
     // Manually normalise `..` so we can check paths that don't exist yet.
@@ -95,35 +104,42 @@ fn validate_paths(tool_name: &str, input: &serde_json::Value, work_dir: &Path) -
 // Bash process-kill hardening
 // --------------------------------------------------------------------------
 
-/// Wrap the bash command with the Linux `timeout` utility so the OS kills
-/// the child (and its process group) when the budget runs out.
+/// Wrap the bash command so child processes are killed when the budget runs out.
 ///
-/// Strategy: let the OS `timeout` command fire at `timeout_ms`, which kills
-/// the child and exits with code 124. BashTool's internal tokio timer is set
-/// 500 ms longer so it doesn't race with the OS kill — BashTool will see the
-/// 124 exit from the `timeout` wrapper and surface it correctly.
+/// BusyBox `timeout` (Alpine guest) accepts: `timeout [-t SECS] SECS CMD [ARGS…]`
+/// where `SECS` is a whole number. The GNU `--kill-after` long option is *not*
+/// available. BusyBox also does not accept `timeout SECS sh -c 'compound cmd'`
+/// natively when the command contains shell builtins, so we delegate the whole
+/// original command string to `sh -c` to preserve shell syntax:
+///
+///   timeout SECS sh -c '<original_command>'
+///
+/// The `timeout` utility exits 124 when it kills the process, which `BashTool`
+/// surfaces verbatim (it passes the child exit code through). We add a small
+/// grace window on BashTool's internal timer so it doesn't race with the OS kill.
 fn harden_bash_input(input: serde_json::Value, timeout_ms: u32) -> serde_json::Value {
     let mut obj = match input {
         serde_json::Value::Object(m) => m,
         other => return other, // not an object — let BashTool reject it
     };
 
-    // `timeout(1)` needs whole seconds; round up to at least 1 s.
-    let secs = (timeout_ms / 1000).max(1);
+    // BusyBox `timeout` accepts only whole seconds; round up, minimum 1 s.
+    let secs = ((timeout_ms + 999) / 1000).max(1);
 
-    // Wrap original command: `timeout --kill-after=<secs+1>s <secs>s <cmd>`.
-    // `--kill-after` sends SIGKILL if SIGTERM alone doesn't stop the process,
-    // ensuring cleanup even for signal-ignoring children.
+    // Wrap original command via `sh -c` so compound shell syntax is preserved.
+    // BusyBox form: `timeout <secs> sh -c '<cmd>'`
+    // We use single-quote escaping: replace each `'` in the command with `'\''`.
     if let Some(cmd_val) = obj.get("command").cloned() {
         if let Some(cmd) = cmd_val.as_str() {
-            let wrapped = format!("timeout --kill-after={}s {}s {}", secs + 1, secs, cmd);
+            let escaped = cmd.replace('\'', r"'\''");
+            let wrapped = format!("timeout {} sh -c '{}'", secs, escaped);
             obj.insert("command".to_string(), serde_json::Value::String(wrapped));
         }
     }
 
-    // Set BashTool's internal tokio timeout 500 ms *after* the OS `timeout`
-    // command fires. This lets the OS kill the child and return exit 124,
-    // which BashTool then reports correctly via output.status.code().
+    // Give BashTool's internal tokio timer 500 ms extra headroom so the OS
+    // `timeout` command fires first and returns exit 124, rather than
+    // BashTool's future being dropped while the child is still alive.
     let inner_ms = timeout_ms.saturating_add(500);
     obj.entry("timeout_ms".to_string())
         .or_insert(serde_json::Value::Number(inner_ms.into()));
