@@ -13,6 +13,7 @@ members = [
     "crates/pi-stats", "crates/pi-sandbox",
     "crates/pi-sandbox-protocol",
     "crates/pi-sandbox-worker",
+    "crates/pi-sandbox-rootfs",
 ]
 
 [workspace.package]
@@ -83,6 +84,7 @@ pi-stats = { path = "crates/pi-stats" }
 pi-sandbox = { path = "crates/pi-sandbox" }
 pi-sandbox-protocol = { path = "crates/pi-sandbox-protocol" }
 pi-sandbox-worker = { path = "crates/pi-sandbox-worker" }
+pi-sandbox-rootfs = { path = "crates/pi-sandbox-rootfs" }
 pi-orchestrate = { path = "crates/pi-orchestrate" }
 
 [profile.release]
