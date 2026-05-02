@@ -7,11 +7,12 @@
 //! Each tool implements [`Tool`] and is registered in a [`ToolRegistry`].
 
 use async_trait::async_trait;
-use pi_ai::{ToolResult, ToolSpec};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+pub use pi_tool_types::{ToolError, ToolResult, ToolSpec};
 
 pub mod bash;
 pub mod edit;
@@ -22,18 +23,6 @@ pub mod monitor;
 pub mod read;
 pub mod web_search;
 pub mod write;
-
-#[derive(Debug, thiserror::Error)]
-pub enum ToolError {
-    #[error("tool not found: {0}")]
-    NotFound(String),
-    #[error("invalid input: {0}")]
-    InvalidInput(String),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("{0}")]
-    Other(String),
-}
 
 #[derive(Debug, Clone)]
 pub struct ToolContext {

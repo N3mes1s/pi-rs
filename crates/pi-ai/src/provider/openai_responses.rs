@@ -28,7 +28,7 @@ use crate::message::{ContentBlock, FinishReason, Role, ThinkingLevel};
 use crate::provider::GenerateRequest;
 use crate::registry::ModelInfo;
 use crate::stream::{StreamEvent, StreamEventKind};
-use crate::tool::ToolSpec;
+use pi_tool_types::ToolSpec;
 use crate::{AiError, Result};
 
 use super::openai::OpenAiProvider;

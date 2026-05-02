@@ -11,7 +11,7 @@
 //! sends a single [`MonitorNotification::Ended`].
 
 use async_trait::async_trait;
-use pi_ai::{ToolResult, ToolSpec};
+use pi_tool_types::{ToolResult, ToolSpec};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;

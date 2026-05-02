@@ -7,7 +7,8 @@ use crate::auth::AuthMethod;
 use crate::message::{FinishReason, Message, ThinkingLevel, Usage};
 use crate::registry::{ModelInfo, ProviderConfig};
 use crate::stream::StreamEvent;
-use crate::tool::{ToolCall, ToolSpec};
+use crate::tool::ToolCall;
+use pi_tool_types::ToolSpec;
 use crate::{AiError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
