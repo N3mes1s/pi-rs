@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use ignore::WalkBuilder;
-use pi_ai::{ToolResult, ToolSpec};
+use pi_tool_types::{ToolResult, ToolSpec};
 use serde_json::{json, Value};
 
 use crate::{resolve_path, truncate_for_model, Tool, ToolContext, ToolError};

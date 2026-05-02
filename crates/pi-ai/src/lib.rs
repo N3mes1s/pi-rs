@@ -35,7 +35,8 @@ pub use provider::{
 };
 pub use registry::{ApiKind, ModelInfo, ModelRegistry, ProviderConfig};
 pub use stream::{StreamEvent, StreamEventKind};
-pub use tool::{ToolCall, ToolResult, ToolSpec};
+pub use tool::ToolCall;
+pub use pi_tool_types::{ToolError, ToolResult, ToolSpec};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AiError {

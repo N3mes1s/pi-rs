@@ -18,7 +18,7 @@
 //! common [`SearchResult`] format before formatting for the model.
 
 use async_trait::async_trait;
-use pi_ai::{ToolResult, ToolSpec};
+use pi_tool_types::{ToolResult, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;

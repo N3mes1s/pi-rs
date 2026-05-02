@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Unified multi-provider LLM API for pi-rs"
 
 [dependencies]
+pi-tool-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
