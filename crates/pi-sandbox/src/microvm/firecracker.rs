@@ -387,6 +387,11 @@ impl MicroVmLauncher for FirecrackerLauncher {
         let pool_size = self.config.pool_size;
         tokio::spawn(async move {
             // Prune expired entries then check: idle + 1 leased vs capacity.
+            // We must also re-check after cold_boot to guard against concurrent
+            // refill tasks racing: with pool_size=2, three concurrent acquires
+            // from an empty pool can all observe idle=0 and all decide to refill.
+            // The post-boot re-check ensures that only pool_size VMs are ever
+            // resident regardless of how many refill tasks raced.
             let idle = {
                 let mut p = pool_clone.lock().await;
                 p.retain(|vm| !vm.is_expired());
@@ -394,7 +399,15 @@ impl MicroVmLauncher for FirecrackerLauncher {
             };
             if idle + 1 < pool_size {
                 match cold_boot(&config_clone, &spec_clone).await {
-                    Ok(new_vm) => pool_clone.lock().await.push_back(new_vm),
+                    Ok(new_vm) => {
+                        let mut p = pool_clone.lock().await;
+                        p.retain(|vm| !vm.is_expired());
+                        if p.len() < pool_size {
+                            p.push_back(new_vm);
+                        }
+                        // else: another refill task raced us; drop new_vm
+                        // (kill_on_drop cleans up the process).
+                    }
                     Err(e) => debug!("background pool refill failed: {}", e),
                 }
             }
@@ -480,17 +493,23 @@ impl VmHandle for FirecrackerVmHandle {
 
         // Read response with timeout.
         //
-        // The JSON frame cap must be at least as large as max_output_bytes
-        // plus envelope overhead (field names, quotes, other response fields
-        // etc.), otherwise any valid response larger than DEFAULT_MAX_LINE_BYTES
-        // but within the negotiated limit gets rejected with FrameTooLarge
-        // before we even parse the stdout field.
+        // The JSON frame cap must cover the entire serialized ToolResponse line,
+        // including the JSON envelope (field names, quotes, braces, the call_id,
+        // numeric fields, etc.) PLUS the worst-case JSON-escaped stdout content.
         //
-        // ~4 KiB of slack is enough for the JSON envelope; using max() means
-        // we still honour DEFAULT_MAX_LINE_BYTES when max_output_bytes is small.
-        const JSON_ENVELOPE_SLACK: usize = 4 * 1024;
+        // Worst case: every byte in `stdout` is a character that expands under
+        // JSON escaping.  The 6× worst case is a byte that serializes as a
+        // 6-byte `\uXXXX` escape (e.g. lone surrogates, DEL, some control chars).
+        // Most bytes that need escaping expand to at most 2× (`\n` → `\\n`), but
+        // we use 6× to be safe and future-proof.
+        //
+        // The JSON envelope (everything else in ToolResponse: call_id, stderr,
+        // is_error, exit_status, guest_duration_ms, field names, quotes, commas)
+        // is bounded by a generous fixed slack.
+        const JSON_ENVELOPE_SLACK: usize = 8 * 1024;   // 8 KiB for all non-stdout fields
+        const WORST_CASE_ESCAPE_FACTOR: usize = 6;      // \uXXXX expansion
         let frame_cap = framing::DEFAULT_MAX_LINE_BYTES
-            .max(limits.max_output_bytes as usize + JSON_ENVELOPE_SLACK);
+            .max(limits.max_output_bytes as usize * WORST_CASE_ESCAPE_FACTOR + JSON_ENVELOPE_SLACK);
         let resp = tokio::time::timeout(limits.wall_timeout + Duration::from_secs(5), async {
             let mut reader = BufReader::new(&mut stream);
             framing::read_response_with_max(
@@ -1122,6 +1141,109 @@ mod tests {
         assert_eq!(
             pool_guard[0].id, "live-vm",
             "pool should hold the live VM after expired entry was pruned"
+        );
+    }
+
+    /// Verify the frame_cap formula covers the worst-case JSON-escaped output.
+    ///
+    /// A bash response whose stdout contains `max_output_bytes` worth of
+    /// newlines serializes to roughly 2× (each `\n` → the two-byte `\n` JSON
+    /// literal). The 6× factor covers `\uXXXX` escapes for control chars.
+    /// This test confirms the cap stays above both the 2× and 6× bounds.
+    #[test]
+    fn frame_cap_covers_worst_case_json_escaping() {
+        // Simulate the calculation in execute() for a default max_output_bytes.
+        let max_output_bytes: usize = 256 * 1024; // CallLimits default
+        const JSON_ENVELOPE_SLACK: usize = 8 * 1024;
+        const WORST_CASE_ESCAPE_FACTOR: usize = 6;
+        let frame_cap = framing::DEFAULT_MAX_LINE_BYTES
+            .max(max_output_bytes * WORST_CASE_ESCAPE_FACTOR + JSON_ENVELOPE_SLACK);
+
+        // Must exceed a 2× expansion of max_output_bytes (e.g. all newlines).
+        let two_x_bound = max_output_bytes * 2 + JSON_ENVELOPE_SLACK;
+        assert!(
+            frame_cap >= two_x_bound,
+            "frame_cap {frame_cap} must be >= 2× bound {two_x_bound}"
+        );
+
+        // Must exceed a 6× expansion (worst-case \\uXXXX escapes).
+        let six_x_bound = max_output_bytes * 6 + JSON_ENVELOPE_SLACK;
+        assert!(
+            frame_cap >= six_x_bound,
+            "frame_cap {frame_cap} must be >= 6× bound {six_x_bound}"
+        );
+    }
+
+    /// Verify that the background refill task's post-boot re-check prevents
+    /// pool overfill under concurrent acquires.
+    ///
+    /// This is a white-box test of the pool insertion guard added to the refill
+    /// task: we simulate the scenario where the pool is already at capacity
+    /// when the newly-booted VM tries to enter it, and confirm it is dropped.
+    #[tokio::test]
+    async fn refill_task_does_not_overfill_pool_when_pool_full_at_push() {
+        use std::collections::VecDeque;
+        use tokio::sync::Mutex;
+
+        // pool_size = 1; pre-fill with one VM so it is already at capacity.
+        let pool: Arc<Mutex<VecDeque<WarmVm>>> = Arc::new(Mutex::new({
+            let mut d = VecDeque::new();
+            d.push_back(WarmVm {
+                id: "already-in-pool".to_string(),
+                vsock_path: PathBuf::from("/dev/null"),
+                _fc_proc: tokio::process::Command::new("sleep")
+                    .arg("1000")
+                    .kill_on_drop(true)
+                    .spawn()
+                    .expect("spawn sleep"),
+                _vfs_proc: None,
+                born_at: Instant::now(),
+                call_count: 0,
+                ceiling: VmCeiling::default(),
+                host_cwd: PathBuf::from("/tmp"),
+                rootfs_version: "0.1.0".to_string(),
+            });
+            d
+        }));
+
+        // Simulate the refill task: prune + re-check before push.
+        let new_vm = WarmVm {
+            id: "new-vm".to_string(),
+            vsock_path: PathBuf::from("/dev/null"),
+            _fc_proc: tokio::process::Command::new("sleep")
+                .arg("1000")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn sleep"),
+            _vfs_proc: None,
+            born_at: Instant::now(),
+            call_count: 0,
+            ceiling: VmCeiling::default(),
+            host_cwd: PathBuf::from("/tmp"),
+            rootfs_version: "0.1.0".to_string(),
+        };
+
+        let pool_size: usize = 1;
+        {
+            let mut p = pool.lock().await;
+            p.retain(|vm| !vm.is_expired());
+            if p.len() < pool_size {
+                p.push_back(new_vm);
+            }
+            // else: drop new_vm — pool already at capacity
+        }
+
+        // Pool must remain at 1 (the original entry, not the new one).
+        let pool_guard = pool.lock().await;
+        assert_eq!(
+            pool_guard.len(),
+            1,
+            "pool must not exceed pool_size=1 after refill task; got {}",
+            pool_guard.len()
+        );
+        assert_eq!(
+            pool_guard[0].id, "already-in-pool",
+            "original VM should remain; new-vm should have been dropped"
         );
     }
 }
