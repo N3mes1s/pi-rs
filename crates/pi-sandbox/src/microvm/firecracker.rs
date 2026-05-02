@@ -39,6 +39,7 @@ use crate::microvm::{
 };
 use crate::microvm::launcher::{MicroVmLauncher, VmHandle};
 use crate::provider::SandboxError;
+use crate::cache::{RootfsCache, ROOTFS_SHA256, ROOTFS_SIZE_BYTES, ROOTFS_URL, ROOTFS_VERSION as CACHE_ROOTFS_VERSION};
 
 // ── Pool rotation limits ────────────────────────────────────────────────────
 
@@ -103,6 +104,16 @@ impl FirecrackerConfig {
     }
 
     /// Resolve the rootfs path: env override → explicit field → default cache.
+    ///
+    /// The default path is the **decompressed** `.img` file that
+    /// `RootfsCache::ensure()` / build.sh produce at:
+    /// `~/.cache/pi/sandbox/rootfs/<version>/rootfs.img`.
+    /// Note: `.img.zst` is the *compressed* artifact; Firecracker requires
+    /// an uncompressed block device image.
+    ///
+    /// Used by unit tests; production code calls `cold_boot()` which
+    /// handles the full `RootfsCache::ensure()` flow.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn resolved_rootfs_path(&self) -> PathBuf {
         if let Ok(p) = std::env::var("PI_SANDBOX_ROOTFS") {
             return PathBuf::from(p);
@@ -113,7 +124,7 @@ impl FirecrackerConfig {
         dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join(format!(
-                "pi/sandbox/rootfs/{}/rootfs.img.zst",
+                "pi/sandbox/rootfs/{}/rootfs.img",
                 pi_sandbox_rootfs::ROOTFS_VERSION
             ))
     }
@@ -343,13 +354,18 @@ impl MicroVmLauncher for FirecrackerLauncher {
         let acquire_to_ready_ms = acquire_start.elapsed().as_millis() as u32;
 
         // Opportunistically refill pool in the background.
+        // Account for the VM we just checked out (+1 leased) when deciding
+        // whether a refill is needed.  Without this correction the refiller
+        // would add a VM for every single acquire, allowing the pool to grow
+        // unboundedly beyond `pool_size`.
         let pool_clone = Arc::clone(&self.pool);
         let config_clone = Arc::clone(&self.config);
         let spec_clone = spec.clone();
         let pool_size = self.config.pool_size;
         tokio::spawn(async move {
-            let current = pool_clone.lock().await.len();
-            if current < pool_size {
+            // pool.len() = VMs sitting idle; +1 = the one we just leased.
+            let idle = pool_clone.lock().await.len();
+            if idle + 1 < pool_size {
                 match cold_boot(&config_clone, &spec_clone).await {
                     Ok(new_vm) => pool_clone.lock().await.push_back(new_vm),
                     Err(e) => debug!("background pool refill failed: {}", e),
@@ -367,6 +383,7 @@ impl MicroVmLauncher for FirecrackerLauncher {
             ceiling: vm.ceiling,
             host_cwd: vm.host_cwd,
             pool: Arc::clone(&self.pool),
+            pool_size,
             acquire_to_ready_ms,
             cold_boot: cold_boot_flag,
         }))
@@ -386,6 +403,9 @@ pub struct FirecrackerVmHandle {
     ceiling: VmCeiling,
     host_cwd: PathBuf,
     pool: Arc<Mutex<VecDeque<WarmVm>>>,
+    /// Configured pool capacity (from FirecrackerConfig::pool_size).
+    /// Used by release() to cap the pool before pushing back.
+    pool_size: usize,
     /// Set once at acquire, reported in the first VmExecution.
     acquire_to_ready_ms: u32,
     cold_boot: bool,
@@ -482,7 +502,10 @@ impl VmHandle for FirecrackerVmHandle {
             return Ok(());
         }
 
-        // Return to pool.
+        // Return to pool, but only if there is still room.  The background
+        // refill task may have already filled the pool to capacity while this
+        // VM was leased; pushing unconditionally would let the pool grow
+        // beyond `pool_size`.
         let fc_proc = self._fc_proc.into_inner();
         let vfs_proc = self._vfs_proc.into_inner();
         let vm_id = self.id.clone();
@@ -496,8 +519,17 @@ impl VmHandle for FirecrackerVmHandle {
             ceiling: self.ceiling,
             host_cwd: self.host_cwd,
         };
-        self.pool.lock().await.push_back(warm);
-        debug!(id = %vm_id, "VM returned to pool");
+        {
+            let mut pool = self.pool.lock().await;
+            if pool.len() < self.pool_size {
+                pool.push_back(warm);
+                debug!(id = %vm_id, "VM returned to pool");
+            } else {
+                // Pool already full (background refill raced ahead).
+                // Drop `warm` here — kill_on_drop cleans up the process.
+                debug!(id = %vm_id, "VM dropped (pool already at capacity)");
+            }
+        }
         Ok(())
     }
 }
@@ -517,7 +549,56 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
     let virtiofs_sock = run_dir.join("virtiofs.sock");
 
     let kernel_path = config.resolved_kernel_path();
-    let rootfs_path = config.resolved_rootfs_path();
+
+    // ── Rootfs version enforcement (RFD 0023 §3) ──────────────────────────
+    // Reject mismatches before attempting to boot so the caller gets a clean
+    // SandboxError::RootfsMismatch rather than a cryptic guest boot failure.
+    let expected_version = CACHE_ROOTFS_VERSION;
+    let requested_version = &spec.rootfs_version.0;
+    if requested_version != expected_version {
+        return Err(SandboxError::RootfsMismatch {
+            expected: expected_version.to_string(),
+            found: requested_version.clone(),
+        });
+    }
+
+    // Ensure the rootfs artifact is present and sha256-verified, then use
+    // the *decompressed* `.img` path that Firecracker requires as a block
+    // device.  RootfsCache::ensure() returns the `.img.zst` path; we derive
+    // the decompressed sibling that build.sh writes alongside it.
+    let rootfs_path = if let Ok(p) = std::env::var("PI_SANDBOX_ROOTFS") {
+        // Env override: maintainer supplies a ready-to-use image directly.
+        PathBuf::from(p)
+    } else if let Some(ref p) = config.rootfs_path {
+        // Explicit override in config — trust caller.
+        p.clone()
+    } else {
+        // Default: use the cache layer to fetch / verify the artifact, then
+        // derive the `.img` path from the `.img.zst` artifact path.
+        let cache = RootfsCache::with_default_dir();
+        let zst_path = cache
+            .ensure(
+                expected_version,
+                ROOTFS_URL,
+                ROOTFS_SHA256,
+                ROOTFS_SIZE_BYTES,
+            )
+            .await
+            .map_err(|e| SandboxError::Unavailable(format!("rootfs cache: {e}")))?;
+        // Strip `.zst` extension to get the decompressed image path that
+        // build.sh places next to the compressed artifact.
+        let img_path = zst_path.with_extension(""); // removes the trailing `.zst`
+        if !img_path.exists() {
+            return Err(SandboxError::Unavailable(format!(
+                "decompressed rootfs image not found at {}; \
+                 run `crates/pi-sandbox-rootfs/build.sh` or \
+                 set PI_SANDBOX_ROOTFS=/path/to/rootfs.img",
+                img_path.display()
+            )));
+        }
+        img_path
+    };
+
     let fc_bin = config
         .resolved_firecracker()
         .ok_or_else(|| SandboxError::Unavailable("firecracker binary not found".into()))?;
@@ -619,6 +700,7 @@ fn build_fc_config(
             "boot_args": format!(
                 "console=ttyS0 reboot=k panic=1 pci=off nomodules \
                  i8042.nokbd i8042.noaux \
+                 root=/dev/vda rw init=/init \
                  pi.proto_version={}",
                 CURRENT_PROTOCOL_VERSION
             )
@@ -766,5 +848,86 @@ mod tests {
         let cfg = FirecrackerConfig::default();
         assert_eq!(cfg.resolved_rootfs_path(), PathBuf::from("/custom/rootfs.img"));
         std::env::remove_var("PI_SANDBOX_ROOTFS");
+    }
+
+    #[test]
+    fn rootfs_default_path_is_img_not_zst() {
+        // Guard against regressions: the default cache path must be the
+        // *decompressed* `.img` file, not the `.img.zst` archive that
+        // Firecracker cannot use as a block device.
+        std::env::remove_var("PI_SANDBOX_ROOTFS"); // ensure env override is not set
+        let cfg = FirecrackerConfig::default();
+        let path = cfg.resolved_rootfs_path();
+        assert!(
+            !path.to_string_lossy().ends_with(".img.zst"),
+            "resolved_rootfs_path must return an uncompressed .img path, got: {}",
+            path.display()
+        );
+        assert!(
+            path.to_string_lossy().ends_with(".img"),
+            "resolved_rootfs_path should end with .img, got: {}",
+            path.display()
+        );
+    }
+
+    /// Verify that release() respects the pool_size cap when the background
+    /// refill task has already filled the pool to capacity.
+    ///
+    /// This is a logical test — we manually build the WarmVm queue and the
+    /// handle to confirm that pushing past `pool_size` is rejected.
+    #[tokio::test]
+    async fn release_does_not_overfill_pool() {
+        use std::collections::VecDeque;
+        use tokio::sync::Mutex;
+
+        // A pool already at capacity (pool_size = 1, one WarmVm in queue).
+        // We need a dummy Child for the WarmVm; use a sleeping process.
+        let dummy_child = || {
+            tokio::process::Command::new("sleep")
+                .arg("1000")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn sleep")
+        };
+
+        let pool: Arc<Mutex<VecDeque<WarmVm>>> = Arc::new(Mutex::new({
+            let mut d = VecDeque::new();
+            d.push_back(WarmVm {
+                id: "already-in-pool".to_string(),
+                vsock_path: PathBuf::from("/dev/null"),
+                _fc_proc: dummy_child(),
+                _vfs_proc: None,
+                born_at: Instant::now(),
+                call_count: 0,
+                ceiling: VmCeiling::default(),
+                host_cwd: PathBuf::from("/tmp"),
+            });
+            d
+        }));
+
+        // Simulate a leased handle with pool_size = 1.
+        let handle = Box::new(FirecrackerVmHandle {
+            id: "leased-vm".to_string(),
+            vsock_path: PathBuf::from("/dev/null"),
+            _fc_proc: tokio::sync::Mutex::new(dummy_child()),
+            _vfs_proc: tokio::sync::Mutex::new(None),
+            born_at: Instant::now(),
+            call_count: std::sync::atomic::AtomicU32::new(0),
+            ceiling: VmCeiling::default(),
+            host_cwd: PathBuf::from("/tmp"),
+            pool: Arc::clone(&pool),
+            pool_size: 1,
+            acquire_to_ready_ms: 0,
+            cold_boot: false,
+        });
+
+        handle.release().await.expect("release should not fail");
+
+        // Pool must still contain exactly 1 entry (the pre-existing one).
+        let len = pool.lock().await.len();
+        assert_eq!(
+            len, 1,
+            "pool must not exceed pool_size=1 after release; got {len}"
+        );
     }
 }
