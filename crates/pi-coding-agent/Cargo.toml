@@ -45,6 +45,7 @@ sha2.workspace = true
 tempfile.workspace = true
 pi-stats.workspace = true
 pi-orchestrate.workspace = true
+pi-sandbox.workspace = true
 uuid.workspace = true
 serde_yaml.workspace = true
 toml.workspace = true

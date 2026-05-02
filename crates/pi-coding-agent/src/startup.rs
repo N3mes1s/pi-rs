@@ -3,6 +3,7 @@ use pi_agent_core::{
     Settings,
 };
 use pi_ai::{AuthStorage, ModelRegistry};
+use pi_sandbox::LocalProcessProvider;
 use pi_tools::ToolRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -436,7 +437,7 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         }
     };
 
-    let runtime_config = RuntimeConfig {
+    let mut runtime_config = RuntimeConfig {
         session_manager,
         auth_storage: auth,
         model_registry: registry,
@@ -452,6 +453,11 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         sandbox_provider: None,
     };
 
+    // RFD 0022: wire sandbox provider from CLI flag.
+    if let Some(kind) = &cli.sandbox_provider {
+        install_sandbox_from_flag(&mut runtime_config, kind)?;
+    }
+
     Ok(Startup {
         cli,
         settings,
@@ -464,6 +470,29 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         extensions: loaded_exts,
         slash_registry,
     })
+}
+
+/// Install a sandbox provider into `cfg` based on the `--sandbox-provider`
+/// CLI flag value. Returns an error for unknown provider names.
+///
+/// Currently supported values:
+/// * `"local-process"` — wraps tools with `pi_sandbox::LocalProcessProvider`.
+pub fn install_sandbox_from_flag(
+    cfg: &mut RuntimeConfig,
+    kind: &str,
+) -> anyhow::Result<()> {
+    match kind {
+        "local-process" => {
+            let provider = LocalProcessProvider::new(cfg.tools.clone());
+            cfg.sandbox_provider =
+                Some(Arc::new(provider) as Arc<dyn pi_sandbox::SandboxProvider>);
+            Ok(())
+        }
+        other => anyhow::bail!(
+            "unknown sandbox provider '{}' — expected: local-process",
+            other
+        ),
+    }
 }
 
 /// Compose two [`StreamInterceptor`]s in order. RFD 0017 wires this so
