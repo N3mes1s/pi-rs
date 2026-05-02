@@ -12,7 +12,13 @@ thiserror.workspace = true
 tokio.workspace = true
 chrono.workspace = true
 pi-tools.workspace = true
+dirs.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+futures.workspace = true
+sha2.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio-test.workspace = true
+wiremock.workspace = true
