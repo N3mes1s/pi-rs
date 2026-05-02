@@ -11,14 +11,22 @@ async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 chrono.workspace = true
+tracing.workspace = true
 pi-tools.workspace = true
 pi-tool-types.workspace = true
 pi-sandbox-rootfs.workspace = true
+pi-sandbox-protocol.workspace = true
 dirs.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 futures.workspace = true
 sha2.workspace = true
 hex.workspace = true
+uuid.workspace = true
+which.workspace = true
+zstd = "0.13"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = "0.7"
 
 [dev-dependencies]
 tempfile.workspace = true
