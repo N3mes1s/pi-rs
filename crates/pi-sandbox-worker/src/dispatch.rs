@@ -156,9 +156,15 @@ fn harden_bash_input(input: serde_json::Value, timeout_ms: u32) -> (serde_json::
     // BashTool's internal tokio timer: fires secs * 1000 + 500 ms after start.
     // This is always > the BusyBox SECS boundary, so BusyBox kills the child
     // first and BashTool sees exit 124 rather than its own timeout path.
+    //
+    // We ALWAYS overwrite (not `or_insert`) so that an explicit `timeout_ms`
+    // in tool_input cannot sneak in a sub-BusyBox budget and cause the inner
+    // tokio timer to fire before the OS kill completes.
     let bash_internal_ms: u64 = secs * 1000 + 500;
-    obj.entry("timeout_ms".to_string())
-        .or_insert(serde_json::Value::Number(bash_internal_ms.into()));
+    obj.insert(
+        "timeout_ms".to_string(),
+        serde_json::Value::Number(bash_internal_ms.into()),
+    );
 
     // Outer worker guard: fires secs * 1000 + 1000 ms, still after BusyBox.
     // This ensures the child is already dead before we can ever drop the future.

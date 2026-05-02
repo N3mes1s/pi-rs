@@ -82,6 +82,41 @@ mod linux_tests {
         );
     }
 
+    /// Regression: a request that includes an explicit `timeout_ms` in
+    /// `tool_input` must still be clamped so BashTool's internal timer cannot
+    /// fire before the BusyBox `timeout` wrapper kills the child process.
+    /// Previously, `harden_bash_input` used `or_insert`, which silently kept
+    /// the caller-supplied value (e.g. 100 ms) intact, causing the inner tokio
+    /// timer to win the race and leave the child alive.
+    #[tokio::test]
+    async fn bash_explicit_inner_timeout_is_clamped() {
+        // timeout_ms = 100 ms on the request.  Without the fix, tool_input would
+        // carry `timeout_ms: 100`, BashTool fires after 100 ms, and the child
+        // outlives the response.  With the fix, tool_input carries
+        // `timeout_ms: 1500` (ceil(100/1000)*1000 + 500), BusyBox kills the
+        // child at t=1 s, and BashTool sees exit 124.
+        let req = ToolRequest {
+            proto_version: CURRENT_PROTOCOL_VERSION,
+            call_id: "test-explicit-inner".to_string(),
+            tool_name: "bash".to_string(),
+            tool_input: serde_json::json!({
+                "command": "sleep 5",
+                "timeout_ms": 100  // explicit inner timer — must be overwritten
+            }),
+            max_output_bytes: 4096,
+            timeout_ms: 100,
+        };
+        let work_dir = std::path::Path::new("/tmp");
+        let resp = dispatch_request(req, work_dir).await;
+
+        assert!(resp.is_error, "expected is_error=true for timed-out bash");
+        assert_eq!(
+            resp.exit_status, 124,
+            "expected exit_status 124 — BusyBox should have killed the child, got {}",
+            resp.exit_status
+        );
+    }
+
     #[tokio::test]
     async fn path_escape_is_rejected() {
         // Attempt to read a file outside work_dir via `../` traversal.
