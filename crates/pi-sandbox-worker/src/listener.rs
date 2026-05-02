@@ -8,19 +8,33 @@
 //! host connections are active.  A [`tokio::sync::watch`] channel
 //! carries the shutdown signal from `serve()` into every spawned
 //! connection task, allowing in-flight work to drain promptly.
+//!
+//! On SIGTERM/SIGINT, `serve()` stops accepting, broadcasts
+//! shutdown=true, and then **awaits all active connection tasks**
+//! (with a configurable grace timeout) before returning. This
+//! guarantees that in-flight requests complete and their responses
+//! are written before the process exits, and that any running
+//! bash children have been killed by the OS before the worker
+//! drops their futures.
 
 use crate::dispatch::dispatch_request;
 use anyhow::Context;
 use pi_sandbox_protocol::framing;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::BufReader;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 use tokio_vsock::{VsockAddr, VsockListener, VMADDR_CID_ANY};
 use tracing::{error, info, warn};
 
-/// Start the vsock listener loop. Runs until SIGTERM/SIGINT or accept error.
+/// Maximum time to wait for active connections to drain after receiving a
+/// shutdown signal before we give up and exit anyway.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// Start the vsock listener loop. Runs until SIGTERM/SIGINT or accept error,
+/// then drains active connection tasks before returning.
 ///
 /// Connections are spawned as separate tasks so that signal polling is never
 /// blocked by an active connection.
@@ -38,7 +52,10 @@ pub async fn serve(vsock_port: u32, work_dir: PathBuf) -> anyhow::Result<()> {
     let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
     let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
 
-    loop {
+    // Track all active connection tasks so we can await them on shutdown.
+    let mut tasks: JoinSet<()> = JoinSet::new();
+
+    let shutdown_result = loop {
         tokio::select! {
             res = listener.accept() => {
                 match res {
@@ -46,7 +63,7 @@ pub async fn serve(vsock_port: u32, work_dir: PathBuf) -> anyhow::Result<()> {
                         info!(?peer, "accepted host connection");
                         let wd = work_dir.clone();
                         let rx = shutdown_rx.clone();
-                        tokio::spawn(async move {
+                        tasks.spawn(async move {
                             if let Err(e) = handle_connection(stream, wd, rx).await {
                                 warn!(err = %e, "connection ended with error");
                             }
@@ -54,23 +71,57 @@ pub async fn serve(vsock_port: u32, work_dir: PathBuf) -> anyhow::Result<()> {
                     }
                     Err(e) => {
                         error!(err = %e, "vsock accept failed; exiting");
-                        // Signal all active connections to stop before we return.
-                        let _ = shutdown_tx.send(true);
-                        return Err(e.into());
+                        break Err(e);
                     }
                 }
             }
             _ = sigterm.recv() => {
                 info!("SIGTERM received; shutting down");
-                let _ = shutdown_tx.send(true);
-                return Ok(());
+                break Ok(());
             }
             _ = sigint.recv() => {
                 info!("SIGINT received; shutting down");
-                let _ = shutdown_tx.send(true);
-                return Ok(());
+                break Ok(());
             }
         }
+    };
+
+    // Signal all active connections to stop accepting new requests.
+    let _ = shutdown_tx.send(true);
+
+    // Drain remaining tasks before exiting so:
+    //   1. In-flight requests finish and their responses are written.
+    //   2. Running bash children killed by BusyBox `timeout` have exited
+    //      before we drop their futures (prevents stray processes on a
+    //      reused guest VM).
+    let n = tasks.len();
+    if n > 0 {
+        info!(count = n, grace_secs = SHUTDOWN_GRACE.as_secs(), "waiting for active connections to drain");
+        let deadline = tokio::time::sleep(SHUTDOWN_GRACE);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                biased;
+                joined = tasks.join_next() => {
+                    if joined.is_none() {
+                        // All tasks finished cleanly.
+                        break;
+                    }
+                }
+                _ = &mut deadline => {
+                    let remaining = tasks.len();
+                    warn!(remaining, "shutdown grace period elapsed; abandoning remaining tasks");
+                    tasks.abort_all();
+                    break;
+                }
+            }
+        }
+    }
+    info!("pi-sandbox-worker shut down cleanly");
+
+    match shutdown_result {
+        Ok(()) => Ok(()),
+        Err(e) => Err(e.into()),
     }
 }
 
