@@ -1,0 +1,174 @@
+//! Round-trip serialisation and framing tests for pi-sandbox-protocol.
+
+use pi_sandbox_protocol::{
+    framing::{read_request, read_response, write_request, write_response},
+    ProtocolError, ToolRequest, ToolResponse, CURRENT_PROTOCOL_VERSION,
+};
+use tokio::io::{duplex, BufReader};
+
+fn sample_request() -> ToolRequest {
+    ToolRequest {
+        proto_version: CURRENT_PROTOCOL_VERSION,
+        call_id: "call-abc-123".to_string(),
+        tool_name: "bash".to_string(),
+        tool_input: serde_json::json!({"command": "ls -la"}),
+        max_output_bytes: 65536,
+        timeout_ms: 30000,
+    }
+}
+
+fn sample_response() -> ToolResponse {
+    ToolResponse {
+        call_id: "call-abc-123".to_string(),
+        stdout: "total 8\ndrwxr-xr-x 2 root root 4096 Jan 1 00:00 .\n".to_string(),
+        stderr: String::new(),
+        exit_status: 0,
+        guest_duration_ms: 42,
+        is_error: false,
+    }
+}
+
+// --- Serde round-trip tests (no framing) ---
+
+#[test]
+fn tool_request_serde_round_trip() {
+    let req = sample_request();
+    let json = serde_json::to_string(&req).expect("serialise");
+    let decoded: ToolRequest = serde_json::from_str(&json).expect("deserialise");
+    assert_eq!(req, decoded);
+}
+
+#[test]
+fn tool_response_serde_round_trip() {
+    let resp = sample_response();
+    let json = serde_json::to_string(&resp).expect("serialise");
+    let decoded: ToolResponse = serde_json::from_str(&json).expect("deserialise");
+    assert_eq!(resp, decoded);
+}
+
+// --- deny_unknown_fields tests ---
+
+#[test]
+fn tool_request_rejects_extra_fields() {
+    let bad_json = r#"{
+        "proto_version": 1,
+        "call_id": "x",
+        "tool_name": "read",
+        "tool_input": {},
+        "max_output_bytes": 1024,
+        "timeout_ms": 5000,
+        "unexpected_field": "oops"
+    }"#;
+    let result: Result<ToolRequest, _> = serde_json::from_str(bad_json);
+    assert!(result.is_err(), "expected error for unknown field in ToolRequest");
+}
+
+#[test]
+fn tool_response_rejects_extra_fields() {
+    let bad_json = r#"{
+        "call_id": "x",
+        "stdout": "hi",
+        "stderr": "",
+        "exit_status": 0,
+        "guest_duration_ms": 1,
+        "is_error": false,
+        "bonus": "surprise"
+    }"#;
+    let result: Result<ToolResponse, _> = serde_json::from_str(bad_json);
+    assert!(result.is_err(), "expected error for unknown field in ToolResponse");
+}
+
+// --- Framing round-trip tests ---
+
+#[tokio::test]
+async fn write_request_read_request_duplex_round_trip() {
+    let (client, server) = duplex(4096);
+    let (server_read, _server_write) = tokio::io::split(server);
+    let (_client_read, mut client_write) = tokio::io::split(client);
+
+    let req = sample_request();
+    let req_clone = req.clone();
+
+    let write_handle = tokio::spawn(async move {
+        write_request(&mut client_write, &req_clone)
+            .await
+            .expect("write_request");
+    });
+
+    let mut buf_reader = BufReader::new(server_read);
+    let read_handle = tokio::spawn(async move {
+        read_request(&mut buf_reader).await.expect("read_request")
+    });
+
+    write_handle.await.expect("write task");
+    let decoded = read_handle.await.expect("read task");
+    assert_eq!(req, decoded);
+}
+
+#[tokio::test]
+async fn write_response_read_response_duplex_round_trip() {
+    let (client, server) = duplex(4096);
+    let (server_read, _server_write) = tokio::io::split(server);
+    let (_client_read, mut client_write) = tokio::io::split(client);
+
+    let resp = sample_response();
+    let resp_clone = resp.clone();
+
+    let write_handle = tokio::spawn(async move {
+        write_response(&mut client_write, &resp_clone)
+            .await
+            .expect("write_response");
+    });
+
+    let mut buf_reader = BufReader::new(server_read);
+    let read_handle = tokio::spawn(async move {
+        read_response(&mut buf_reader).await.expect("read_response")
+    });
+
+    write_handle.await.expect("write task");
+    let decoded = read_handle.await.expect("read task");
+    assert_eq!(resp, decoded);
+}
+
+// --- Version mismatch test ---
+
+#[tokio::test]
+async fn read_request_rejects_wrong_proto_version() {
+    // Build a request with proto_version = 0 (wrong).
+    let bad_req = ToolRequest {
+        proto_version: 0,
+        call_id: "x".to_string(),
+        tool_name: "ls".to_string(),
+        tool_input: serde_json::Value::Null,
+        max_output_bytes: 1024,
+        timeout_ms: 1000,
+    };
+    let mut line = serde_json::to_vec(&bad_req).expect("serialise");
+    line.push(b'\n');
+
+    let mut buf_reader = BufReader::new(line.as_slice());
+    let result = read_request(&mut buf_reader).await;
+
+    match result {
+        Err(ProtocolError::VersionMismatch { expected, found }) => {
+            assert_eq!(expected, CURRENT_PROTOCOL_VERSION);
+            assert_eq!(found, 0);
+        }
+        other => panic!("expected VersionMismatch, got {:?}", other),
+    }
+}
+
+// --- EOF test ---
+
+#[tokio::test]
+async fn read_request_returns_eof_on_closed_stream() {
+    // Empty reader simulates a closed stream.
+    let empty: &[u8] = &[];
+    let mut buf_reader = BufReader::new(empty);
+    let result = read_request(&mut buf_reader).await;
+
+    match result {
+        Err(ProtocolError::Eof) => {}
+        other => panic!("expected Eof, got {:?}", other),
+    }
+}
