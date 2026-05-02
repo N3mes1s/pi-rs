@@ -44,6 +44,27 @@ impl Default for StatsConfig {
     }
 }
 
+/// Render the sandbox-actions table as a `String`.
+///
+/// Exposed so tests can call it directly without capturing stdout.
+pub fn render_sandbox_actions(stats: &[aggregate::SandboxStats]) -> String {
+    let mut out = format!(
+        "{:<24} {:<12} {:<10} {:<12} {:<10}\n",
+        "provider", "executions", "errors", "error_rate", "avg_ms"
+    );
+    for row in stats {
+        out.push_str(&format!(
+            "{:<24} {:<12} {:<10} {:<11.1}% {:<10.2}\n",
+            row.provider,
+            row.executions,
+            row.errors,
+            row.error_rate * 100.0,
+            row.avg_duration_ms,
+        ));
+    }
+    out
+}
+
 /// Run a stats verb. Server verb is async (axum); the others are
 /// synchronous dispatch returning quickly.
 pub async fn run(verb: StatsVerb, cfg: StatsConfig) -> anyhow::Result<()> {
@@ -113,20 +134,7 @@ pub async fn run(verb: StatsVerb, cfg: StatsConfig) -> anyhow::Result<()> {
         StatsVerb::SandboxActions => {
             let mut stats = aggregate::by_sandbox_provider(&conn)?;
             stats.sort_by(|a, b| a.provider.cmp(&b.provider));
-            println!(
-                "{:<24} {:<12} {:<10} {:<12} {:<10}",
-                "provider", "executions", "errors", "error_rate", "avg_ms"
-            );
-            for row in &stats {
-                println!(
-                    "{:<24} {:<12} {:<10} {:<11.1}% {:<10.2}",
-                    row.provider,
-                    row.executions,
-                    row.errors,
-                    row.error_rate * 100.0,
-                    row.avg_duration_ms,
-                );
-            }
+            print!("{}", render_sandbox_actions(&stats));
             Ok(())
         }
         StatsVerb::Server => {
