@@ -629,38 +629,44 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
     let fc_bin = config
         .resolved_firecracker()
         .ok_or_else(|| SandboxError::Unavailable("firecracker binary not found".into()))?;
-    let vfs_bin = config.resolved_virtiofsd();
+    // virtiofsd is REQUIRED: the /work virtio-fs share is load-bearing for
+    // every tool call. Without it the guest cannot access the host cwd and
+    // write/edit/bash calls are silently broken. Error early rather than
+    // boot a VM that will fail all path-sensitive tool calls.
+    let vfs_bin = config.resolved_virtiofsd().ok_or_else(|| {
+        SandboxError::Unavailable(
+            "virtiofsd binary not found on $PATH; cannot mount /work share in guest".into(),
+        )
+    })?;
 
     // CID must be unique per-VM. Use a hash of the vm_id UUID for uniqueness
     // in range [3, 2^32-1] (0=hypervisor, 1=reserved, 2=host).
     let cid = vm_id_to_cid(&vm_id);
 
     // Spawn virtiofsd first (it must be ready before Firecracker boots).
-    let vfs_proc = if let Some(ref vfs) = vfs_bin {
-        let vfs_socket_path = virtiofs_sock.display().to_string();
-        let shared_dir = spec.host_cwd.display().to_string();
-        let proc = tokio::process::Command::new(vfs)
-            .args([
-                "--socket-path",
-                &vfs_socket_path,
-                "--shared-dir",
-                &shared_dir,
-                "--sandbox",
-                "none",
-                "--seccomp",
-                "none",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()?;
-        // Give virtiofsd a moment to create its socket.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        Some(proc)
-    } else {
-        None
-    };
+    // --shared-dir  : the host directory to expose as /work in the guest.
+    // --socket-path : the UDS path Firecracker references in its "fs" config.
+    let vfs_socket_path = virtiofs_sock.display().to_string();
+    let shared_dir = spec.host_cwd.display().to_string();
+    let vfs_proc = tokio::process::Command::new(&vfs_bin)
+        .args([
+            "--socket-path",
+            &vfs_socket_path,
+            "--shared-dir",
+            &shared_dir,
+            "--sandbox",
+            "none",
+            "--seccomp",
+            "none",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    // Give virtiofsd a moment to create its socket before Firecracker tries
+    // to connect to it.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Write Firecracker config JSON.
     let fc_config = build_fc_config(
@@ -668,7 +674,7 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
         &rootfs_path,
         &vsock_sock,
         cid,
-        vfs_proc.as_ref().map(|_| virtiofs_sock.as_path()),
+        &virtiofs_sock,
         spec,
     );
     let config_json = serde_json::to_string_pretty(&fc_config)
@@ -694,7 +700,7 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
         id: vm_id,
         vsock_path: vsock_sock,
         _fc_proc: fc_proc,
-        _vfs_proc: vfs_proc,
+        _vfs_proc: Some(vfs_proc),
         born_at: Instant::now(),
         call_count: 0,
         ceiling: spec.vm_ceiling,
@@ -726,8 +732,11 @@ async fn decompress_zst(src: &std::path::Path, dst: &std::path::Path) -> Result<
         })?;
 
         // Write to a temp file in the same directory, then rename atomically.
+        // Use a UUID instead of PID to avoid concurrent cold-boot races where
+        // two tasks in the same process share the same PID and would clobber
+        // each other's temp file before the atomic rename.
         let dst_parent = dst.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let tmp_path = dst_parent.join(format!(".rootfs.img.tmp.{}", std::process::id()));
+        let tmp_path = dst_parent.join(format!(".rootfs.img.tmp.{}", uuid::Uuid::new_v4()));
         {
             let out_file = std::fs::File::create(&tmp_path).map_err(|e| {
                 SandboxError::Unavailable(format!(
@@ -779,15 +788,25 @@ fn vm_id_to_cid(vm_id: &str) -> u32 {
 }
 
 /// Build the Firecracker config JSON value.
+///
+/// The `virtiofs_sock` is the **virtiofsd daemon socket path** that
+/// Firecracker connects to for the virtio-fs device — NOT the shared
+/// directory. virtiofsd itself is told the shared directory via
+/// `--shared-dir`; Firecracker only needs the socket.
+///
+/// Firecracker's `fs` device schema (as of v1.x):
+/// ```json
+/// { "fs_id": "work", "socket": "/path/to/virtiofs.sock", "tag": "work" }
+/// ```
 fn build_fc_config(
     kernel_path: &std::path::Path,
     rootfs_path: &std::path::Path,
     vsock_sock: &std::path::Path,
     cid: u32,
-    virtiofs_sock: Option<&std::path::Path>,
+    virtiofs_sock: &std::path::Path,
     spec: &VmSpec,
 ) -> serde_json::Value {
-    let mut config = serde_json::json!({
+    let config = serde_json::json!({
         "boot-source": {
             "kernel_image_path": kernel_path.display().to_string(),
             "boot_args": format!(
@@ -813,21 +832,20 @@ fn build_fc_config(
         "vsock": {
             "guest_cid": cid,
             "uds_path": vsock_sock.display().to_string()
-        }
-    });
-
-    // virtio-fs share if virtiofsd is available.
-    if let Some(vfs_sock) = virtiofs_sock {
-        config["fs"] = serde_json::json!([
+        },
+        // virtio-fs share: point Firecracker at the virtiofsd socket.
+        // The guest kernel mounts tag "work" at /work via the init script.
+        // The `socket` field is the virtiofsd UDS, not the shared directory.
+        "fs": [
             {
                 "fs_id": "work",
-                "host_path": vfs_sock.display().to_string(),
-                "guest_mount_point": "/work",
-                "rate_limiter": null,
+                "socket": virtiofs_sock.display().to_string(),
                 "tag": "work"
             }
-        ]);
-    }
+        ]
+    });
+
+    let _ = spec; // spec used for vm_ceiling above; other fields may be used in future
 
     config
 }

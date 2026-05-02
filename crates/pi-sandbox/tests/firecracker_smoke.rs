@@ -18,8 +18,11 @@
 //!
 //! 1. `probe()` returns `available=true`.
 //! 2. `acquire()` succeeds (cold boot path).
-//! 3. `execute()` of the "read" tool for `/etc/pi-sandbox-version` returns
-//!    a response containing "0.1.0" (the version string baked into the rootfs).
+//! 3. `execute()` of the "read" tool for `/work/smoke-sentinel.txt` returns
+//!    the sentinel content written to the host work_dir before acquire.
+//!    The test reads via `/work/` (the guest mount point for `host_cwd`)
+//!    because the worker's path-boundary check rejects absolute paths
+//!    outside `/work` (including `/etc/pi-sandbox-version`).
 //! 4. `release()` returns the VM to the pool.
 
 #![cfg(target_os = "linux")]
@@ -127,6 +130,13 @@ async fn firecracker_smoke_boot_read_release() {
 
     // Spec: use a temp dir as the shared cwd.
     let work_dir = tempfile::tempdir().expect("work_dir tempdir");
+    // Write a known file into work_dir so the smoke test can read it back
+    // through /work inside the guest. Reading /etc/pi-sandbox-version would
+    // fail because the worker's path-boundary check rejects paths outside /work.
+    let sentinel_content = "sandbox-smoke-ok-0.1.0";
+    std::fs::write(work_dir.path().join("smoke-sentinel.txt"), sentinel_content)
+        .expect("write sentinel file");
+
     let spec = VmSpec {
         host_cwd: work_dir.path().to_path_buf(),
         host_cwd_writable: true,
@@ -142,7 +152,8 @@ async fn firecracker_smoke_boot_read_release() {
         .await
         .expect("acquire() should succeed");
 
-    // Execute: read /etc/pi-sandbox-version.
+    // Execute: read /work/smoke-sentinel.txt through the guest.
+    // The worker maps /work → host work_dir via the virtio-fs share.
     let ctx = ToolContext::default();
     let limits = CallLimits::default();
     let exec = handle
@@ -150,7 +161,7 @@ async fn firecracker_smoke_boot_read_release() {
             &ctx,
             &limits,
             "read",
-            &json!({ "path": "/etc/pi-sandbox-version" }),
+            &json!({ "path": "/work/smoke-sentinel.txt" }),
         )
         .await
         .expect("execute() should succeed");
@@ -166,8 +177,8 @@ async fn firecracker_smoke_boot_read_release() {
         exec.result.model_output
     );
     assert!(
-        exec.result.model_output.contains("0.1.0"),
-        "expected '0.1.0' in output, got: {:?}",
+        exec.result.model_output.contains("sandbox-smoke-ok-0.1.0"),
+        "expected sentinel content in output, got: {:?}",
         exec.result.model_output
     );
 
