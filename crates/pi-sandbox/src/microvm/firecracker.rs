@@ -479,11 +479,23 @@ impl VmHandle for FirecrackerVmHandle {
         }
 
         // Read response with timeout.
+        //
+        // The JSON frame cap must be at least as large as max_output_bytes
+        // plus envelope overhead (field names, quotes, other response fields
+        // etc.), otherwise any valid response larger than DEFAULT_MAX_LINE_BYTES
+        // but within the negotiated limit gets rejected with FrameTooLarge
+        // before we even parse the stdout field.
+        //
+        // ~4 KiB of slack is enough for the JSON envelope; using max() means
+        // we still honour DEFAULT_MAX_LINE_BYTES when max_output_bytes is small.
+        const JSON_ENVELOPE_SLACK: usize = 4 * 1024;
+        let frame_cap = framing::DEFAULT_MAX_LINE_BYTES
+            .max(limits.max_output_bytes as usize + JSON_ENVELOPE_SLACK);
         let resp = tokio::time::timeout(limits.wall_timeout + Duration::from_secs(5), async {
             let mut reader = BufReader::new(&mut stream);
             framing::read_response_with_max(
                 &mut reader,
-                pi_sandbox_protocol::framing::DEFAULT_MAX_LINE_BYTES,
+                frame_cap,
                 limits.max_output_bytes as usize,
             )
             .await
