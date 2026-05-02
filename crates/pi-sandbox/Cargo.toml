@@ -12,6 +12,8 @@ thiserror.workspace = true
 tokio.workspace = true
 chrono.workspace = true
 pi-tools.workspace = true
+pi-tool-types.workspace = true
+pi-sandbox-rootfs.workspace = true
 dirs.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 futures.workspace = true

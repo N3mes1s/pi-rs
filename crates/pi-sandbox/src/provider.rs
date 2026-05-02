@@ -32,6 +32,16 @@ pub enum SandboxError {
     Timeout,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("microvm unavailable: {0}")]
+    Unavailable(String),
+    #[error("guest tool error: {0}")]
+    Tool(String),
+    #[error("vsock io: {0}")]
+    Vsock(String),
+    #[error("rootfs version mismatch: expected {expected}, got {found}")]
+    RootfsMismatch { expected: String, found: String },
+    #[error("tool '{tool}' unavailable in sandbox: {reason}")]
+    ToolUnavailable { tool: String, reason: &'static str },
 }
 
 /// An isolation boundary for tool execution.
