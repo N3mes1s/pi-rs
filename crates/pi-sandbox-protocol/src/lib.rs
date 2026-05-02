@@ -81,4 +81,10 @@ pub enum ProtocolError {
     Eof,
     #[error("frame too large: {size} bytes exceeds limit of {limit} bytes")]
     FrameTooLarge { size: usize, limit: usize },
+    /// The guest returned a `stdout` field that exceeds the cap negotiated
+    /// in the original `ToolRequest.max_output_bytes`. Distinct from
+    /// `FrameTooLarge` because the JSON envelope overhead means the frame
+    /// itself can be larger than `max_output_bytes` even for a valid response.
+    #[error("stdout too large: {size} bytes exceeds negotiated limit of {limit} bytes")]
+    StdoutTooLarge { size: usize, limit: usize },
 }

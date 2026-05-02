@@ -3,17 +3,32 @@
 //! Both host and guest use these to read / write `ToolRequest`
 //! and `ToolResponse` over an `AsyncRead` / `AsyncWrite`. One
 //! JSON object per line, `\n`-terminated. Lines must fit in
-//! 64 KiB by default (configurable via `read_request_with_max` and
-//! `read_response_with_max`). The host should pass
-//! `req.max_output_bytes as usize` to `read_response_with_max` so
-//! that the negotiated per-call cap is honoured on the response side.
+//! 64 KiB by default (configurable via `read_request_with_max`).
+//!
+//! ## Response-side size cap
+//!
+//! `ToolRequest.max_output_bytes` is a **stdout byte cap** — it
+//! limits how many bytes the guest may write to `ToolResponse.stdout`,
+//! not the JSON envelope. On the host side, `read_response_with_max`
+//! enforces both a JSON-frame cap (default `DEFAULT_MAX_LINE_BYTES`)
+//! and a post-parse `stdout` check against the negotiated limit:
+//!
+//! ```ignore
+//! let resp = read_response_with_max(&mut reader,
+//!                                    DEFAULT_MAX_LINE_BYTES,
+//!                                    req.max_output_bytes as usize).await?;
+//! ```
+//!
+//! A valid response whose `stdout` is exactly `max_output_bytes` will
+//! have a JSON frame that is somewhat larger than that value, which is
+//! why the two limits must be kept separate.
 
 use crate::{ProtocolError, ToolRequest, ToolResponse};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-/// Default max line length. Tool inputs/outputs above this size
-/// fail to deserialise. Guest enforces a stricter cap via
-/// ToolRequest.max_output_bytes for the response side.
+/// Default max JSON-frame length for both requests and responses.
+/// Frames larger than this (before the `\n`) are rejected with
+/// `ProtocolError::FrameTooLarge`.
 pub const DEFAULT_MAX_LINE_BYTES: usize = 64 * 1024;
 
 /// Read one `ToolRequest` from a buffered AsyncRead. Reads
@@ -81,35 +96,48 @@ where
     Ok(())
 }
 
-/// Read a `ToolResponse` using the fixed `DEFAULT_MAX_LINE_BYTES` cap.
-///
-/// For production use on the host side, prefer `read_response_with_max`
-/// and pass `req.max_output_bytes as usize` so the negotiated per-call
-/// limit is honoured.
+/// Read a `ToolResponse` using the fixed `DEFAULT_MAX_LINE_BYTES` frame cap
+/// and no per-call stdout cap. For production host use, prefer
+/// `read_response_with_max` to enforce the negotiated `max_output_bytes`.
 pub async fn read_response<R>(reader: &mut BufReader<R>) -> Result<ToolResponse, ProtocolError>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    read_response_with_max(reader, DEFAULT_MAX_LINE_BYTES).await
+    read_response_with_max(reader, DEFAULT_MAX_LINE_BYTES, usize::MAX).await
 }
 
-/// Read one `ToolResponse` from a buffered AsyncRead with an explicit
-/// max line cap.
+/// Read one `ToolResponse` from a buffered AsyncRead.
 ///
-/// The host should call this with `req.max_output_bytes as usize` so
-/// that the cap negotiated in the request is enforced on the response
-/// frame as well. Returns `ProtocolError::FrameTooLarge` if the response
-/// exceeds `max_bytes` before a `\n` is found; returns
-/// `ProtocolError::Eof` if the stream closes before a full line arrives.
+/// * `frame_max_bytes` — JSON frame cap: `ProtocolError::FrameTooLarge`
+///   is returned as soon as the frame exceeds this many bytes before
+///   a `\n` is found. Pass `DEFAULT_MAX_LINE_BYTES` (or larger) if you
+///   only want the stdout check to govern.
+///
+/// * `stdout_max_bytes` — negotiated stdout cap from
+///   `ToolRequest.max_output_bytes`. After successful parsing, the
+///   function checks `resp.stdout.len() <= stdout_max_bytes` and returns
+///   `ProtocolError::StdoutTooLarge` if the guest exceeded the limit.
+///   Pass `usize::MAX` to skip this check.
+///
+/// These two limits are kept separate because the JSON envelope adds
+/// per-field overhead: a response with exactly `max_output_bytes` of
+/// stdout will produce a frame that is larger than `max_output_bytes`.
 pub async fn read_response_with_max<R>(
     reader: &mut BufReader<R>,
-    max_bytes: usize,
+    frame_max_bytes: usize,
+    stdout_max_bytes: usize,
 ) -> Result<ToolResponse, ProtocolError>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let line = bounded_read_line(reader, max_bytes).await?;
+    let line = bounded_read_line(reader, frame_max_bytes).await?;
     let resp: ToolResponse = serde_json::from_str(&line)?;
+    if resp.stdout.len() > stdout_max_bytes {
+        return Err(ProtocolError::StdoutTooLarge {
+            size: resp.stdout.len(),
+            limit: stdout_max_bytes,
+        });
+    }
     Ok(resp)
 }
 

@@ -3,7 +3,7 @@
 use pi_sandbox_protocol::{
     framing::{
         read_request, read_request_with_max, read_response, read_response_with_max, write_request,
-        write_response,
+        write_response, DEFAULT_MAX_LINE_BYTES,
     },
     ProtocolError, ToolRequest, ToolResponse, CURRENT_PROTOCOL_VERSION,
 };
@@ -251,8 +251,6 @@ async fn read_request_rejects_oversized_frame() {
 async fn read_request_rejects_invalid_utf8_frame() {
     // Construct a frame that looks like valid JSON structure but contains
     // an invalid UTF-8 byte (0xFF) in the tool_name field value.
-    // The bytes below are: {"proto_version":1,"call_id":"x","tool_name":"ba\xFFsh",...}\n
-    // We build it manually to inject a raw 0xFF byte.
     let prefix = br#"{"proto_version":1,"call_id":"x","tool_name":"ba"#;
     let suffix = br#"sh","tool_input":null,"max_output_bytes":1024,"timeout_ms":1000}"#;
     let invalid_byte: &[u8] = &[0xFF]; // not valid UTF-8
@@ -271,21 +269,13 @@ async fn read_request_rejects_invalid_utf8_frame() {
         "expected error for invalid UTF-8 frame, got Ok({:?})",
         result.ok()
     );
-    // It must NOT be a successful parse with a replacement character.
-    if let Ok(req) = result {
-        assert!(
-            !req.tool_name.contains('\u{FFFD}'),
-            "invalid UTF-8 was silently replaced instead of rejected: tool_name={:?}",
-            req.tool_name
-        );
-    }
 }
 
-// --- Response-side max-bytes cap test ---
+// --- Response-side frame cap test ---
 
 #[tokio::test]
 async fn read_response_with_max_rejects_oversized_response_frame() {
-    // Build a response whose stdout is large enough to exceed a tiny cap.
+    // Build a response whose stdout is large enough to exceed a tiny frame cap.
     let resp = ToolResponse {
         call_id: "x".to_string(),
         stdout: "z".repeat(300),
@@ -297,39 +287,98 @@ async fn read_response_with_max_rejects_oversized_response_frame() {
     let mut line = serde_json::to_vec(&resp).expect("serialise");
     line.push(b'\n');
 
-    let max_bytes = 64;
+    let frame_max = 64;
     assert!(
-        line.len() > max_bytes,
+        line.len() > frame_max,
         "test precondition: line ({} bytes) must exceed cap ({} bytes)",
         line.len(),
-        max_bytes
+        frame_max
     );
 
     let mut buf_reader = tokio::io::BufReader::new(line.as_slice());
-    let result = read_response_with_max(&mut buf_reader, max_bytes).await;
+    // stdout_max_bytes = usize::MAX so only the frame cap fires.
+    let result = read_response_with_max(&mut buf_reader, frame_max, usize::MAX).await;
 
     match result {
         Err(ProtocolError::FrameTooLarge { size, limit }) => {
-            assert!(size > max_bytes, "reported size ({size}) should exceed limit");
-            assert_eq!(limit, max_bytes);
+            assert!(size > frame_max, "reported size ({size}) should exceed limit");
+            assert_eq!(limit, frame_max);
         }
         other => panic!("expected FrameTooLarge for oversized response, got {:?}", other),
     }
 }
 
+/// Verify that the frame cap and the stdout cap are independent:
+/// a response whose stdout exactly equals `max_output_bytes` is
+/// accepted (the JSON frame is larger, but both checks pass when
+/// the caller uses the correct limits).
 #[tokio::test]
-async fn read_response_with_max_honours_negotiated_limit() {
-    // A response that fits within max_output_bytes but would exceed DEFAULT_MAX_LINE_BYTES
-    // is accepted when the caller passes the correct cap.
-    let resp = sample_response();
+async fn read_response_with_max_separates_frame_cap_from_stdout_cap() {
+    let stdout_content = "x".repeat(100);
+    let resp = ToolResponse {
+        call_id: "x".to_string(),
+        stdout: stdout_content.clone(),
+        stderr: String::new(),
+        exit_status: 0,
+        guest_duration_ms: 1,
+        is_error: false,
+    };
     let mut line = serde_json::to_vec(&resp).expect("serialise");
     line.push(b'\n');
 
-    // Use a cap that is exactly line.len() — should succeed.
-    let max_bytes = line.len();
+    // The JSON frame is larger than 100 bytes because of the envelope.
+    assert!(
+        line.len() > 100,
+        "precondition: frame ({} B) must exceed raw stdout size (100 B)",
+        line.len()
+    );
+
+    // Use the true frame length as the frame cap, and the raw stdout length
+    // as the stdout cap. Both should pass.
+    let frame_cap = DEFAULT_MAX_LINE_BYTES;
+    let stdout_cap = stdout_content.len(); // exactly 100
+
     let mut buf_reader = tokio::io::BufReader::new(line.as_slice());
-    let result = read_response_with_max(&mut buf_reader, max_bytes)
+    let decoded = read_response_with_max(&mut buf_reader, frame_cap, stdout_cap)
         .await
-        .expect("should succeed when frame fits within cap");
-    assert_eq!(result, resp);
+        .expect("response should be accepted when stdout fits within stdout_cap");
+    assert_eq!(decoded, resp);
+}
+
+/// Verify that StdoutTooLarge fires when stdout exceeds the negotiated cap
+/// even though the JSON frame itself would fit within DEFAULT_MAX_LINE_BYTES.
+#[tokio::test]
+async fn read_response_with_max_rejects_stdout_exceeding_negotiated_cap() {
+    let stdout_content = "y".repeat(200);
+    let resp = ToolResponse {
+        call_id: "x".to_string(),
+        stdout: stdout_content.clone(),
+        stderr: String::new(),
+        exit_status: 0,
+        guest_duration_ms: 1,
+        is_error: false,
+    };
+    let mut line = serde_json::to_vec(&resp).expect("serialise");
+    line.push(b'\n');
+
+    // Frame fits within DEFAULT_MAX_LINE_BYTES, but we negotiate a 50-byte
+    // stdout cap — the guest violated it.
+    let stdout_cap = 50;
+    assert!(
+        stdout_content.len() > stdout_cap,
+        "precondition: stdout ({} B) must exceed stdout_cap ({} B)",
+        stdout_content.len(),
+        stdout_cap
+    );
+
+    let mut buf_reader = tokio::io::BufReader::new(line.as_slice());
+    let result = read_response_with_max(&mut buf_reader, DEFAULT_MAX_LINE_BYTES, stdout_cap).await;
+
+    match result {
+        Err(ProtocolError::StdoutTooLarge { size, limit }) => {
+            assert_eq!(size, stdout_content.len());
+            assert_eq!(limit, stdout_cap);
+        }
+        other => panic!("expected StdoutTooLarge, got {:?}", other),
+    }
 }
