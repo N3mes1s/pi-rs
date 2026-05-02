@@ -8,4 +8,3 @@ description = "Shared POD types for pi-rs tool layer (ToolSpec, ToolResult, Tool
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-async-trait.workspace = true

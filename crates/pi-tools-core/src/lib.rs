@@ -6,14 +6,45 @@
 //!
 //! Each tool implements [`Tool`] and is registered in a [`ToolRegistry`].
 //!
-//! The `Tool` trait and `ToolContext` struct are defined in `pi-tool-types`
-//! and re-exported here so that callers see a single consistent API surface.
+//! The POD types (`ToolSpec`, `ToolResult`, `ToolError`) come from
+//! `pi-tool-types`. The `Tool` trait and `ToolContext` are defined here.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub use pi_tool_types::{Tool, ToolContext, ToolError, ToolResult, ToolSpec};
+pub use pi_tool_types::{ToolError, ToolResult, ToolSpec};
+
+use async_trait::async_trait;
+
+/// Execution context passed to every tool invocation.
+#[derive(Debug, Clone)]
+pub struct ToolContext {
+    pub cwd: PathBuf,
+    pub max_output_bytes: usize,
+}
+
+impl Default for ToolContext {
+    fn default() -> Self {
+        Self {
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            max_output_bytes: 256 * 1024,
+        }
+    }
+}
+
+/// The tool trait every tool must implement.
+#[async_trait]
+pub trait Tool: Send + Sync {
+    fn spec(&self) -> ToolSpec;
+    fn read_only(&self) -> bool;
+    async fn invoke(
+        &self,
+        ctx: &ToolContext,
+        call_id: &str,
+        input: serde_json::Value,
+    ) -> Result<ToolResult, ToolError>;
+}
 
 pub mod bash;
 pub mod edit;
