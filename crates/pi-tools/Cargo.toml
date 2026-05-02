@@ -9,6 +9,10 @@ tempfile.workspace = true
 base64.workspace = true
 tokio = { workspace = true, features = ["full"] }
 wiremock.workspace = true
+serde_json.workspace = true
+pi-ai.workspace = true
+reqwest.workspace = true
+async-trait.workspace = true
 
 [dependencies]
 pi-tools-core.workspace = true
