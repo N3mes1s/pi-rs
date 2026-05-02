@@ -35,6 +35,11 @@ pub struct Cli {
     #[arg(long, action = ArgAction::SetTrue)]
     pub no_tools: bool,
 
+    /// Enable the RFD 0022 sandbox boundary. Currently supports:
+    ///   `local-process` — invokes tools through pi_sandbox::LocalProcessProvider.
+    #[arg(long = "sandbox-provider", value_name = "KIND")]
+    pub sandbox_provider: Option<String>,
+
     /// Print mode — non-interactive. Reads stdin if piped, prints final reply.
     #[arg(long, short = 'p', action = ArgAction::SetTrue)]
     pub print: bool,
