@@ -2,10 +2,28 @@
 //!
 //! RFD 0021 §"Merge queue" specs:
 //!   * single-threaded merge worker (one merge at a time)
-//!   * primitive is `git cherry-pick reviewed_branch_sha`
+//!   * primitive is `git cherry-pick target_head..reviewed_branch_sha`
+//!     — the **range** form, not the tip-only form
 //!   * staleness check: compare current `git rev-parse <target>` to
 //!     the `reviewed_target_head_sha` snapshot taken at review time;
 //!     mismatch → `BLOCKED_ON_REVIEW_STALE`
+//!
+//! ### Why range, not tip-only
+//!
+//! The implementer's branch typically accumulates multiple commits
+//! across the fix-loop iterations: iter 1 lays down the main work,
+//! iter 2+ are fix-up commits in response to the reviewer's
+//! `NEEDS_FIX` deltas. A tip-only `git cherry-pick branch_sha`
+//! tries to apply only the LAST commit on top of `target_branch`,
+//! and that commit (a fix-up) typically references context laid down
+//! by earlier iter commits — so it conflicts. The range form
+//! `git cherry-pick target_head..branch_sha` applies every commit
+//! in the milestone branch's history that's not already on target,
+//! in order, reproducing the implementer's full sequence on target.
+//!
+//! This was historically a recurring failure mode (BLOCKED_ON_CONFLICT
+//! on every multi-iter milestone, requiring manual cherry-pick recovery
+//! by the operator). The fix below picks the whole range.
 //!
 //! v1 implements all three. The staleness check happens in the
 //! runner (`runner::run_with`), so this module is invoked only after
@@ -66,13 +84,22 @@ pub fn rev_parse(repo_root: &Path, refname: &str) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Cherry-pick `branch_sha` onto `target_branch` (which is checked out
-/// in `repo_root`). On conflict, abort the cherry-pick so the working
-/// tree is clean for the next milestone — we don't leave a half-
-/// applied state for the operator to clean up.
+/// Cherry-pick the range `target_head_at_review..branch_sha` onto
+/// `target_branch` (which is checked out in `repo_root`). The range
+/// form picks every commit on the milestone branch that's not yet on
+/// target — including all fix-up commits from later fix-loop
+/// iterations, not just the tip. On conflict, abort the cherry-pick
+/// so the working tree is clean for the next milestone.
+///
+/// `target_head_at_review` is the SHA of `target_branch`'s HEAD at
+/// the moment the reviewer signed off (recorded in the runner's
+/// REVIEWED → MERGE_PENDING event). Passing this explicitly avoids a
+/// race where target moves between review and merge — the staleness
+/// check upstream catches that case.
 pub fn cherry_pick_to_target(
     repo_root: &Path,
     target_branch: &str,
+    target_head_at_review: &str,
     branch_sha: &str,
 ) -> MergeOutcome {
     // 1. Switch to target_branch.
@@ -90,9 +117,13 @@ pub fn cherry_pick_to_target(
         ));
     }
 
-    // 2. Cherry-pick.
+    // 2. Cherry-pick the range. `target_head..branch_sha` expands to
+    //    every commit reachable from branch_sha but not from target,
+    //    applied in topological order. Equivalent to running
+    //    `git cherry-pick A B C ...` for each iter's commit.
+    let range = format!("{target_head_at_review}..{branch_sha}");
     let cp = Command::new("git")
-        .args(["cherry-pick", branch_sha])
+        .args(["cherry-pick", &range])
         .current_dir(repo_root)
         .output();
     let Ok(cp) = cp else {

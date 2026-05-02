@@ -352,8 +352,18 @@ pub fn run_with(
                         break FinalState::BlockedOnReviewStale;
                     }
 
-                    let merge_result =
-                        cherry_pick_to_target(repo_root, &campaign.target_branch, &branch_sha);
+                    // The cherry-pick takes the RANGE
+                    // `target_head_at_review..branch_sha` so every
+                    // fix-loop iter's commit lands on target, not just
+                    // the implementer's tip. See merge.rs §"Why range,
+                    // not tip-only".
+                    let target_head_for_range = target_head_at_review.as_deref().unwrap_or("");
+                    let merge_result = cherry_pick_to_target(
+                        repo_root,
+                        &campaign.target_branch,
+                        target_head_for_range,
+                        &branch_sha,
+                    );
                     let outcome = match merge_result {
                         MergeOutcome::Merged => {
                             emit_event(
