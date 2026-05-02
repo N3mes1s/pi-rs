@@ -173,6 +173,37 @@ async fn read_request_returns_eof_on_closed_stream() {
     }
 }
 
+// --- EOF without newline tests ---
+
+#[tokio::test]
+async fn read_request_returns_eof_on_partial_frame_without_newline() {
+    // A valid JSON object but NO trailing '\n' before EOF.
+    let req = sample_request();
+    let bytes = serde_json::to_vec(&req).expect("serialise");
+    // Deliberately omit the '\n'.
+    let mut buf_reader = BufReader::new(bytes.as_slice());
+    let result = read_request(&mut buf_reader).await;
+
+    match result {
+        Err(ProtocolError::Eof) => {}
+        other => panic!("expected Eof for frame with no trailing newline, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn read_response_returns_eof_on_partial_frame_without_newline() {
+    // A valid JSON response but NO trailing '\n' before EOF.
+    let resp = sample_response();
+    let bytes = serde_json::to_vec(&resp).expect("serialise");
+    let mut buf_reader = BufReader::new(bytes.as_slice());
+    let result = read_response(&mut buf_reader).await;
+
+    match result {
+        Err(ProtocolError::Eof) => {}
+        other => panic!("expected Eof for response with no trailing newline, got {:?}", other),
+    }
+}
+
 // --- Frame-too-large regression test ---
 
 #[tokio::test]

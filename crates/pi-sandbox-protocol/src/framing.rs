@@ -25,6 +25,11 @@ where
 }
 
 /// Same as `read_request` with an explicit max line cap.
+///
+/// The cap is enforced incrementally: as soon as `max_bytes + 1`
+/// bytes are buffered without a `\n` being found, the read returns
+/// `ProtocolError::FrameTooLarge` — no full allocation of the
+/// oversized frame is required.
 pub async fn read_request_with_max<R>(
     reader: &mut BufReader<R>,
     max_bytes: usize,
@@ -32,22 +37,8 @@ pub async fn read_request_with_max<R>(
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let mut line = String::new();
-    let n = reader.read_line(&mut line).await?;
-    if n == 0 {
-        return Err(ProtocolError::Eof);
-    }
-    // Enforce the byte ceiling *before* allocating a parser on untrusted data.
-    // `line` includes the trailing newline; strip it first so the size check
-    // reflects the actual payload length that the caller cares about.
-    let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
-    if trimmed.len() > max_bytes {
-        return Err(crate::ProtocolError::FrameTooLarge {
-            size: trimmed.len(),
-            limit: max_bytes,
-        });
-    }
-    let req: ToolRequest = serde_json::from_str(trimmed)?;
+    let line = bounded_read_line(reader, max_bytes).await?;
+    let req: ToolRequest = serde_json::from_str(&line)?;
     if req.proto_version != crate::CURRENT_PROTOCOL_VERSION {
         return Err(ProtocolError::VersionMismatch {
             expected: crate::CURRENT_PROTOCOL_VERSION,
@@ -92,12 +83,67 @@ pub async fn read_response<R>(reader: &mut BufReader<R>) -> Result<ToolResponse,
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let mut line = String::new();
-    let n = reader.read_line(&mut line).await?;
-    if n == 0 {
-        return Err(ProtocolError::Eof);
-    }
-    let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
-    let resp: ToolResponse = serde_json::from_str(trimmed)?;
+    let line = bounded_read_line(reader, DEFAULT_MAX_LINE_BYTES).await?;
+    let resp: ToolResponse = serde_json::from_str(&line)?;
     Ok(resp)
+}
+
+/// Read one `\n`-terminated line from `reader`, consuming at most
+/// `max_bytes` payload bytes (not counting the newline itself).
+///
+/// Returns `ProtocolError::Eof` if the stream closes before a `\n`
+/// is seen (even if some bytes were received).
+/// Returns `ProtocolError::FrameTooLarge` if `max_bytes + 1` bytes
+/// accumulate before a `\n` is found.
+async fn bounded_read_line<R>(
+    reader: &mut BufReader<R>,
+    max_bytes: usize,
+) -> Result<String, ProtocolError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = Vec::with_capacity(256.min(max_bytes + 1));
+
+    loop {
+        // Peek at whatever is already in the internal buffer.
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            // EOF — stream closed before we saw a '\n'.
+            return Err(ProtocolError::Eof);
+        }
+
+        // How many bytes can we look at without exceeding the cap?
+        // We allow max_bytes payload bytes plus one sentinel byte to
+        // detect oversized frames.
+        let remaining_capacity = (max_bytes + 1).saturating_sub(buf.len());
+        let window = &chunk[..chunk.len().min(remaining_capacity)];
+
+        match window.iter().position(|&b| b == b'\n') {
+            Some(pos) => {
+                // Found a newline within the capped window.
+                buf.extend_from_slice(&window[..pos]);
+                // Consume through the newline itself.
+                let consume_len = pos + 1;
+                reader.consume(consume_len);
+                // Strip optional leading '\r'.
+                let text = String::from_utf8_lossy(&buf);
+                let trimmed = text.trim_end_matches('\r');
+                return Ok(trimmed.to_string());
+            }
+            None => {
+                // No newline in window — absorb and keep reading.
+                buf.extend_from_slice(window);
+                let consumed = window.len();
+                reader.consume(consumed);
+
+                // If we have already buffered more than the limit, bail out.
+                if buf.len() > max_bytes {
+                    return Err(ProtocolError::FrameTooLarge {
+                        size: buf.len(),
+                        limit: max_bytes,
+                    });
+                }
+            }
+        }
+    }
 }
