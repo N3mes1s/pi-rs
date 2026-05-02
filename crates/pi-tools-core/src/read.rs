@@ -6,6 +6,43 @@ use crate::{resolve_path, truncate_for_model, Tool, ToolContext, ToolError};
 
 pub struct ReadTool;
 
+/// Encode bytes as standard base64 (RFC 4648 §4) without an external crate.
+/// Uses A-Z, a-z, 0-9, +, /, with '=' padding.
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let len = input.len();
+    let out_len = (len + 2) / 3 * 4;
+    let mut out = Vec::with_capacity(out_len);
+    let mut i = 0;
+    while i + 2 < len {
+        let b0 = input[i] as usize;
+        let b1 = input[i + 1] as usize;
+        let b2 = input[i + 2] as usize;
+        out.push(TABLE[b0 >> 2]);
+        out.push(TABLE[((b0 & 3) << 4) | (b1 >> 4)]);
+        out.push(TABLE[((b1 & 0xf) << 2) | (b2 >> 6)]);
+        out.push(TABLE[b2 & 0x3f]);
+        i += 3;
+    }
+    if i + 1 == len {
+        let b0 = input[i] as usize;
+        out.push(TABLE[b0 >> 2]);
+        out.push(TABLE[(b0 & 3) << 4]);
+        out.push(b'=');
+        out.push(b'=');
+    } else if i + 2 == len {
+        let b0 = input[i] as usize;
+        let b1 = input[i + 1] as usize;
+        out.push(TABLE[b0 >> 2]);
+        out.push(TABLE[((b0 & 3) << 4) | (b1 >> 4)]);
+        out.push(TABLE[(b1 & 0xf) << 2]);
+        out.push(b'=');
+    }
+    // SAFETY: all bytes pushed are ASCII printable characters from TABLE or '='.
+    unsafe { String::from_utf8_unchecked(out) }
+}
+
 #[async_trait]
 impl Tool for ReadTool {
     fn spec(&self) -> ToolSpec {
@@ -58,8 +95,7 @@ impl Tool for ReadTool {
         let is_image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp");
         if is_image {
             let bytes = tokio::fs::read(&resolved).await?;
-            use base64::Engine;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let b64 = base64_encode(&bytes);
             let mime = match ext.as_str() {
                 "png" => "image/png",
                 "gif" => "image/gif",
