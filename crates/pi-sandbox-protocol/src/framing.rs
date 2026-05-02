@@ -3,7 +3,10 @@
 //! Both host and guest use these to read / write `ToolRequest`
 //! and `ToolResponse` over an `AsyncRead` / `AsyncWrite`. One
 //! JSON object per line, `\n`-terminated. Lines must fit in
-//! 64 KiB by default (configurable via `read_request_with_max`).
+//! 64 KiB by default (configurable via `read_request_with_max` and
+//! `read_response_with_max`). The host should pass
+//! `req.max_output_bytes as usize` to `read_response_with_max` so
+//! that the negotiated per-call cap is honoured on the response side.
 
 use crate::{ProtocolError, ToolRequest, ToolResponse};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -78,12 +81,34 @@ where
     Ok(())
 }
 
-/// Symmetric helper: read a `ToolResponse` (used by the host).
+/// Read a `ToolResponse` using the fixed `DEFAULT_MAX_LINE_BYTES` cap.
+///
+/// For production use on the host side, prefer `read_response_with_max`
+/// and pass `req.max_output_bytes as usize` so the negotiated per-call
+/// limit is honoured.
 pub async fn read_response<R>(reader: &mut BufReader<R>) -> Result<ToolResponse, ProtocolError>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let line = bounded_read_line(reader, DEFAULT_MAX_LINE_BYTES).await?;
+    read_response_with_max(reader, DEFAULT_MAX_LINE_BYTES).await
+}
+
+/// Read one `ToolResponse` from a buffered AsyncRead with an explicit
+/// max line cap.
+///
+/// The host should call this with `req.max_output_bytes as usize` so
+/// that the cap negotiated in the request is enforced on the response
+/// frame as well. Returns `ProtocolError::FrameTooLarge` if the response
+/// exceeds `max_bytes` before a `\n` is found; returns
+/// `ProtocolError::Eof` if the stream closes before a full line arrives.
+pub async fn read_response_with_max<R>(
+    reader: &mut BufReader<R>,
+    max_bytes: usize,
+) -> Result<ToolResponse, ProtocolError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let line = bounded_read_line(reader, max_bytes).await?;
     let resp: ToolResponse = serde_json::from_str(&line)?;
     Ok(resp)
 }

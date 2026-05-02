@@ -1,7 +1,10 @@
 //! Round-trip serialisation and framing tests for pi-sandbox-protocol.
 
 use pi_sandbox_protocol::{
-    framing::{read_request, read_request_with_max, read_response, write_request, write_response},
+    framing::{
+        read_request, read_request_with_max, read_response, read_response_with_max, write_request,
+        write_response,
+    },
     ProtocolError, ToolRequest, ToolResponse, CURRENT_PROTOCOL_VERSION,
 };
 use tokio::io::{duplex, BufReader};
@@ -276,4 +279,57 @@ async fn read_request_rejects_invalid_utf8_frame() {
             req.tool_name
         );
     }
+}
+
+// --- Response-side max-bytes cap test ---
+
+#[tokio::test]
+async fn read_response_with_max_rejects_oversized_response_frame() {
+    // Build a response whose stdout is large enough to exceed a tiny cap.
+    let resp = ToolResponse {
+        call_id: "x".to_string(),
+        stdout: "z".repeat(300),
+        stderr: String::new(),
+        exit_status: 0,
+        guest_duration_ms: 1,
+        is_error: false,
+    };
+    let mut line = serde_json::to_vec(&resp).expect("serialise");
+    line.push(b'\n');
+
+    let max_bytes = 64;
+    assert!(
+        line.len() > max_bytes,
+        "test precondition: line ({} bytes) must exceed cap ({} bytes)",
+        line.len(),
+        max_bytes
+    );
+
+    let mut buf_reader = tokio::io::BufReader::new(line.as_slice());
+    let result = read_response_with_max(&mut buf_reader, max_bytes).await;
+
+    match result {
+        Err(ProtocolError::FrameTooLarge { size, limit }) => {
+            assert!(size > max_bytes, "reported size ({size}) should exceed limit");
+            assert_eq!(limit, max_bytes);
+        }
+        other => panic!("expected FrameTooLarge for oversized response, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn read_response_with_max_honours_negotiated_limit() {
+    // A response that fits within max_output_bytes but would exceed DEFAULT_MAX_LINE_BYTES
+    // is accepted when the caller passes the correct cap.
+    let resp = sample_response();
+    let mut line = serde_json::to_vec(&resp).expect("serialise");
+    line.push(b'\n');
+
+    // Use a cap that is exactly line.len() — should succeed.
+    let max_bytes = line.len();
+    let mut buf_reader = tokio::io::BufReader::new(line.as_slice());
+    let result = read_response_with_max(&mut buf_reader, max_bytes)
+        .await
+        .expect("should succeed when frame fits within cap");
+    assert_eq!(result, resp);
 }
