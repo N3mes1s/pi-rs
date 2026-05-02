@@ -1,0 +1,36 @@
+[package]
+name = "pi-sandbox-worker"
+version.workspace = true
+edition.workspace = true
+description = "Guest-side worker binary for pi-rs microVM sandbox"
+
+[[bin]]
+name = "pi-sandbox-worker"
+path = "src/main.rs"
+
+[lib]
+name = "pi_sandbox_worker"
+path = "src/lib.rs"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile.workspace = true
+
+[dependencies]
+pi-sandbox-protocol.workspace = true
+pi-tool-types.workspace = true
+pi-tools-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+shellexpand.workspace = true
+clap = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["macros", "rt", "io-util", "signal", "net"] }
+async-trait.workspace = true
+
+# vsock is Linux-only — gate the dependency.
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = "0.7"
