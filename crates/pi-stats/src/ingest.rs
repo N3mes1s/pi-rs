@@ -138,6 +138,29 @@ fn ingest_one(conn: &Connection, path: &Path) -> anyhow::Result<u64> {
                     inserted += n;
                 }
             }
+            SessionEntryKind::SandboxAction {
+                provider,
+                tool_name,
+                duration_ms,
+                exit_status,
+                is_error,
+            } => {
+                if let Some(meta) = &session_meta {
+                    let n = insert_sandbox_action(
+                        conn,
+                        &path_key,
+                        &entry.id,
+                        &meta.folder,
+                        entry.timestamp,
+                        provider,
+                        tool_name,
+                        *duration_ms,
+                        *exit_status,
+                        *is_error,
+                    )?;
+                    inserted += n;
+                }
+            }
             // Forward-compatibility invariant: any future SessionEntryKind
             // we don't recognise here is silently skipped, never errors.
             // The serde::from_str above also returns Err on truly unknown
@@ -227,6 +250,38 @@ fn insert_routing_decision(
             model,
             thinking,
             budget_tokens.map(|b| b as i64),
+        ],
+    )?;
+    Ok(n as u64)
+}
+
+fn insert_sandbox_action(
+    conn: &Connection,
+    session_file: &str,
+    entry_id: &str,
+    folder: &str,
+    timestamp_ms: i64,
+    provider: &str,
+    tool_name: &str,
+    duration_ms: u64,
+    exit_status: i32,
+    is_error: bool,
+) -> rusqlite::Result<u64> {
+    let n = conn.execute(
+        "INSERT OR IGNORE INTO sandbox_actions (
+            session_file, entry_id, folder, timestamp_ms,
+            provider, tool_name, duration_ms, exit_status, is_error
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            session_file,
+            entry_id,
+            folder,
+            timestamp_ms,
+            provider,
+            tool_name,
+            duration_ms as i64,
+            exit_status,
+            if is_error { 1i64 } else { 0i64 },
         ],
     )?;
     Ok(n as u64)

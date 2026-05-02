@@ -83,6 +83,19 @@ pub enum SessionEntryKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget_tokens: Option<u64>,
     },
+    /// Records execution of one tool decision through a sandbox provider
+    /// (RFD 0022). Emitted *before* the corresponding `ToolResult` so the
+    /// per-call latency, exit status and provider attribution are
+    /// observable end-to-end. Compact telemetry — the full ToolResult is
+    /// captured separately.
+    SandboxAction {
+        provider: String,
+        tool_name: String,
+        duration_ms: u64,
+        exit_status: i32,
+        #[serde(default)]
+        is_error: bool,
+    },
 }
 
 /// How an [`SessionEntryKind::Outcome`] was derived. Replay-sourced

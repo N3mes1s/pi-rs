@@ -1,9 +1,9 @@
 # RFD 0022 — Sandbox Execution for Tool Decisions
 
-- **Status:** Discussion
+- **Status:** Implemented (v1.0)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-01-XX
-- **Implemented:** (pending)
+- **Implemented:** 2026-04-30
 
 ## Summary
 
@@ -383,7 +383,15 @@ let (result, sandbox_action) = if let Some(provider) = &self.cfg.sandbox_provide
 
 ## Revision history
 
-(None yet.)
+- **v1.0 (2026-04-30):** Initial implementation landed. `pi-sandbox` crate
+  exposes `SandboxProvider` + `LocalProcessProvider`. `RuntimeConfig` gains
+  `sandbox_provider: Option<Arc<dyn SandboxProvider>>`; the dispatch site in
+  `runtime.rs::run_loop()` routes through the provider when set.
+  `SessionEntryKind::SandboxAction` records compact telemetry (provider,
+  tool_name, duration_ms, exit_status, is_error) emitted before the matching
+  `ToolResult`. `pi-stats` adds the `sandbox_actions` table, ingest path,
+  `aggregate::by_sandbox_provider()`, and the `sandbox-actions` (alias
+  `sandbox`) verb on `pi --stats`.
 
 ## Open questions
 

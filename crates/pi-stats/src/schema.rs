@@ -77,6 +77,23 @@ pub fn ensure(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_routing_route_id ON routing_decisions(route_id);
         CREATE INDEX IF NOT EXISTS idx_routing_ts       ON routing_decisions(timestamp_ms);
+
+        CREATE TABLE IF NOT EXISTS sandbox_actions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_file    TEXT    NOT NULL,
+            entry_id        TEXT    NOT NULL,
+            folder          TEXT    NOT NULL,
+            timestamp_ms    INTEGER NOT NULL,
+            provider        TEXT    NOT NULL,
+            tool_name       TEXT    NOT NULL,
+            duration_ms     INTEGER NOT NULL,
+            exit_status     INTEGER NOT NULL,
+            is_error        INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (session_file, entry_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_sandbox_provider  ON sandbox_actions(provider);
+        CREATE INDEX IF NOT EXISTS idx_sandbox_tool_name ON sandbox_actions(tool_name);
+        CREATE INDEX IF NOT EXISTS idx_sandbox_ts        ON sandbox_actions(timestamp_ms);
         "#,
     )?;
     Ok(())

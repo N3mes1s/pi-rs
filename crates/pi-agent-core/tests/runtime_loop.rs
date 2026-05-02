@@ -102,6 +102,7 @@ fn build_config(provider: MockProvider, tools: ToolRegistry) -> RuntimeConfig {
         tool_gate: None,
         gate_ask_is_approve: false,
         stream_interceptor: None,
+        sandbox_provider: None,
     }
 }
 
@@ -420,6 +421,7 @@ async fn runtime_abort_emits_aborted_event() {
         tool_gate: None,
         gate_ask_is_approve: false,
         stream_interceptor: None,
+        sandbox_provider: None,
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

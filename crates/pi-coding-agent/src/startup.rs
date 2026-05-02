@@ -449,6 +449,7 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         tool_gate: Some(auto_gate as std::sync::Arc<dyn pi_agent_core::ToolGate>),
         gate_ask_is_approve,
         stream_interceptor,
+        sandbox_provider: None,
     };
 
     Ok(Startup {

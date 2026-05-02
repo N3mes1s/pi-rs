@@ -244,6 +244,17 @@ fn entry_as_block(entry: &SessionEntry) -> Option<Block> {
         SessionEntryKind::RoutingDecision { route_id, .. } => {
             ("routing", format!("route → {route_id}"), 0, None)
         }
+        SessionEntryKind::SandboxAction {
+            provider,
+            tool_name,
+            duration_ms,
+            ..
+        } => (
+            "sandbox",
+            format!("sandbox[{provider}] → {tool_name} ({duration_ms} ms)"),
+            0,
+            None,
+        ),
     };
     Some(Block {
         kind: kind.into(),
@@ -458,6 +469,16 @@ fn render_block(entry: &SessionEntry, total_tokens: f64) -> Option<String> {
         SessionEntryKind::RoutingDecision { route_id, .. } => {
             ("routing", format!("route → {route_id}"), 1.0)
         }
+        SessionEntryKind::SandboxAction {
+            provider,
+            tool_name,
+            duration_ms,
+            ..
+        } => (
+            "sandbox",
+            format!("sandbox[{provider}] → {tool_name} ({duration_ms} ms)"),
+            1.0,
+        ),
     };
     let pct = (tokens / total_tokens * 100.0).max(0.05);
     Some(format!(

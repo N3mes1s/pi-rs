@@ -94,6 +94,7 @@ async fn route_auto_flows_into_model_dispatch() {
         tool_gate: None,
         gate_ask_is_approve: false,
         stream_interceptor: None,
+        sandbox_provider: None,
     };
     let (_runtime, session) = create_agent_session(cfg, None).unwrap();
     session

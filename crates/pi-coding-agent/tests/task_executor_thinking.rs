@@ -104,6 +104,7 @@ fn build_parent_cfg(factory: Arc<dyn ProviderFactory>) -> RuntimeConfig {
         tool_gate: None,
         gate_ask_is_approve: false,
         stream_interceptor: None,
+        sandbox_provider: None,
     }
 }
 

@@ -1,4 +1,5 @@
-//! `pi --stats <verb>` glue. Verbs: `server`, `sync`, `json`, `route-savings`.
+//! `pi --stats <verb>` glue. Verbs: `server`, `sync`, `json`,
+//! `route-savings`, `sandbox-actions`.
 
 use crate::{aggregate, ingest, open_db, server};
 use std::path::PathBuf;
@@ -9,6 +10,7 @@ pub enum StatsVerb {
     Sync,
     Json,
     RouteSavings,
+    SandboxActions,
 }
 
 impl StatsVerb {
@@ -18,8 +20,9 @@ impl StatsVerb {
             "sync" => Ok(Self::Sync),
             "json" => Ok(Self::Json),
             "route-savings" | "savings" => Ok(Self::RouteSavings),
+            "sandbox-actions" | "sandbox" => Ok(Self::SandboxActions),
             other => Err(anyhow::anyhow!(
-                "unknown --stats verb '{other}' (expected server|sync|json|route-savings)"
+                "unknown --stats verb '{other}' (expected server|sync|json|route-savings|sandbox-actions)"
             )),
         }
     }
@@ -105,6 +108,25 @@ pub async fn run(verb: StatsVerb, cfg: StatsConfig) -> anyhow::Result<()> {
                 "{:<15} {:<10} {:<12.4} {:<14.4} {:<12.4} {:<10.1}%",
                 "TOTAL", "", total_actual, total_counterfactual, total_delta, total_delta_pct
             );
+            Ok(())
+        }
+        StatsVerb::SandboxActions => {
+            let mut stats = aggregate::by_sandbox_provider(&conn)?;
+            stats.sort_by(|a, b| a.provider.cmp(&b.provider));
+            println!(
+                "{:<24} {:<12} {:<10} {:<12} {:<10}",
+                "provider", "executions", "errors", "error_rate", "avg_ms"
+            );
+            for row in &stats {
+                println!(
+                    "{:<24} {:<12} {:<10} {:<11.1}% {:<10.2}",
+                    row.provider,
+                    row.executions,
+                    row.errors,
+                    row.error_rate * 100.0,
+                    row.avg_duration_ms,
+                );
+            }
             Ok(())
         }
         StatsVerb::Server => {

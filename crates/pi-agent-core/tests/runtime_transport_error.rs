@@ -114,6 +114,7 @@ async fn transport_error_midstream_emits_error_and_aborted_before_failing() {
         tool_gate: None,
         gate_ask_is_approve: false,
         stream_interceptor: None,
+        sandbox_provider: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let (_runtime, session) = create_agent_session(cfg, Some(tx)).unwrap();

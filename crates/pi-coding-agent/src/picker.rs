@@ -93,6 +93,14 @@ pub fn format_tree_entry(entry: &pi_agent_core::SessionEntry) -> String {
         } => {
             return format!("routing  {route_id} → {provider}/{model}");
         }
+        SessionEntryKind::SandboxAction {
+            provider,
+            tool_name,
+            duration_ms,
+            ..
+        } => {
+            return format!("sandbox[{provider}]  {tool_name} ({duration_ms} ms)");
+        }
     };
 
     let snippet = short_text(&raw_text, 60);
