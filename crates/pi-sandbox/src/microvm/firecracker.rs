@@ -744,17 +744,38 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
         .map_err(|e| SandboxError::Provider(e.to_string()))?;
     tokio::fs::write(&config_path, config_json).await?;
 
-    // Spawn Firecracker.
-    let fc_proc = tokio::process::Command::new(&fc_bin)
-        .arg("--api-sock")
-        .arg(&api_sock)
-        .arg("--config-file")
-        .arg(&config_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
+    // Spawn Firecracker. Debug mode (PI_SANDBOX_FC_DEBUG=1) captures
+    // stdout/stderr to /tmp/pi-sandbox-fc-debug/<vm_id>/ so smoke-test
+    // failures are diagnosable.
+    let fc_proc = if std::env::var("PI_SANDBOX_FC_DEBUG").as_deref() == Ok("1") {
+        let dbg_dir = std::path::PathBuf::from("/tmp/pi-sandbox-fc-debug").join(&vm_id);
+        std::fs::create_dir_all(&dbg_dir)?;
+        let _ = std::fs::copy(&config_path, dbg_dir.join("fc-config.json"));
+        let fc_stdout = std::fs::File::create(dbg_dir.join("fc.stdout"))?;
+        let fc_stderr = std::fs::File::create(dbg_dir.join("fc.stderr"))?;
+        eprintln!("PI_SANDBOX_FC_DEBUG: logs at {}", dbg_dir.display());
+        tokio::process::Command::new(&fc_bin)
+            .arg("--api-sock")
+            .arg(&api_sock)
+            .arg("--config-file")
+            .arg(&config_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(fc_stdout))
+            .stderr(Stdio::from(fc_stderr))
+            .kill_on_drop(true)
+            .spawn()?
+    } else {
+        tokio::process::Command::new(&fc_bin)
+            .arg("--api-sock")
+            .arg(&api_sock)
+            .arg("--config-file")
+            .arg(&config_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?
+    };
 
     // Wait for the guest vsock worker to be reachable.
     wait_for_vsock_ready(&vsock_sock, cid).await?;

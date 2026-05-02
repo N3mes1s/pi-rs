@@ -39,10 +39,24 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// Connections are spawned as separate tasks so that signal polling is never
 /// blocked by an active connection.
 pub async fn serve(vsock_port: u32, work_dir: PathBuf) -> anyhow::Result<()> {
+    // Diagnostic: dump environment that affects vsock availability.
+    eprintln!(
+        "DIAG: /dev/vsock exists={}, /proc/modules has vsock={}",
+        std::path::Path::new("/dev/vsock").exists(),
+        std::fs::read_to_string("/proc/modules")
+            .map(|s| s.contains("vsock"))
+            .unwrap_or(false),
+    );
+
     // VMADDR_CID_ANY is the conventional "listen for any host CID".
     let addr = VsockAddr::new(VMADDR_CID_ANY, vsock_port);
-    let listener = VsockListener::bind(addr)
-        .with_context(|| format!("failed to bind vsock listener on port {vsock_port}"))?;
+    let listener = VsockListener::bind(addr).with_context(|| {
+        format!(
+            "failed to bind vsock listener on port {vsock_port} \
+             (CID=ANY); check that the guest kernel has virtio-vsock \
+             support and /dev/vsock is present"
+        )
+    })?;
     info!(port = vsock_port, work_dir = %work_dir.display(),
           "pi-sandbox-worker listening on vsock");
 
