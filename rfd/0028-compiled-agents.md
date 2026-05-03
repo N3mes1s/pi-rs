@@ -1,7 +1,7 @@
 # RFD 0028 — Compiled agents from TOML manifest (meta + split into A/B/C/D)
 
-- **Status:** Draft (v0.7; meta READY in v0.4, Commit A READY in v0.5, Commit B v1 spec pending critic)
-- **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1, v0.2, v0.3, Commit A v1, Commit A v0.5, Commit B v1 passes)
+- **Status:** Draft (v0.8; meta READY in v0.4, Commit A READY in v0.5, Commit B v0.7 spec pending critic)
+- **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1, v0.2, v0.3, Commit A v1, Commit A v0.5, Commit B v1, Commit B v0.7 passes)
 - **Created:** 2026-05-03
 - **Implemented:** *(pending sub-commits Commit A–Commit D)*
 
@@ -781,10 +781,14 @@ use std::sync::Arc;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::process::ExitCode {
-    // Auth: per-manifest env-var allowlist (B.6).
-    let auth = match AuthStorage::from_env_explicit([
-        {{auth_pairs}}                               // e.g., ("anthropic", "ANTHROPIC_API_KEY"),
-    ]) {
+    // Auth: per-manifest env-var allowlist (B.6). The {{auth_call}}
+    // marker expands to either:
+    //   from_env_explicit([("anthropic", "ANTHROPIC_API_KEY"), ...])
+    //   for non-empty `secrets.required`, OR
+    //   from_env_explicit(std::iter::empty::<(&str, &str)>())
+    //   for the empty case (the `[]` literal can't infer the
+    //   `<I, P, E>` generics on `from_env_explicit`).
+    let auth = match AuthStorage::{{auth_call}} {
         Ok(a) => a,
         Err(_) => return std::process::ExitCode::from(2),
     };
@@ -913,8 +917,11 @@ m.tools.allowlist.retain(|x| seen.insert(x.clone()));
 ```
 
 Test: same input manifest → byte-identical `keep_only` arg
-list across runs and across hosts (BTreeSet's deterministic
-ordering means even the temporary `seen` set is stable).
+list across runs and across hosts (`Vec::retain` preserves
+first-occurrence position; the membership set's iteration
+order is irrelevant — `HashSet` would also work for
+correctness, `BTreeSet` is just a std-only no-extra-dep
+default).
 
 If `tools.allowlist == ["read", "write", "edit", "bash", "grep",
 "find", "ls", "web_search"]` (the full set), the codegen still
@@ -924,13 +931,26 @@ explicit list is the audit surface, even when redundant.
 ##### B.6 — Auth allowlist lowering
 
 **Lowering rule:** each `secrets.required[i]` pairs with
-`provider.name`'s kebab string. Pseudocode:
+`provider.name`'s kebab string. Codegen has TWO branches:
 
 ```rust
-auth_pairs = secrets.required.iter()
-    .map(|env| (provider.name.as_kebab(), env.clone()))
-    .collect();
+// Non-empty case — array literal:
+match secrets.required.len() {
+    0 => emit("from_env_explicit(std::iter::empty::<(&str, &str)>())"),
+    _ => {
+        let pairs = secrets.required.iter()
+            .map(|env| format!("(\"{}\", \"{}\")", provider.name.as_kebab(), env))
+            .collect::<Vec<_>>().join(", ");
+        emit(&format!("from_env_explicit([{pairs}])"));
+    }
+}
 ```
+
+The empty case MUST use `std::iter::empty::<(&str, &str)>()` —
+the bare `from_env_explicit([])` form fails to infer the
+`<I, P, E>` generics on the function (verified
+`pi-ai/src/auth.rs:144`) and emits E0282/E0283 at the agent's
+own `cargo build`. Tested by Commit B's invariant 8.
 
 The table below is the **canonical pairing reference** operators
 use to author the manifest (it tells you WHICH env var to put
@@ -1102,11 +1122,15 @@ Auth errors don't reach this helper — they're caught at
    runs codegen twice and `assert_eq!` the bytes.
 6. **No secrets in generated source.** Parse the rendered
    `main.rs` via `syn::parse_file` and walk the AST: every
-   string literal containing `_API_KEY|_TOKEN` MUST be a child
-   of a `from_env_explicit([...])` call expression. (Pure
-   regex is insufficient — a `system_prompt` mentioning
-   "ANTHROPIC_API_KEY" by name in operator-authored prose
-   would false-positive.) Test asserts via syn walk; pi-build
+   string literal containing `_API_KEY|_TOKEN` MUST appear
+   EITHER (a) as a child of a `from_env_explicit([...])` call
+   expression, OR (b) as the literal argument to
+   `Settings::builder().system_prompt(...) | .model(...) |
+   .provider(...)`. (Pure regex would false-positive on every
+   `system_prompt` that legitimately documents an env var by
+   name; the (b) clause is the necessary exemption — operators
+   commonly write prompts like "Set ANTHROPIC_API_KEY before
+   running this tool.") Test asserts via syn walk; pi-build
    takes a dev-dep on `syn` for tests only.
 7. **Stdout vs stderr separation.** Integration test runs
    the generated binary with `--jsonl` against a MockProvider
@@ -1114,13 +1138,17 @@ Auth errors don't reach this helper — they're caught at
    JSONL and stderr contains zero JSONL-shaped lines.
 8. **No-secret manifest produces no env reads.** A manifest
    with `secrets.required = []` codegens
-   `AuthStorage::from_env_explicit([])` — the literal empty
-   slice. Snapshot test asserts the exact rendered substring
-   `from_env_explicit([])` appears in `main.rs` and that NO
-   `_API_KEY|_TOKEN` literal appears anywhere outside string
-   literals in `system_prompt`. Catches the "operator forgot
-   to allowlist anything but the agent still magically
-   authenticates" failure mode.
+   `AuthStorage::from_env_explicit(std::iter::empty::<(&str, &str)>())`
+   — a typed empty iterator, NOT the literal `[]` (which would
+   fail to infer the `P`/`E` generic params on
+   `from_env_explicit::<I, P, E>` and emit E0282/E0283; verified
+   `pi-ai/src/auth.rs:144`). Snapshot test asserts the exact
+   rendered substring `from_env_explicit(std::iter::empty::<(&str, &str)>())`
+   appears in `main.rs` and that `cargo check` on the generated
+   project succeeds. Catches the "operator forgot to allowlist
+   anything but the agent still magically authenticates"
+   failure mode AND the codegen-emits-non-compiling-Rust
+   regression.
 
 ##### B.14 — Test plan
 
@@ -1349,6 +1377,37 @@ verify the *split* itself works:
   significantly).
 
 ## Revision history
+
+- **v0.8 (2026-05-03):** Commit B v0.7 critic returned
+  `NEEDS_REVISION` — closed v0.6's 2 critical + 6 underspec
+  cleanly but introduced 2 new defects in the new content + 1
+  prose nit. v0.8 closes:
+  - **Critical: `from_env_explicit([])` won't compile.** v0.7's
+    invariant 8 specified the literal `[]` substring; the
+    function signature is generic `<I, P, E>` and an empty
+    array can't infer `P`/`E` (rustc emits E0282/E0283).
+    v0.8 changes the canonical empty-allowlist rendering to
+    `from_env_explicit(std::iter::empty::<(&str, &str)>())`.
+    Updated invariant 8's snapshot substring to match.
+    Added the special-case logic to B.6's lowering rule
+    (now has explicit "0 → iter::empty / N → array literal"
+    branches). Added the `{{auth_call}}` substitution marker
+    to B.3 to make the two-branch shape visible in the
+    template.
+  - **Critical: B.13 #6 syn rule still false-positives on
+    operator-authored `system_prompt` text.** The v0.7
+    rewrite from regex to syn AST walk relocated the false
+    positive without solving it. Added the OR-clause:
+    string literals containing `_API_KEY|_TOKEN` may appear
+    EITHER as children of `from_env_explicit(...)` OR as
+    literal arguments to `Settings::builder().system_prompt
+    /.model/.provider`. Operators commonly document env
+    var names in prompts; that's not a leak.
+  - **Nit: B.5 prose conflated membership-set ordering with
+    output ordering.** `Vec::retain` preserves first-occurrence
+    position; the `BTreeSet` is just for membership testing.
+    Reworded — `HashSet` would also work for correctness;
+    `BTreeSet` is the std-only no-extra-dep default.
 
 - **v0.7 (2026-05-03):** Commit B v1 critic returned
   `NEEDS_REVISION` with 2 critical + 6 underspec'd. v0.7 closes:
