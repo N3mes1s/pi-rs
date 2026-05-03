@@ -1,6 +1,6 @@
 # RFD 0028 — Compiled agents from TOML manifest (meta + split into A/B/C/D)
 
-- **Status:** Draft (v0.10; meta READY in v0.4, Commit A READY in v0.5, Commit B READY in v0.8, Commit C READY in v0.9, Commit D v1 spec pending critic)
+- **Status:** Draft (v0.11; meta READY in v0.4, Commit A READY in v0.5, Commit B READY in v0.8, Commit C READY in v0.9, Commit D v0.10 spec pending critic)
 - **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1, v0.2, v0.3, Commit A v1, Commit A v0.5, Commit B v1, Commit B v0.7 passes)
 - **Created:** 2026-05-03
 - **Implemented:** *(pending sub-commits Commit A–Commit D)*
@@ -1458,8 +1458,10 @@ to declare one or more compiled-agent cycles:
 # order, one per supervisor tick, then loops.
 [[cycle]]
 name    = "fix-flaky-tests"        # display name for cycle log + alerts.
-binary  = "./bin/fix-flaky-tests"  # path resolved relative to .pi/halo.toml's
-                                   # parent dir, OR $PATH if no `/` in the value.
+binary  = "./bin/fix-flaky-tests"  # path resolution rules:
+                                   #   - starts with "/" → absolute path.
+                                   #   - contains "/"    → relative to .pi/halo.toml's parent dir.
+                                   #   - no "/"          → resolved via $PATH.
 args    = ["--jsonl"]              # appended after the binary; v1 ALWAYS
                                    # forces `--jsonl` for spend attribution
                                    # to work (D.5). Operator's `args` are
@@ -1475,12 +1477,33 @@ on_exit = { 0 = "continue", 1 = "alert", 2 = "alert",
             73 = "alert", 75 = "throttle" }
                                    # Required keys: 0. Other exit codes
                                    # default to "alert" if unspecified.
-                                   # Values: "continue" | "alert" | "throttle".
-timeout_secs = 1800                # Wall-clock cap. Halo SIGTERMs at the cap;
-                                   # exit synthesised as code 124 mapped per
-                                   # the table (default "alert"). Default
-                                   # absent = no cap (halo waits forever;
-                                   # not recommended).
+                                   # Values: "continue" | "alert" | "throttle"
+                                   # (typed `enum ExitPolicy` in code; serde
+                                   # rename_all = "snake_case"; future variants
+                                   # added without a string-parsing migration).
+timeout_secs = 1800                # Wall-clock cap. Halo SIGTERMs the child
+                                   # process group at the cap; exit
+                                   # synthesised as code 124 mapped per the
+                                   # table (default "alert"). Default
+                                   # `timeout_secs = 3600` (1 hour) — matches
+                                   # halo's safety-by-default ethos. Set
+                                   # `timeout_secs = 0` for explicit no-cap
+                                   # (not recommended).
+
+env_extra = ["FOO=bar"]            # OPTIONAL. Additional env vars to set on
+                                   # the child beyond what halo inherits from
+                                   # its own process env (D.3). Halo
+                                   # inherits its own env by default — so
+                                   # ANTHROPIC_API_KEY etc. propagate without
+                                   # any per-cycle config. `env_extra` is
+                                   # for cycle-specific extras (e.g.,
+                                   # CYCLE_NAME=fix-flaky-tests).
+
+throttle_streak_max     = 5        # Pause halo entirely after N consecutive
+                                   # throttle outcomes. v1 default 5.
+throttle_base_delay_secs = 60      # Initial backoff delay; halo waits
+                                   # 2^streak * base_delay before next cycle.
+throttle_cap_secs       = 3600     # Maximum backoff (1 hour).
 ```
 
 Halo's existing `[[cycle]] kind = "orchestrate"` (implicit
@@ -1491,25 +1514,43 @@ distinguished by the presence of `binary`.
 ##### D.3 — Subprocess plumbing
 
 Halo's existing orchestrate-spawn code at
-`crates/pi-orchestrate/src/runner.rs` (per RFD 0025 §86) is
-the model. Commit D refactors it into a generic
-`spawn_cycle_subprocess(cmd: &CycleCommand) -> CycleOutcome`
-function shared by both shapes:
+`crates/pi-coding-agent/src/halo/cycle.rs:655-687`
+(`step_orchestrate`) is the model. Today it spawns
+`Command::new(current_exe()).args(["--orchestrate", ...])`,
+calls `cmd.process_group(0)` (line 673) so the child gets its
+own process group, then stores the child's PID in
+`CycleCtx.orchestrate_pid_shared` (`Arc<AtomicI32>`, line 49)
+so a halo SIGINT handler can `killpg(child_pgid, SIGINT)` to
+take down the whole process tree.
+
+Commit D refactors this into a generic
+`spawn_cycle_subprocess(cmd: &CycleSubprocessCommand) ->
+CycleSubprocessOutcome` function shared by both shapes
+(orchestrate and compiled-agent):
 
 ```rust
-// crates/pi-coding-agent/src/halo/cycle/spawn.rs (NEW)
+// crates/pi-coding-agent/src/halo/subprocess.rs (NEW — placed
+// at the halo module root rather than under cycle/ because the
+// existing crates/pi-coding-agent/src/halo/cycle.rs already
+// defines a sibling `pub enum CycleOutcome { Done, Aborted }`
+// at line 25; nesting under cycle/ would require a
+// cycle.rs → cycle/mod.rs rename of the entire 1.4 KLoC file.)
 
-pub struct CycleCommand<'a> {
+pub struct CycleSubprocessCommand<'a> {
     pub name:    &'a str,
     pub binary:  &'a Path,
     pub args:    &'a [String],
     pub prompt:  &'a str,             // piped to stdin
     pub cwd:     &'a Path,            // halo-owned clone (RFD 0025 §259)
-    pub env:     &'a [(String, String)], // explicit env passthrough only
+    pub env_extra: &'a [(String, String)], // ADDITIONAL vars beyond
+                                           // halo's inherited env (D.3 below)
     pub timeout: Option<Duration>,
+    pub pid_shared: Arc<AtomicI32>,   // SIGINT propagation; same
+                                      // contract as the existing
+                                      // CycleCtx.orchestrate_pid_shared.
 }
 
-pub struct CycleOutcome {
+pub struct CycleSubprocessOutcome {
     pub exit_code:    i32,
     pub events:       Vec<AgentEvent>, // parsed from stdout JSONL
     pub stderr_tail:  String,          // last 16 KiB of stderr
@@ -1519,9 +1560,28 @@ pub struct CycleOutcome {
 ```
 
 Halo invokes via `tokio::process::Command::new(cmd.binary)`,
-attaches `Stdio::piped()` for both stdin and stdout (so we can
-write the prompt + read JSONL), and `Stdio::piped()` for stderr
-(so we can capture the tail for the cycle log).
+attaches `Stdio::piped()` for both stdin and stdout (write the
+prompt + read JSONL), `Stdio::piped()` for stderr (capture the
+tail for the cycle log), and **MUST call `cmd.process_group(0)`
+before spawn + store the child PID into `pid_shared`** —
+preserving the SIGINT-via-killpg contract halo's existing
+signal handler depends on. Failing to do this would make
+compiled-agent cycles un-killable from `pi --halo-stop`,
+silently regressing halo's signal handling.
+
+**Env passthrough:** halo inherits its own process env into the
+child by default — `tokio::process::Command::new` does this
+unless `.env_clear()` is called (existing `step_orchestrate`
+at `cycle.rs:664-671` does NOT call `env_clear`; halo's env IS
+the secrets surface). The compiled agent reads
+`secrets.required` from this inherited env via
+`AuthStorage::from_env_explicit`. The `env_extra` field is for
+ADDITIONAL vars (e.g., cycle-name tags) the operator wants to
+inject; it is NOT the secrets channel.
+
+Operator workflow: set `ANTHROPIC_API_KEY` (etc.) in halo's
+own environment (via systemd unit, `.envrc`, etc.) — every
+spawned cycle inherits it.
 
 ##### D.4 — JSONL stdout parser
 
@@ -1560,29 +1620,42 @@ orchestrate cycle's spend is wall-clock-bounded estimated.
 Compiled-agent cycles get **precise** spend attribution from the
 `AgentEventKind::Usage { usage }` events emitted by the agent
 binary on stdout (Commit B's pump emits Usage on every turn).
-Halo's spend computation:
+Halo extracts `model_id` from the first `SessionStarted` event
+(`pi-agent-core/src/event.rs:9-14` — the variant carries
+`{ id, cwd, model: String, provider }` and Commit B's
+`create_agent_session` emits it before any Usage event):
 
 ```rust
-fn cycle_spend(events: &[AgentEvent], pricing: &CostRegistry,
-               model_id: &str) -> f64 {
+fn cycle_spend(events: &[AgentEvent], pricing: &CostRegistry)
+    -> Result<f64, CycleSpendError>
+{
     use pi_sdk::AgentEventKind;
     use pi_sdk::cost::estimate_cost_usd;
-    events.iter()
+    let model_id = events.iter()
+        .find_map(|e| match &e.kind {
+            AgentEventKind::SessionStarted { model, .. } => Some(model.as_str()),
+            _ => None,
+        })
+        .ok_or(CycleSpendError::NoSessionStarted)?;
+    let total: f64 = events.iter()
         .filter_map(|e| match &e.kind {
             AgentEventKind::Usage { usage } => Some(usage),
             _ => None,
         })
         .map(|usage| estimate_cost_usd(usage, model_id, pricing))
-        .sum()
+        .sum();
+    Ok(total)
 }
 ```
 
-`pi_sdk::cost::estimate_cost_usd` (RFD 0027 Commit E) is the
-canonical price-table lookup; halo passes the model_id from
-the cycle's first AgentEvent's session metadata (or, as a
-fallback, the operator's `halo.toml [[cycle]] model_hint`
-field — added in D.2 only if implementation finds the
-session-metadata path unreliable).
+`pi_sdk::cost::estimate_cost_usd` (RFD 0027 §4 Cost & budget
+helpers) is the canonical price-table lookup. The
+`SessionStarted`-first ordering is a Commit B invariant (the
+event pump can't emit `Usage` before the session opens — pi-sdk
+emits `SessionStarted` synchronously during `create_agent_session`).
+Receiving a `Usage` before `SessionStarted` IS a hard cycle
+abort (`CycleSpendError::NoSessionStarted` → halo treats the
+cycle as failed, alert policy applies).
 
 The summed `spend_usd` lands in `usage.jsonl` as a
 **precise** ledger row (the "best-effort estimated" caveat
@@ -1599,13 +1672,20 @@ three policies per exit code:
 |---|---|
 | `"continue"` | Halo logs the cycle outcome, advances to the next cycle. The standard happy-path. |
 | `"alert"` | Halo logs + emits an alert (per RFD 0025's existing alert plumbing — `~/.pi/halo/<repo>/alerts.jsonl`), continues to the next cycle. Operator review expected. |
-| `"throttle"` | Halo logs + delays the next cycle by `2^streak * base_delay` (exponential backoff, capped at 1 hour). After 5 consecutive throttles, halo pauses entirely. Used for "this is degraded but not broken" — e.g., budget exhaustion or transient build failure. |
+| `"throttle"` | Halo logs + delays the next cycle by `min(2^streak * throttle_base_delay_secs, throttle_cap_secs)` per the D.2 schema fields. After `throttle_streak_max` consecutive throttles, halo pauses entirely. Used for "this is degraded but not broken" — e.g., budget exhaustion or transient build failure. |
 
 Required: a row for exit `0`. Unspecified codes default to
 `"alert"` — the safe-by-default choice. If the operator wants
 "unknown exit codes are fine, just log and continue," they
 explicitly write `"*" = "continue"` (catch-all wildcard,
 optional).
+
+**In-code shape:** the `on_exit` table deserializes via a typed
+`#[serde(rename_all = "snake_case")] pub enum ExitPolicy {
+Continue, Alert, Throttle }`. Adding new variants in v2 (e.g.,
+`Pause`, `Restart`, `Backoff(Duration)`) is a serde-additive
+change with NO string-parsing migration — the v1 manifest with
+the three current variants continues to deserialize cleanly.
 
 ##### D.7 — Out-of-scope (Commit D v1)
 
@@ -1662,30 +1742,50 @@ optional).
   forever on stdin read. `timeout_secs = 5` → halo SIGTERMs
   after ~5s, synthesised exit code 124, mapped to "alert"
   (default for unspecified codes).
-- **`binary` path resolution:** `binary = "./bin/agent"`
-  resolves relative to the halo.toml's parent dir
-  (NOT halo's cwd, NOT `$PATH`). `binary = "agent"` (no `/`)
-  resolves via `$PATH`. Test both.
+- **`binary` path resolution — three cases:**
+  - `binary = "/usr/local/bin/agent"` (absolute) — used verbatim.
+  - `binary = "./bin/agent"` (relative, contains `/`) —
+    resolved relative to the halo.toml's parent dir
+    (NOT halo's cwd, NOT `$PATH`).
+  - `binary = "agent"` (no `/`) — resolved via `$PATH`.
+  Test all three.
 - **stderr tail capture:** harness emits 100 KiB to stderr;
   halo retains the last 16 KiB only in `CycleOutcome.stderr_tail`.
 
 ##### D.9 — Deliverable
 
-- `crates/pi-coding-agent/src/halo/cycle/spawn.rs` — NEW;
-  the `spawn_cycle_subprocess` function + `CycleCommand` /
-  `CycleOutcome` types. ~250 LoC.
-- `crates/pi-coding-agent/src/halo/cycle/jsonl.rs` — NEW;
-  the JSONL parser + spend computation. ~120 LoC.
+- `crates/pi-coding-agent/src/halo/subprocess.rs` — NEW;
+  the `spawn_cycle_subprocess` function +
+  `CycleSubprocessCommand` / `CycleSubprocessOutcome` types
+  (named to avoid collision with the existing `pub enum
+  CycleOutcome { Done, Aborted }` at
+  `halo/cycle.rs:25`). Includes the `process_group(0)` +
+  `pid_shared` SIGINT propagation contract. ~280 LoC.
+- `crates/pi-coding-agent/src/halo/jsonl.rs` — NEW;
+  AgentEvent JSONL parser + `cycle_spend` (D.5). ~140 LoC.
 - `crates/pi-coding-agent/src/halo/config.rs` — extend
-  the existing config with `[[cycle]]` schema. ~80 LoC.
-- `crates/pi-coding-agent/src/halo/run.rs` — refactor the
-  cycle-driver loop to dispatch by cycle shape. ~100 LoC
+  the existing config with `[[cycle]]` schema (D.2): name,
+  binary, args, prompt, on_exit (typed `ExitPolicy` enum),
+  timeout_secs, env_extra, throttle_*. ~120 LoC.
+- `crates/pi-coding-agent/src/halo/cycle.rs` — refactor
+  `step_orchestrate` to use the new `spawn_cycle_subprocess`
+  primitive (collapsing duplicate spawn plumbing); add the
+  parallel `step_compiled_agent` path. ~150 LoC delta. Plus
+  a touch-up to `CycleCtx` to thread through the new
+  `CycleSubprocessOutcome` shape.
+- `crates/pi-coding-agent/src/halo/run.rs` — extend the
+  cycle-driver loop to dispatch by cycle shape (the new
+  `[[cycle]] binary = ...` rows take the new path). ~80 LoC
   delta.
 - Tests: `crates/pi-coding-agent/tests/halo_compiled_agent.rs`
-  (D.8 fixtures + assertions). ~250 LoC.
+  (D.8 fixtures + assertions, including the 3 binary-path
+  cases). ~280 LoC.
 
-Total: ~800 LoC. (v0.4 sketch said ~600; expansion +
-JSONL parser + spend attribution + the test harness add ~200.)
+Total: **~1050 LoC** (v0.4 sketch said ~600; v0.10 said
+~800; v0.11 bumps to ~1050 once the type rename, the
+process_group + shared-atomic plumbing duplication, the
+env_extra surface, and the cycle.rs refactor are all
+priced in per rfd-critic v0.10 finding).
 
 Commit D explicitly does NOT add a new halo cycle-kind plug-in
 trait — that's a halo refactor + would need its own RFD.
@@ -1801,6 +1901,62 @@ verify the *split* itself works:
   significantly).
 
 ## Revision history
+
+- **v0.11 (2026-05-03):** Commit D v0.10 critic returned
+  `NEEDS_REVISION` with 3 critical + 5 underspec + 2 citation
+  errors. v0.11 closes:
+  - **Critical: D.3 wrong file cited.** Halo's actual spawn
+    site is `crates/pi-coding-agent/src/halo/cycle.rs:655-687`
+    (`step_orchestrate`), not `pi-orchestrate/src/runner.rs`.
+    Updated D.3 to cite the right file + describe the
+    existing `process_group(0)` + `pid_shared` SIGINT
+    propagation contract; flagged as a HARD requirement
+    (failing to preserve it would make compiled-agent cycles
+    un-killable from `pi --halo-stop`).
+  - **Critical: D.3/D.9 type-name collision.** Existing
+    `pub enum CycleOutcome { Done, Aborted }` at
+    `halo/cycle.rs:25` collides with the proposed new
+    struct. Renamed to `CycleSubprocessCommand` /
+    `CycleSubprocessOutcome`; new module path
+    `halo/subprocess.rs` (root-level, not under `cycle/`,
+    to avoid the cycle.rs → cycle/mod.rs refactor of a
+    1.4 KLoC file).
+  - **Critical: D.3 env passthrough hand-waved.** The
+    compiled agent reads `secrets.required` from its OWN
+    process env via `AuthStorage::from_env_explicit`. Halo
+    MUST pass that env. v0.11 spec'd: halo inherits its own
+    env into the child by default (matching today's
+    `step_orchestrate` at `cycle.rs:664-671`); halo's env is
+    THE secrets surface; new D.2 `env_extra` field is for
+    additional vars (cycle-name tags etc.), NOT secrets.
+  - **Underspec: D.5 model_id sourcing.** Replaced the
+    conditional `model_hint` hand-wave with the verified
+    `SessionStarted` extraction (`pi-agent-core/src/event.rs:9-14`
+    carries `model: String`). `cycle_spend` signature drops
+    the `model_id` parameter; receiving `Usage` before
+    `SessionStarted` is now `CycleSpendError::NoSessionStarted`.
+  - **Underspec: D.6 magic numbers.** Promoted `5` /
+    `1 hour` / `base_delay` to D.2 schema fields with v1
+    defaults (`throttle_streak_max = 5`,
+    `throttle_base_delay_secs = 60`,
+    `throttle_cap_secs = 3600`).
+  - **Underspec: D.6 `on_exit` shape.** Spec'd that the
+    in-code shape is a typed `enum ExitPolicy { Continue,
+    Alert, Throttle }` with `serde rename_all = "snake_case"`
+    so v2 variants land additively without a string-parsing
+    migration.
+  - **Underspec: D.2 `binary` path resolution.** Added the
+    third case (absolute path "starts with /"); D.8 test
+    plan now covers all three.
+  - **Underspec: D.2 `timeout_secs` default.** Changed from
+    "no cap" to `3600` (1 hour) per halo's safety-by-default
+    ethos; `0` is the explicit no-cap.
+  - **Citation: "RFD 0027 Commit E"** for `pi_sdk::cost` —
+    wrong (Commit E is the crates.io publish). Changed to
+    "RFD 0027 §4 Cost & budget helpers."
+  - **D.9 LoC bump:** ~800 → ~1050 once the type rename,
+    process_group plumbing duplication, env_extra surface,
+    and cycle.rs refactor are priced in.
 
 - **v0.10 (2026-05-03):** Commit C reached READY in v0.9.
   Applied v0.9 critic's 5 sub-blocker deltas inline as polish
