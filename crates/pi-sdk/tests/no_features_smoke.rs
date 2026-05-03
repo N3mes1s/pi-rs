@@ -8,6 +8,14 @@
 //!
 //! Per code-review pass-8 polish: prevents a future commit from
 //! gating a public-API symbol behind `mocks` accidentally.
+//!
+//! ## EDITORS — POLICY
+//!
+//! Per code-review pass-9 NIT #4: do NOT import any `mocks`-feature-
+//! gated symbols (MockProvider, MockSandboxProvider, MockProviderFactory,
+//! MockSandboxCall) in this file. The whole point is that this test
+//! runs without `--features mocks`. If you need MockProvider, add the
+//! test to `tests/end_to_end_safe_path.rs` (gated on `mocks`) instead.
 
 use pi_sdk::{
     quick_start, AgentSessionRuntime, AuthMethod, AuthStorage, ConfigBuilder, ContextFile,
@@ -68,23 +76,68 @@ fn re_exports_resolve_without_mocks_feature() {
     // Symbol-existence sweep for the most-used types. Catches a
     // future regression that gates a re-export behind `mocks`.
     use pi_sdk::{
-        cost::{estimate_cost_usd, CostRegistry, Pricing},
-        AgentEventKind, ConfigError, DuplicateName, Error, GateContext, ProviderKind,
-        RuntimeError, ThinkingLevel, ToolError, ToolGateOutcome, WireSerializer,
+        cost::{estimate_cost_usd, sum_session_cost_usd, CostRegistry, Pricing},
+        AgentEventKind, BuildConfig, ConfigError, DuplicateName, Error, GateContext,
+        ProviderKind, Result, RuntimeError, SettingsBuilder, ThinkingLevel, ToolError,
+        ToolGateOutcome, WireSerializer,
     };
+    // Cost / Pricing surface
     let _: Pricing = Pricing::flat(1.0, 2.0);
     let _: CostRegistry = CostRegistry::with_bundled_defaults();
     let _ = estimate_cost_usd;
+    let _ = sum_session_cost_usd::<std::iter::Empty<&pi_sdk::Usage>>;
+    // Runtime-config surface
     let _: GateContext = GateContext::top_level("s", 0);
     let _: WireSerializer = WireSerializer::default();
     let _ = ConfigError::Missing { field: "x" };
+    let _: SettingsBuilder = SettingsBuilder::new();
+    let _ = BuildConfig::default;
+    // Error / variants
     let _ = ToolError::NotFound("y".into());
     let _ = DuplicateName("z".into());
     let _ = Error::Other("w".into());
+    let _: Result<()> = Ok(());
+    // Enums
     let _: AgentEventKind = AgentEventKind::TurnComplete;
     let _: ProviderKind = ProviderKind::Anthropic;
     let _: ThinkingLevel = ThinkingLevel::Off;
     let _: ToolGateOutcome = ToolGateOutcome::Approve;
-    // RuntimeError variants accessible:
     let _: RuntimeError = RuntimeError::EmptyTurn;
+}
+
+#[test]
+fn provider_and_tool_traits_resolve_without_mocks() {
+    // Per code-review pass-9 NIT #3: extend the sweep to cover
+    // provider-implementor types, tool/sandbox traits, and the
+    // session-telemetry surface that `re_exports_resolve_without_mocks_feature`
+    // doesn't reach by name. Catches a regression that drops a
+    // provider re-export or moves it behind `mocks`.
+    use pi_sdk::{
+        AnthropicProvider, AzureOpenAiProvider, BedrockAnthropicProvider, GoogleProvider,
+        OpenAiCompatProvider, OpenAiProvider, Provider, ProviderConfig, SandboxError,
+        SandboxExecution, SandboxProvider, SessionEntry, SessionEntryKind, SessionMeta,
+        SessionTree, Tool, ToolCall, ToolContext, ToolResult, ToolSpec, Usage,
+    };
+    fn _take_provider_dyn(_: &dyn Provider) {}
+    fn _take_sandbox_dyn(_: &dyn SandboxProvider) {}
+    fn _take_tool_dyn(_: &dyn Tool) {}
+    fn _take_concrete_providers(
+        _: AnthropicProvider,
+        _: AzureOpenAiProvider,
+        _: BedrockAnthropicProvider,
+        _: GoogleProvider,
+        _: OpenAiCompatProvider,
+        _: OpenAiProvider,
+    ) {
+    }
+    fn _take_session_telemetry(
+        _: SessionEntry,
+        _: SessionEntryKind,
+        _: SessionMeta,
+        _: SessionTree,
+    ) {
+    }
+    fn _take_tool_types(_: ToolCall, _: ToolContext, _: ToolResult, _: ToolSpec) {}
+    fn _take_sandbox_types(_: SandboxError, _: SandboxExecution) {}
+    fn _take_pod(_: ProviderConfig, _: Usage) {}
 }

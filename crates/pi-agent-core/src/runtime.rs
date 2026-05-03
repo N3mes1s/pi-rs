@@ -349,23 +349,44 @@ impl RuntimeConfig {
 
     /// Set the per-session token cap (Hardening §4.5 #3, H2). Returns
     /// `self` for chaining. Mirrors `ConfigBuilder::with_max_session_tokens`
-    /// so embedders that already have a constructed `RuntimeConfig`
-    /// (e.g. from `quick_start`) can adjust the cap without re-running
-    /// the builder. `n = 0` disables the cap.
+    /// so embedders chaining off `RuntimeConfig::builder().build()?`
+    /// can adjust caps fluently:
+    ///
+    ///     RuntimeConfig::builder()
+    ///         .session_manager(...).auth_storage(...).model_registry(...)
+    ///         .tools(...).settings(...).system_prompt(...).build()?
+    ///         .with_max_session_tokens(50_000)
+    ///         .with_max_tool_invocations_per_turn(20)
+    ///
+    /// **Composition note** (per code-review pass-9 NIT #2): if both
+    /// the `ConfigBuilder` and this post-build setter touch the same
+    /// field, the post-build setter wins (last-write-wins).
+    ///
+    /// **Not for `quick_start`** (per pass-9 NON-BLOCKING #1):
+    /// `quick_start` returns an `AgentSessionRuntime` (not a
+    /// `RuntimeConfig`); calling `quick_start(...)?.config().clone().
+    /// with_max_session_tokens(N)` produces a NEW detached config that
+    /// has to be re-wrapped via `AgentSessionRuntime::new(...)`,
+    /// wasting the original runtime. To bump caps after `quick_start`,
+    /// build via `RuntimeConfig::builder()` directly instead.
+    ///
+    /// `n = 0` disables the cap.
     pub fn with_max_session_tokens(mut self, n: u64) -> Self {
         self.max_session_tokens = n;
         self
     }
 
     /// Set the per-turn tool-invocation cap (Hardening §4.5 #3, H2).
-    /// Returns `self` for chaining. Mirrors the builder.
+    /// Returns `self` for chaining. Mirrors the builder; same
+    /// last-write-wins composition as `with_max_session_tokens`.
     pub fn with_max_tool_invocations_per_turn(mut self, n: usize) -> Self {
         self.max_tool_invocations_per_turn = n;
         self
     }
 
     /// Set the tool-recursion depth cap (Hardening §4.5 #3, H2 reserved).
-    /// Returns `self` for chaining. Enforcement lands in H2.5.
+    /// Returns `self` for chaining. Enforcement lands in H2.5; same
+    /// last-write-wins composition as `with_max_session_tokens`.
     pub fn with_max_recursion(mut self, n: usize) -> Self {
         self.max_recursion = n;
         self
@@ -508,6 +529,10 @@ impl ConfigBuilder {
     /// "disabled" — the runtime short-circuits the cap check entirely.
     /// Otherwise the first non-zero Usage event would immediately
     /// trip BudgetExhausted on every session.
+    ///
+    /// **Composition note** (per pass-9 NIT #2): if both this builder
+    /// setter AND the post-build `RuntimeConfig::with_max_session_tokens`
+    /// are called, the post-build setter wins (last-write-wins).
     pub fn with_max_session_tokens(mut self, n: u64) -> Self {
         self.max_session_tokens = n;
         self

@@ -66,6 +66,28 @@ impl Pricing {
             cache_write_per_mtok: Some(cache_write_per_mtok),
         }
     }
+
+    /// Compute the USD cost of a `Usage` against this pricing
+    /// directly, without needing a `CostRegistry` lookup.
+    ///
+    /// Useful when the embedder already has a `Pricing` in hand
+    /// (e.g. from `CostRegistry::get(model)`) and wants to compute
+    /// the cost without re-running the registry indirection. Output
+    /// matches `estimate_cost_usd(usage, model_id, &registry)` for
+    /// the same `Pricing` value.
+    ///
+    /// Cache rates fall back to `input_per_mtok` when None — same
+    /// behavior as `pi_ai::compute_cost`.
+    pub fn cost_for(&self, usage: &Usage) -> f64 {
+        let cache_read_rate = self.cache_read_per_mtok.unwrap_or(self.input_per_mtok);
+        let cache_write_rate = self.cache_write_per_mtok.unwrap_or(self.input_per_mtok);
+        let in_dollars = (usage.input_tokens as f64 / 1_000_000.0) * self.input_per_mtok
+            + (usage.cache_read_tokens as f64 / 1_000_000.0) * cache_read_rate
+            + (usage.cache_write_tokens as f64 / 1_000_000.0) * cache_write_rate;
+        let out_tok = usage.output_tokens + usage.reasoning_tokens;
+        let out_dollars = (out_tok as f64 / 1_000_000.0) * self.output_per_mtok;
+        in_dollars + out_dollars
+    }
 }
 
 /// In-memory map of model_id → `Pricing`.
@@ -270,5 +292,32 @@ mod tests {
         let p = Pricing::with_cache(3.00, 15.00, 0.30, 3.75);
         assert_eq!(p.cache_read_per_mtok, Some(0.30));
         assert_eq!(p.cache_write_per_mtok, Some(3.75));
+    }
+
+    #[test]
+    fn pricing_cost_for_matches_estimate_cost_usd() {
+        // Per polish-9: Pricing::cost_for should produce identical
+        // results to the registry-mediated estimate_cost_usd path.
+        let mut r = CostRegistry::empty();
+        r.override_for("test-model", Pricing::flat(2.0, 8.0));
+        let u = usage(1_000_000, 500_000); // $2 input + $4 output = $6
+        let via_registry = estimate_cost_usd(&u, "test-model", &r);
+        let via_pricing = Pricing::flat(2.0, 8.0).cost_for(&u);
+        assert!(
+            (via_registry - via_pricing).abs() < 1e-9,
+            "registry={via_registry} pricing={via_pricing}"
+        );
+        assert!((via_pricing - 6.0).abs() < 0.0001, "got {via_pricing}");
+    }
+
+    #[test]
+    fn pricing_cost_for_handles_cache_rates() {
+        // 1M input @ $3, 500k cache_read @ $0.30 (= $0.15),
+        // 100k output @ $15 (= $1.50). Total: $4.65.
+        let p = Pricing::with_cache(3.00, 15.00, 0.30, 3.75);
+        let mut u = usage(1_000_000, 100_000);
+        u.cache_read_tokens = 500_000;
+        let cost = p.cost_for(&u);
+        assert!((cost - 4.65).abs() < 0.0001, "got {cost}");
     }
 }
