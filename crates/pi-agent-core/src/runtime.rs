@@ -1,5 +1,6 @@
 use chrono::Utc;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
+use std::panic::AssertUnwindSafe;
 use pi_ai::{
     AnthropicProvider, AuthMethod, AuthStorage, AzureOpenAiProvider, BedrockAnthropicProvider,
     ContentBlock, FinishReason, GenerateRequest, GoogleProvider, Message, ModelInfo, ModelRegistry,
@@ -1144,7 +1145,11 @@ impl AgentSession {
                 self.emit(AgentEventKind::TurnComplete).await;
                 self.maybe_auto_compact(&usage_total, model_info).await;
                 let _ = finish;
-                return Ok(last_assistant.unwrap());
+                // Per Hardening §4.5 #2 (RFD 0027): replace `unwrap()`
+                // with an explicit `EmptyTurn` error. Reachable when a
+                // stream emits only Usage + Finish without any assistant
+                // message — the prior unwrap path panicked the worker.
+                return last_assistant.ok_or(RuntimeError::EmptyTurn);
             }
 
             // Execute tool calls sequentially.
@@ -1248,9 +1253,35 @@ impl AgentSession {
                     );
                     res
                 } else {
-                    tool.invoke(&tool_ctx, &call.id, call.input.clone())
-                        .await
-                        .map_err(|e| e.to_string())
+                    // Per Hardening §4.5 #1 (RFD 0027): wrap
+                    // `tool.invoke()` in `AssertUnwindSafe(...).catch_unwind()`
+                    // so a panicking custom Tool returns a `ToolPanicked`-style
+                    // error instead of killing the tokio worker thread.
+                    // The future is wrapped in `AssertUnwindSafe` because tools
+                    // are by definition unwind-safe contracts (a panicking tool
+                    // forfeits its own state; the runtime makes no observable
+                    // changes after the catch).
+                    let invoke_fut =
+                        AssertUnwindSafe(tool.invoke(&tool_ctx, &call.id, call.input.clone()));
+                    match invoke_fut.catch_unwind().await {
+                        Ok(r) => r.map_err(|e| e.to_string()),
+                        Err(panic_payload) => {
+                            let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>()
+                            {
+                                (*s).to_string()
+                            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                                s.clone()
+                            } else {
+                                "tool panicked (non-string payload)".to_string()
+                            };
+                            tracing::warn!(
+                                tool = %call.name,
+                                panic = %msg,
+                                "tool.invoke() panicked; caught by H1 hardening guard"
+                            );
+                            Err(format!("tool `{}` panicked: {}", call.name, msg))
+                        }
+                    }
                 };
                 match invocation {
                     Ok(result) => {
@@ -1405,6 +1436,7 @@ fn build_provider(
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RuntimeError {
     #[error("aborted")]
     Aborted,
@@ -1416,6 +1448,15 @@ pub enum RuntimeError {
     Provider(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// Assistant turn finished without producing any assistant message
+    /// (Hardening §4.5 #2). Replaces `last_assistant.unwrap()`.
+    #[error("turn ended without an assistant message")]
+    EmptyTurn,
+    /// A custom `Tool::invoke` panicked. The runtime caught the panic
+    /// and returns this variant instead of aborting the worker thread
+    /// (Hardening §4.5 #1).
+    #[error("tool `{tool}` panicked: {message}")]
+    ToolPanicked { tool: String, message: String },
 }
 
 /// Convenience wrapper matching `createAgentSession` in upstream pi.
