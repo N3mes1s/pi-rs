@@ -106,6 +106,7 @@ manifest_sha256  = "{sha}"
 
 fn render_main_rs(m: &Manifest, sha: &str, pi_build_version: &str) -> String {
     let auth_call = render_auth_call(m);
+    let auth_check = render_auth_check(m);
     let tool_allowlist = render_tool_allowlist(&m.tools.allowlist);
     let provider_lit = quote_str(m.provider.name.as_kebab());
     let model_lit = quote_str(&m.provider.model);
@@ -133,7 +134,7 @@ fn render_main_rs(m: &Manifest, sha: &str, pi_build_version: &str) -> String {
 // Provider: {provider_name}/{provider_model} (thinking={thinking_str})
 
 use pi_sdk::{{
-    create_agent_session, AgentEventKind, AuthStorage, LocalProcessProvider,
+    create_agent_session, AgentEvent, AgentEventKind, AuthStorage, LocalProcessProvider,
     ModelRegistry, RuntimeConfig, SessionManager, Settings, ThinkingSetting,
     ToolRegistry,
 }};
@@ -145,7 +146,7 @@ async fn main() -> std::process::ExitCode {{
         Ok(a) => a,
         Err(_) => return std::process::ExitCode::from(2),
     }};
-
+{auth_check}
     // Same registry passed to .tools() AND LocalProcessProvider::new
     // (B.13 invariant 1 — silent allowlist bypass otherwise).
     let mut tools = ToolRegistry::with_unsafe_extras();
@@ -153,7 +154,11 @@ async fn main() -> std::process::ExitCode {{
 {tool_allowlist}    ]);
     let sandbox = Arc::new(LocalProcessProvider::new(tools.clone()));
 
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Explicit turbofish: the EventSender alias only constrains the
+    // channel via Option<EventSender> in create_agent_session(), but
+    // inference doesn't propagate backwards across the Option ctor
+    // reliably (rustc emits E0282 on plain `unbounded_channel()`).
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let cfg = RuntimeConfig::builder()
         .session_manager(SessionManager::in_memory())
         .auth_storage(auth.clone())
@@ -175,14 +180,24 @@ async fn main() -> std::process::ExitCode {{
         .expect("compile-time-validated config");
 
     // §Cross-cutting #4: stdout JSONL is `serde_json::to_string(&AgentEvent)`.
+    // Use `writeln!` over a locked stdout handle so a broken-pipe error
+    // (operator pipes through `head` etc.) ends the pump gracefully
+    // rather than panicking on EPIPE inside println!.
     let jsonl = std::env::args().any(|a| a == "--jsonl");
     let pump = tokio::spawn(async move {{
+        use std::io::Write as _;
+        let stdout = std::io::stdout();
         while let Some(evt) = event_rx.recv().await {{
-            if jsonl {{
-                println!("{{}}", serde_json::to_string(&evt).unwrap());
+            let mut handle = stdout.lock();
+            let r = if jsonl {{
+                writeln!(handle, "{{}}", serde_json::to_string(&evt).unwrap())
             }} else if let AgentEventKind::AssistantTextDelta {{ text }} = &evt.kind {{
-                print!("{{text}}");
-            }}
+                write!(handle, "{{text}}")
+            }} else {{
+                Ok(())
+            }};
+            drop(handle);
+            if r.is_err() {{ break; }}
             if matches!(evt.kind, AgentEventKind::TurnComplete) {{ break; }}
         }}
     }});
@@ -239,6 +254,34 @@ fn map_runtime_error_to_exit(e: pi_sdk::RuntimeError) -> u8 {{
 }
 
 // ── Substitution helpers (B.5-B.10) ──────────────────────────────
+
+fn render_auth_check(m: &Manifest) -> String {
+    // Per generated-agent code-review (post-Commit-B): pi-sdk's
+    // `from_env_explicit` silently drops empty-string env vars
+    // (`pi-ai/src/auth.rs:154` — `Ok(val) if !val.is_empty()` →
+    // insert; otherwise skip). So `ANTHROPIC_API_KEY=""` produces
+    // an empty AuthStorage that would later surface as a generic
+    // RuntimeError::Provider — mapped to exit 1, NOT the exit 2
+    // RFD §Cross-cutting #5 promises for missing auth.
+    //
+    // Bridge that gap by post-checking that the configured provider
+    // actually has a credential after `from_env_explicit` returns.
+    // Skip the check when `secrets.required` is empty (the agent
+    // either doesn't need auth or sources it elsewhere).
+    if m.secrets.required.is_empty() {
+        return String::new();
+    }
+    let provider_lit = quote_str(m.provider.name.as_kebab());
+    let env_list = m.secrets.required.join(", ");
+    let env_list_lit = quote_str(&env_list);
+    format!(
+        "    if auth.get({provider_lit}).is_none() {{\n        \
+            eprintln!(\"{{}}: missing credentials for provider {{}}; required env var(s) {{}} unset or empty\",\n            \
+                env!(\"CARGO_PKG_NAME\"), {provider_lit}, {env_list_lit});\n        \
+            return std::process::ExitCode::from(2);\n    \
+        }}\n"
+    )
+}
 
 fn render_auth_call(m: &Manifest) -> String {
     // B.6: empty allowlist → typed iter::empty (avoids E0282
@@ -488,5 +531,32 @@ mod tests {
         );
         // And NOT as the bare empty array which would fail to type-infer.
         assert!(!r.main_rs.contains("from_env_explicit([])"));
+        // No auth.get check when there's no required secret to check.
+        assert!(!r.main_rs.contains("auth.get("));
+    }
+
+    #[test]
+    fn non_empty_secrets_renders_post_check_for_exit_2() {
+        // Per generated-agent code-review post-Commit-B finding:
+        // empty-string env vars are silently dropped by pi-sdk's
+        // `from_env_explicit`, so the codegen MUST post-check that
+        // the configured provider got a credential — otherwise the
+        // RFD §Cross-cutting #5 exit-2 contract is unreachable.
+        let m = fixture_manifest();
+        let r = render(&m, "schema_version = 1\n", "0.1.0");
+        assert!(
+            r.main_rs.contains(r#"if auth.get("anthropic").is_none()"#),
+            "main.rs must post-check auth presence; got:\n{}",
+            r.main_rs
+        );
+        assert!(
+            r.main_rs.contains("ExitCode::from(2)"),
+            "the auth-check branch must exit 2 per §Cross-cutting #5"
+        );
+        // Error message names the env var so the operator can fix it.
+        assert!(
+            r.main_rs.contains("ANTHROPIC_API_KEY"),
+            "error message must name the missing env var"
+        );
     }
 }
