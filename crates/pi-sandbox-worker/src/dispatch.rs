@@ -37,7 +37,7 @@ use tracing::warn;
 static REGISTRY: OnceLock<ToolRegistry> = OnceLock::new();
 
 fn registry() -> &'static ToolRegistry {
-    REGISTRY.get_or_init(ToolRegistry::with_extras)
+    REGISTRY.get_or_init(ToolRegistry::with_unsafe_extras)
 }
 
 // --------------------------------------------------------------------------

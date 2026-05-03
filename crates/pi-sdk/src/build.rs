@@ -23,12 +23,12 @@ use std::sync::Arc;
 /// fields you care about and using `..BuildConfig::default()` for the
 /// rest is the canonical embedder shape during 0.x.
 ///
-/// Note on safety: `BuildConfig::default()` calls `AuthStorage::from_env()`,
-/// which scans 17 environment variables unconditionally. For production
-/// embedders this is a CWE-526 risk; per RFD 0027 §4.5 #8 (Hardening
-/// Commit H5), the safer alternative is `AuthStorage::from_env_explicit(&[
-/// (provider, env_key), ...])` once H5 lands. SDK 0.x retains the
-/// `from_env()` default for parity with the existing seed module.
+/// Note on safety: `BuildConfig::default()` returns
+/// `AuthStorage::in_memory()` — the SAFE default. Embedders wanting
+/// auto-discovery from env vars name the providers they trust via
+/// `AuthStorage::from_env_explicit(&[(provider, env_key), ...])` and
+/// pass the result on `BuildConfig.auth` explicitly. (Per polish-12
+/// the unsafe `from_env()` slurp was removed entirely.)
 #[derive(Clone)]
 pub struct BuildConfig {
     pub auth: AuthStorage,
@@ -43,13 +43,14 @@ pub struct BuildConfig {
 
 impl Default for BuildConfig {
     fn default() -> Self {
-        // Deprecated `from_env()` retained here for back-compat (RFD
-        // 0027 §3 deprecation policy: lives until 1.0+4 MINOR).
-        // Embedders should prefer `quick_start` (Hardening §4.5 #8)
-        // or build via `RuntimeConfig::builder()` with
-        // `AuthStorage::from_env_explicit(allowlist)`.
-        #[allow(deprecated)]
-        let auth = AuthStorage::from_env();
+        // Per RFD 0027 §4.5 #8 (Hardening H5) + polish-12 cleanup:
+        // `BuildConfig::default()` no longer slurps env vars. Embedders
+        // wanting auto-discovery name the providers they trust via
+        // `AuthStorage::from_env_explicit(...)` and pass the result on
+        // `BuildConfig.auth` explicitly. This default is the
+        // safe-by-default in-memory storage; embedders setting creds
+        // call `auth.set(provider, AuthMethod::ApiKey { ... })`.
+        let auth = AuthStorage::in_memory();
         let registry = ModelRegistry::new(auth.clone());
         Self {
             auth,
@@ -135,7 +136,7 @@ mod tests {
 
     #[test]
     fn default_build_config_produces_runnable_config() {
-        // No env vars set in the test → AuthStorage::from_env() returns empty.
+        // BuildConfig::default() returns AuthStorage::in_memory() (post-polish-12).
         // The config still builds; it just won't be able to call any provider
         // without auth.
         let cfg = build_runtime_config(BuildConfig::default());

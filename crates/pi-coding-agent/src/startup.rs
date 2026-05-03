@@ -101,10 +101,11 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     let auth = AuthStorage::open(auth_path()).unwrap_or_else(|_| AuthStorage::in_memory());
     // overlay env keys (env wins for fresh shells). Per RFD 0027 §4.5 #8
     // the binary intentionally scans every supported env var (matches
-    // the user's own-machine trust model). The SDK exposes
-    // `from_env_explicit` for the embedder case.
-    #[allow(deprecated)]
-    let env = AuthStorage::from_env();
+    // the user's own-machine trust model — the binary IS the embedder
+    // here). Pass `ENV_KEYS` explicitly so the trust model is auditable
+    // in code-review.
+    let env = AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS)
+        .unwrap_or_else(|_| AuthStorage::in_memory());
     for (p, _) in AuthStorage::ENV_KEYS {
         if let Some(m) = env.get(p) {
             auth.set(p, m);
@@ -125,7 +126,11 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     } else if settings.no_builtin_tools {
         ToolRegistry::new()
     } else {
-        ToolRegistry::with_extras()
+        // The pi binary opts into the full tool surface (incl. bash).
+        // SDK embedders use `with_readonly_extras()` or the explicit
+        // builder pattern instead. Per polish-12 the old `with_extras`
+        // alias was removed.
+        ToolRegistry::with_unsafe_extras()
     };
     if !settings.tools.is_empty() {
         tools.keep_only(&settings.tools);

@@ -8,7 +8,7 @@ async fn read_write_edit_roundtrip() {
         cwd: dir.path().to_path_buf(),
         max_output_bytes: 64 * 1024,
     };
-    let reg = ToolRegistry::with_extras();
+    let reg = ToolRegistry::with_unsafe_extras();
     let write = reg.get("write").unwrap();
     let read = reg.get("read").unwrap();
     let edit = reg.get("edit").unwrap();
@@ -80,7 +80,7 @@ async fn edit_rejects_non_unique() {
         cwd: dir.path().to_path_buf(),
         max_output_bytes: 64 * 1024,
     };
-    let reg = ToolRegistry::with_extras();
+    let reg = ToolRegistry::with_unsafe_extras();
     reg.get("write")
         .unwrap()
         .invoke(&ctx, "1", json!({"path": "x", "content": "foo foo"}))

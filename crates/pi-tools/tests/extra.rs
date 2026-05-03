@@ -32,7 +32,7 @@ fn registry_new_is_empty_and_specs_match_names() {
 
 #[test]
 fn registry_keep_only_filters_to_named_tools() {
-    let mut r = ToolRegistry::with_extras();
+    let mut r = ToolRegistry::with_unsafe_extras();
     let before = r.names();
     assert!(before.len() >= 4, "with_extras should bring multiple tools");
     r.keep_only(&["read".into(), "bash".into()]);
@@ -54,7 +54,7 @@ fn registry_unregister_removes_named_tool() {
 
 #[test]
 fn registry_specs_returns_one_spec_per_registered_tool() {
-    let r = ToolRegistry::with_extras();
+    let r = ToolRegistry::with_unsafe_extras();
     let names = r.names();
     let specs = r.specs();
     assert_eq!(names.len(), specs.len());
@@ -62,7 +62,7 @@ fn registry_specs_returns_one_spec_per_registered_tool() {
 
 #[test]
 fn read_only_flags_are_correct_for_each_builtin() {
-    let r = ToolRegistry::with_extras();
+    let r = ToolRegistry::with_unsafe_extras();
     // Read-only: read, grep, find, ls
     for name in ["read", "grep", "find", "ls"] {
         let t = r.get(name).unwrap();
@@ -77,7 +77,7 @@ fn read_only_flags_are_correct_for_each_builtin() {
 
 #[test]
 fn spec_accessor_returns_correct_name_per_tool() {
-    let r = ToolRegistry::with_extras();
+    let r = ToolRegistry::with_unsafe_extras();
     for name in ["read", "write", "edit", "bash", "grep", "find", "ls"] {
         let t = r.get(name).unwrap();
         assert_eq!(t.spec().name, name);
@@ -239,7 +239,7 @@ async fn write_tool_reports_updated_when_target_already_exists() {
 async fn edit_tool_replace_all_replaces_every_occurrence() {
     let dir = tempfile::tempdir().unwrap();
     let c = ctx(dir.path());
-    let r = ToolRegistry::with_extras();
+    let r = ToolRegistry::with_unsafe_extras();
     r.get("write")
         .unwrap()
         .invoke(&c, "1", json!({"path": "x", "content": "a a a a"}))
@@ -264,7 +264,7 @@ async fn edit_tool_replace_all_replaces_every_occurrence() {
 async fn edit_tool_old_string_not_found_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     let c = ctx(dir.path());
-    let r = ToolRegistry::with_extras();
+    let r = ToolRegistry::with_unsafe_extras();
     r.get("write")
         .unwrap()
         .invoke(&c, "1", json!({"path": "x", "content": "hello"}))
@@ -288,7 +288,7 @@ async fn edit_tool_old_string_not_found_returns_error() {
 async fn edit_tool_missing_required_inputs_each_error() {
     let dir = tempfile::tempdir().unwrap();
     let c = ctx(dir.path());
-    let r = ToolRegistry::with_extras();
+    let r = ToolRegistry::with_unsafe_extras();
     let edit = r.get("edit").unwrap();
     for missing in [
         json!({}),
@@ -371,7 +371,7 @@ async fn ls_tool_sorts_entries_and_appends_slash_to_directories() {
     std::fs::write(dir.path().join("alpha.txt"), "a").unwrap();
     std::fs::write(dir.path().join("beta.txt"), "b").unwrap();
     let c = ctx(dir.path());
-    let r = ToolRegistry::with_extras();
+    let r = ToolRegistry::with_unsafe_extras();
     let ls = r.get("ls").unwrap();
     let out = ls.invoke(&c, "1", json!({})).await.unwrap();
     assert!(!out.is_error);
@@ -386,7 +386,7 @@ async fn ls_tool_sorts_entries_and_appends_slash_to_directories() {
 async fn find_missing_glob_errors_and_invalid_glob_errors() {
     let dir = tempfile::tempdir().unwrap();
     let c = ctx(dir.path());
-    let r = ToolRegistry::with_extras();
+    let r = ToolRegistry::with_unsafe_extras();
     let find = r.get("find").unwrap();
     let e = find.invoke(&c, "1", json!({})).await.unwrap_err();
     assert!(e.to_string().contains("glob"));
@@ -401,7 +401,7 @@ async fn find_missing_glob_errors_and_invalid_glob_errors() {
 async fn find_with_no_matches_returns_marker() {
     let dir = tempfile::tempdir().unwrap();
     let c = ctx(dir.path());
-    let r = ToolRegistry::with_extras();
+    let r = ToolRegistry::with_unsafe_extras();
     let find = r.get("find").unwrap();
     let out = find
         .invoke(&c, "1", json!({"glob": "**/*.never"}))
@@ -416,7 +416,7 @@ async fn find_with_explicit_path_searches_that_directory() {
     std::fs::create_dir_all(dir.path().join("inner")).unwrap();
     std::fs::write(dir.path().join("inner/x.txt"), "x").unwrap();
     let c = ctx(dir.path());
-    let r = ToolRegistry::with_extras();
+    let r = ToolRegistry::with_unsafe_extras();
     let find = r.get("find").unwrap();
     let out = find
         .invoke(&c, "1", json!({"glob": "**/*.txt", "path": "inner"}))
@@ -429,7 +429,7 @@ async fn find_with_explicit_path_searches_that_directory() {
 async fn grep_missing_pattern_errors_and_invalid_regex_errors() {
     let dir = tempfile::tempdir().unwrap();
     let c = ctx(dir.path());
-    let r = ToolRegistry::with_extras();
+    let r = ToolRegistry::with_unsafe_extras();
     let grep = r.get("grep").unwrap();
     let e = grep.invoke(&c, "1", json!({})).await.unwrap_err();
     assert!(e.to_string().contains("pattern"));
@@ -445,7 +445,7 @@ async fn grep_with_explicit_path_and_no_matches_returns_marker() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "nothing").unwrap();
     let c = ctx(dir.path());
-    let r = ToolRegistry::with_extras();
+    let r = ToolRegistry::with_unsafe_extras();
     let grep = r.get("grep").unwrap();
     let out = grep
         .invoke(&c, "1", json!({"pattern": "WONT_MATCH", "path": "."}))
@@ -458,7 +458,7 @@ async fn grep_with_explicit_path_and_no_matches_returns_marker() {
 async fn grep_invalid_glob_errors() {
     let dir = tempfile::tempdir().unwrap();
     let c = ctx(dir.path());
-    let r = ToolRegistry::with_extras();
+    let r = ToolRegistry::with_unsafe_extras();
     let grep = r.get("grep").unwrap();
     let e = grep
         .invoke(&c, "1", json!({"pattern": "x", "glob": "[bad"}))

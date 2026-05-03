@@ -54,6 +54,10 @@ versioning follows [SemVer](https://semver.org/) per RFD 0027 §3.
 
 ### Removed
 - `pi_coding_agent::sdk` deprecated shim (Commit K). Embedders use `pi-sdk` directly. The shim was added in Commit A as the back-compat bridge during the SDK extraction; its removal closes the SDK-extraction track.
+- `AuthStorage::from_env()` (polish-12). Was `#[deprecated]` since H5; the unsafe slurp-all-17-vars shape is gone. Binary callers use `AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS)` (own-machine trust model is auditable in code-review). SDK embedders use `from_env_explicit` with a narrower allowlist.
+- `ToolRegistry::with_extras()` (polish-12). Was a name carrying no safety signal — replaced by `with_unsafe_extras()` per RFD §4.5 #12. The post-H7 alias was kept only for migration during 0.1; pre-publish there are no embedders to migrate, so the alias was dropped. Internal pi-rs binary callers (startup.rs, sandbox-worker dispatch) updated to `with_unsafe_extras()`.
+- `BuildConfig::default()` no longer scans env vars (polish-12). Returns `AuthStorage::in_memory()`; embedders wanting auto-discovery name the providers they trust via `AuthStorage::from_env_explicit(...)` and pass the result on `BuildConfig.auth` explicitly.
+- `#[allow(deprecated)]` annotations across pi-coding-agent (startup, cmd, halo) and pi-ai tests — no longer needed once the deprecated symbol is gone.
 
 ### Notes
 - This is the pre-0.1.0 working tree. Once Commit J publishes 0.1.0

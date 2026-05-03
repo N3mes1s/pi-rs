@@ -85,14 +85,6 @@ impl ToolRegistry {
         r
     }
 
-    pub fn with_extras() -> Self {
-        let mut r = Self::with_defaults();
-        r.register_unwrap(Arc::new(grep::GrepTool));
-        r.register_unwrap(Arc::new(find::FindTool));
-        r.register_unwrap(Arc::new(ls::LsTool));
-        r
-    }
-
     /// Read-only inspection tool set: `read`, `grep`, `find`, `ls`. No
     /// shell, no filesystem mutation. Per RFD 0027 §4.5 #12 (Hardening
     /// H7): the safe-by-default tool set for embedders.
@@ -108,17 +100,19 @@ impl ToolRegistry {
     /// Full tool set including `bash` (code execution) and the
     /// mutation tools (`write`, `edit`). Per RFD 0027 §4.5 #12: the
     /// name itself is the safety signal — production callers should
-    /// prefer `with_readonly_extras()` or build the registry
-    /// explicitly via `new()` + `register()`.
+    /// prefer [`with_readonly_extras`](Self::with_readonly_extras)
+    /// or build the registry explicitly via [`new`](Self::new) +
+    /// [`register`](Self::register).
     ///
-    /// `with_unsafe_extras()` is the renamed-for-safety alias of
-    /// `with_extras()`. Both return the identical tool set today;
-    /// pi-rs's own binary continues to use `with_extras()` and
-    /// `with_defaults()`. Per RFD 0027 §3 deprecation policy, the
-    /// older names live until SDK 1.0+4 MINOR releases (~6 months
-    /// past 1.0).
+    /// (Polish-12: previously this was an alias for `with_extras()`;
+    /// the alias was removed pre-publish since 0.x has no committed
+    /// back-compat surface yet.)
     pub fn with_unsafe_extras() -> Self {
-        Self::with_extras()
+        let mut r = Self::with_defaults();
+        r.register_unwrap(Arc::new(grep::GrepTool));
+        r.register_unwrap(Arc::new(find::FindTool));
+        r.register_unwrap(Arc::new(ls::LsTool));
+        r
     }
 
     /// Register a tool. Per RFD 0027 §4.5 #5 (Hardening H3), this

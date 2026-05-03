@@ -13,7 +13,7 @@ fn ctx(dir: &std::path::Path) -> ToolContext {
 #[tokio::test]
 async fn grep_glob_filter_matches_only_one_of_two_files() {
     let dir = tempfile::tempdir().unwrap();
-    let reg = ToolRegistry::with_extras();
+    let reg = ToolRegistry::with_unsafe_extras();
     let write = reg.get("write").unwrap();
     let grep = reg.get("grep").unwrap();
     let c = ctx(dir.path());
@@ -51,7 +51,7 @@ async fn grep_glob_filter_matches_only_one_of_two_files() {
 #[tokio::test]
 async fn find_honors_max_results() {
     let dir = tempfile::tempdir().unwrap();
-    let reg = ToolRegistry::with_extras();
+    let reg = ToolRegistry::with_unsafe_extras();
     let write = reg.get("write").unwrap();
     let find = reg.get("find").unwrap();
     let c = ctx(dir.path());
@@ -87,7 +87,7 @@ async fn find_honors_max_results() {
 #[tokio::test]
 async fn ls_in_nonexistent_directory_returns_is_error() {
     let dir = tempfile::tempdir().unwrap();
-    let reg = ToolRegistry::with_extras();
+    let reg = ToolRegistry::with_unsafe_extras();
     let ls = reg.get("ls").unwrap();
     let c = ctx(dir.path());
 

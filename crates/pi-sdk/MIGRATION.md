@@ -84,35 +84,7 @@ let cfg = RuntimeConfig::builder()
 warning until 1.0+4 MINOR releases (~6 months past 1.0) per RFD §3
 deprecation policy. Final removal in 2.0.
 
-### 2. `AuthStorage::from_env()` removed
-
-Pre-1.0 (`#[deprecated]` since 0.1):
-
-```rust
-let auth = AuthStorage::from_env();  // slurps 17 env vars
-```
-
-Post-1.0 (only path):
-
-```rust
-let auth = AuthStorage::from_env_explicit(&[
-    ("anthropic", "MY_TENANT_ANTHROPIC_KEY"),
-    ("openai",    "MY_TENANT_OPENAI_KEY"),
-])?;
-```
-
-### 3. `ToolRegistry::with_extras()` renamed `with_unsafe_extras()`
-
-Both names exist in 0.x via H7. After 1.0+4 MINOR, `with_extras()`
-is removed; `with_unsafe_extras()` is the only name. The semantics
-(includes `bash`) are unchanged.
-
-```rust
-- let tools = ToolRegistry::with_extras();
-+ let tools = ToolRegistry::with_unsafe_extras();
-```
-
-### 4. `Settings { ..Settings::default() }` → `Settings::builder()`
+### 2. `Settings { ..Settings::default() }` → `Settings::builder()`
 
 `Settings` becomes `#[non_exhaustive]` at 1.0 per RFD §3 blanket
 policy. The struct-literal-with-spread pattern stops compiling
@@ -143,7 +115,7 @@ let s = Settings::builder()
 The builder ships in 0.x (polish-8) so embedders can migrate
 ahead of the 1.0 freeze.
 
-### 5. Sandbox launcher traits leave `*-unstable` features
+### 3. Sandbox launcher traits leave `*-unstable` features
 
 In 0.x (and 1.0 + 1.1) the microvm + remote sandbox launcher traits
 ship behind:
@@ -170,8 +142,8 @@ The `-unstable`-suffixed features stay as deprecated aliases for
 |--------------------------------------------|--------------------------------------------------|----------|
 | `pi_coding_agent::sdk::*`                  | `pi_sdk::*`                                      | 0.1.0    |
 | `LocalProcessProvider::with_defaults()`    | `LocalProcessProvider::with_readonly_defaults()` (safer) or unchanged | 0.1.0    |
-| `ToolRegistry::with_extras()`              | `ToolRegistry::with_unsafe_extras()` (alias)     | 0.1.0    |
-| `AuthStorage::from_env()`                  | `AuthStorage::from_env_explicit(allowlist)`      | deprecated 0.1.0; removed 1.0+4 MINOR |
+| `ToolRegistry::with_extras()`              | `ToolRegistry::with_unsafe_extras()`             | removed pre-publish (polish-12) |
+| `AuthStorage::from_env()`                  | `AuthStorage::from_env_explicit(allowlist)`      | removed pre-publish (polish-12) |
 | `ToolGate::approve(name, input)`           | `ToolGate::approve(ctx, name, input)`            | 0.1.0 (breaking; pre-1.0 ok per §3)   |
 | `ToolRegistry::register(tool)` returns `()` | returns `Result<(), DuplicateName>`              | 0.1.0 (breaking; pre-1.0 ok per §3)   |
 | `pi_sandbox_rootfs::ROOTFS_VERSION`        | `pi_sandbox::microvm::ROOTFS_VERSION`            | 0.1.0    |

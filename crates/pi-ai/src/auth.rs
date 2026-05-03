@@ -96,46 +96,6 @@ impl AuthStorage {
         ("minimax", "MINIMAX_API_KEY"),
     ];
 
-    /// Slurp every env var in [`ENV_KEYS`](Self::ENV_KEYS).
-    ///
-    /// **DEPRECATED** at H5 (RFD 0027 §4.5 #8). Embedders should use
-    /// [`from_env_explicit`](Self::from_env_explicit) and name the
-    /// provider/env-var pairs they trust. `from_env()` is a CWE-526
-    /// magnet for embedders that inherit a parent process environment
-    /// they do not fully control.
-    ///
-    /// Construction emits a `tracing::warn!` so embedders running with
-    /// a tracing subscriber see the deprecation in their logs. The
-    /// function continues to work for back-compat through the SDK 0.x
-    /// window; removal is in SDK 1.0+4 MINOR per the deprecation
-    /// policy.
-    #[deprecated(
-        since = "0.1.0",
-        note = "use `AuthStorage::from_env_explicit(&[(provider, env_key), ...])` instead — RFD 0027 §4.5 #8"
-    )]
-    pub fn from_env() -> Self {
-        tracing::warn!(
-            "AuthStorage::from_env() called — slurping {} env vars unconditionally; \
-             prefer from_env_explicit(allowlist) for production (RFD 0027 §4.5 #8)",
-            Self::ENV_KEYS.len()
-        );
-        let mut data = AuthData::default();
-        for (provider, env) in Self::ENV_KEYS {
-            if let Ok(val) = std::env::var(env) {
-                if !val.is_empty() {
-                    data.providers
-                        .insert((*provider).to_string(), AuthMethod::ApiKey { value: val });
-                }
-            }
-        }
-        Self {
-            inner: Arc::new(Mutex::new(data)),
-            path: None,
-            scope: None,
-            sealed: false,
-        }
-    }
-
     /// Per RFD 0027 §4.5 #8 (Hardening H5): opt-in env scanning.
     /// Embedder explicitly names the provider → env-var pairs that
     /// should be looked up. Missing or empty env vars are silently

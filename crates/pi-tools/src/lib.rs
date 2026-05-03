@@ -37,17 +37,6 @@ impl ToolRegistry {
         Self(pi_tools_core::ToolRegistry::with_defaults())
     }
 
-    /// All built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `find`,
-    /// `ls`, and `web_search`.
-    ///
-    /// Matches the pre-split behaviour of the original `pi-tools` crate.
-    pub fn with_extras() -> Self {
-        let mut r = Self(pi_tools_core::ToolRegistry::with_extras());
-        r.register(Arc::new(WebSearchTool::default()))
-            .expect("with_extras: web_search collides with built-in (impossible)");
-        r
-    }
-
     /// Read-only inspection tool set: `read`, `grep`, `find`, `ls`. No
     /// shell, no filesystem mutation, no network. Per RFD 0027 §4.5 #12
     /// (Hardening H7): the safe-by-default tool set for SDK embedders.
@@ -56,14 +45,20 @@ impl ToolRegistry {
     }
 
     /// Full tool set including `bash` (code execution), mutation
-    /// tools (`write`, `edit`), and `web_search`. The name itself is
-    /// the safety signal — production callers should prefer
-    /// `with_readonly_extras()` or build the registry explicitly.
+    /// tools (`write`, `edit`), `grep`/`find`/`ls`, and `web_search`.
+    /// The name itself is the safety signal — production callers
+    /// should prefer [`with_readonly_extras`](Self::with_readonly_extras)
+    /// or build the registry explicitly via [`new`](Self::new) +
+    /// [`register`](Self::register).
     ///
-    /// `with_unsafe_extras()` is the renamed-for-safety alias of
-    /// `with_extras()`; both return the identical tool set today.
+    /// (Polish-12: previously aliased to `with_extras`; the alias was
+    /// removed pre-publish since 0.x has no committed back-compat
+    /// surface yet.)
     pub fn with_unsafe_extras() -> Self {
-        Self::with_extras()
+        let mut r = Self(pi_tools_core::ToolRegistry::with_unsafe_extras());
+        r.register(Arc::new(WebSearchTool::default()))
+            .expect("with_unsafe_extras: web_search collides with built-in (impossible)");
+        r
     }
 
     /// Register a tool. Per RFD 0027 §4.5 #5 (Hardening H3): rejects

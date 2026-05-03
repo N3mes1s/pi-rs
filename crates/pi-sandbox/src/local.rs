@@ -34,9 +34,12 @@ impl LocalProcessProvider {
 
     /// Create a provider backed by the default built-in tools
     /// (`read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`,
-    /// `web_search`).
+    /// `web_search`). Backed by [`ToolRegistry::with_unsafe_extras`] —
+    /// the name signals that this surface includes shell + fs
+    /// mutation. For the safe-by-default variant, see
+    /// [`with_readonly_defaults`](Self::with_readonly_defaults).
     pub fn with_defaults() -> Self {
-        Self::new(ToolRegistry::with_extras())
+        Self::new(ToolRegistry::with_unsafe_extras())
     }
 
     /// Create a provider backed by the **read-only** built-in tools

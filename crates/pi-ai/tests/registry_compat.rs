@@ -65,8 +65,7 @@ fn xai_api_key_from_env() {
     // Isolate: set only XAI_API_KEY and make sure unrelated keys are absent.
     std::env::set_var("XAI_API_KEY", "foo");
 
-    #[allow(deprecated)]
-    let storage = AuthStorage::from_env();
+    let storage = AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS).unwrap();
     match storage.get("xai") {
         Some(AuthMethod::ApiKey { value }) => assert_eq!(value, "foo"),
         other => panic!("expected ApiKey {{ value: \"foo\" }}, got {:?}", other),
