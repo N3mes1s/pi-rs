@@ -220,6 +220,22 @@ pub struct RuntimeConfig {
     /// invocation applies. The `ToolGate` still runs first regardless, so
     /// rejected calls never reach the sandbox.
     pub sandbox_provider: Option<Arc<dyn SandboxProvider>>,
+    /// Per-session budget guards (Hardening §4.5 #3, RFD 0027 H2).
+    /// `max_session_tokens` caps the total input + output token spend
+    /// across all turns of one session; exceeding emits
+    /// `RuntimeError::BudgetExhausted`. Default: 10_000_000 (10M).
+    pub max_session_tokens: u64,
+    /// Per-turn cap on the number of tool invocations. A model that
+    /// emits an unbounded sequence of tool calls in one turn is
+    /// truncated; emits `RuntimeError::InvocationCapExceeded`.
+    /// Default: 64.
+    pub max_tool_invocations_per_turn: usize,
+    /// Reserved for tool-recursion enforcement (custom Tool::invoke
+    /// re-entering AgentSession::send). Carried in `RuntimeConfig`
+    /// today; H2.5 wires the actual depth check via a thread-local
+    /// counter once the call sites that re-enter are audited.
+    /// Default: 8.
+    pub max_recursion: usize,
 }
 
 impl RuntimeConfig {
@@ -273,7 +289,6 @@ impl RuntimeConfig {
 /// if any required setter was skipped. [`build_unwrap`](Self::build_unwrap)
 /// panics on the same condition — meant for tests / quick-start where a
 /// missing field is a programmer error, not an embedder error.
-#[derive(Default)]
 pub struct ConfigBuilder {
     session_manager: Option<SessionManager>,
     auth_storage: Option<AuthStorage>,
@@ -288,6 +303,33 @@ pub struct ConfigBuilder {
     gate_ask_is_approve: bool,
     stream_interceptor: Option<Arc<dyn StreamInterceptor>>,
     sandbox_provider: Option<Arc<dyn SandboxProvider>>,
+    max_session_tokens: u64,
+    max_tool_invocations_per_turn: usize,
+    max_recursion: usize,
+}
+
+impl Default for ConfigBuilder {
+    fn default() -> Self {
+        Self {
+            session_manager: None,
+            auth_storage: None,
+            model_registry: None,
+            tools: None,
+            settings: None,
+            system_prompt: None,
+            cwd: None,
+            context_files: Vec::new(),
+            provider_factory: None,
+            tool_gate: None,
+            gate_ask_is_approve: false,
+            stream_interceptor: None,
+            sandbox_provider: None,
+            // Per RFD 0027 §4.5 #3 (Hardening H2) defaults:
+            max_session_tokens: 10_000_000,
+            max_tool_invocations_per_turn: 64,
+            max_recursion: 8,
+        }
+    }
 }
 
 /// Error returned by [`ConfigBuilder::build`] when a required field
@@ -357,6 +399,32 @@ impl ConfigBuilder {
         self
     }
 
+    /// Set the per-session token cap (Hardening §4.5 #3, H2). Default
+    /// 10M. Embedders should size this per-tenant; the default catches
+    /// pathological model loops without blocking normal sessions.
+    pub fn with_max_session_tokens(mut self, n: u64) -> Self {
+        self.max_session_tokens = n;
+        self
+    }
+
+    /// Set the per-turn tool-invocation cap (Hardening §4.5 #3, H2).
+    /// Default 64. A model emitting more than this many tool calls in
+    /// one assistant turn is truncated; the runtime emits
+    /// `RuntimeError::InvocationCapExceeded`.
+    pub fn with_max_tool_invocations_per_turn(mut self, n: usize) -> Self {
+        self.max_tool_invocations_per_turn = n;
+        self
+    }
+
+    /// Set the tool-recursion depth cap (Hardening §4.5 #3, H2 reserved).
+    /// Default 8. Wired in a follow-up commit; carried in
+    /// `RuntimeConfig` today so embedders' Cargo.toml entries don't
+    /// need to change when enforcement lands.
+    pub fn with_max_recursion(mut self, n: usize) -> Self {
+        self.max_recursion = n;
+        self
+    }
+
     // ─── Terminals ─────────────────────────────────────────────
     pub fn build(self) -> Result<RuntimeConfig, ConfigError> {
         Ok(RuntimeConfig {
@@ -383,6 +451,9 @@ impl ConfigBuilder {
             gate_ask_is_approve: self.gate_ask_is_approve,
             stream_interceptor: self.stream_interceptor,
             sandbox_provider: self.sandbox_provider,
+            max_session_tokens: self.max_session_tokens,
+            max_tool_invocations_per_turn: self.max_tool_invocations_per_turn,
+            max_recursion: self.max_recursion,
         })
     }
 
@@ -429,6 +500,8 @@ impl AgentSessionRuntime {
                 thinking,
                 tools: cfg.tools.clone(),
                 context_loads_emitted: false,
+                session_input_tokens: 0,
+                session_output_tokens: 0,
             })),
             cfg,
         })
@@ -513,6 +586,11 @@ impl AgentSessionRuntime {
                 // Reopened sessions: assume any context_files emit
                 // happened on first creation. Don't double-emit.
                 context_loads_emitted: true,
+                // H2: re-opened sessions reset the in-memory token
+                // accumulator. Persistence of the session-total across
+                // restarts is a future RFD if the demand surfaces.
+                session_input_tokens: 0,
+                session_output_tokens: 0,
             })),
             cfg,
         })
@@ -674,6 +752,14 @@ struct AgentSessionInner {
     /// entries: the runtime walks `cfg.context_files` exactly once per
     /// session (before the first user turn) and flips this to `true`.
     context_loads_emitted: bool,
+    /// Per RFD 0027 §4.5 #3 (Hardening H2): per-session running token
+    /// accumulator. `saturating_add` prevents overflow on adversarial
+    /// stream events with `u64::MAX` token counts; the cumulative
+    /// total is checked against `cfg.max_session_tokens` after each
+    /// `Usage` event and exceeding triggers
+    /// `RuntimeError::BudgetExhausted`.
+    session_input_tokens: u64,
+    session_output_tokens: u64,
 }
 
 impl AgentSession {
@@ -1092,6 +1178,19 @@ impl AgentSession {
                             .await;
                     }
                     K::ToolCallComplete { id, name, input } => {
+                        // Per RFD 0027 §4.5 #3 (Hardening H2): per-turn
+                        // tool-invocation cap. A model emitting >N tool
+                        // calls in one assistant turn is truncated.
+                        if tool_calls.len() >= self.cfg.max_tool_invocations_per_turn {
+                            tracing::warn!(
+                                cap = self.cfg.max_tool_invocations_per_turn,
+                                "per-turn tool-invocation cap exceeded; remaining tool calls dropped"
+                            );
+                            return Err(RuntimeError::InvocationCapExceeded {
+                                invoked: tool_calls.len() + 1,
+                                cap: self.cfg.max_tool_invocations_per_turn,
+                            });
+                        }
                         let call = ToolCall {
                             id: id.clone(),
                             name: name.clone(),
@@ -1102,6 +1201,36 @@ impl AgentSession {
                         tool_calls.push(call);
                     }
                     K::Usage { usage } => {
+                        // Per RFD 0027 §4.5 #3 (Hardening H2): per-session
+                        // token accumulator with `saturating_add` so
+                        // adversarial u64::MAX deltas don't wrap. Compare
+                        // against `cfg.max_session_tokens` and emit
+                        // `BudgetExhausted` if exceeded.
+                        {
+                            let mut g = self.inner.lock().await;
+                            g.session_input_tokens =
+                                g.session_input_tokens.saturating_add(usage.input_tokens);
+                            g.session_output_tokens =
+                                g.session_output_tokens.saturating_add(usage.output_tokens);
+                            let total = g
+                                .session_input_tokens
+                                .saturating_add(g.session_output_tokens);
+                            if total > self.cfg.max_session_tokens {
+                                let cap = self.cfg.max_session_tokens;
+                                drop(g);
+                                tracing::warn!(
+                                    used = total,
+                                    cap,
+                                    "per-session token budget exhausted"
+                                );
+                                self.emit(AgentEventKind::Usage { usage: usage.clone() })
+                                    .await;
+                                return Err(RuntimeError::BudgetExhausted {
+                                    used: total,
+                                    cap,
+                                });
+                            }
+                        }
                         usage_total = usage.clone();
                         self.emit(AgentEventKind::Usage { usage }).await;
                     }
@@ -1206,6 +1335,18 @@ impl AgentSession {
             // `0`; `0` is reserved for "before any assistant message
             // emitted" which never reaches the gate code path.)
             turn_index_for_gate = turn_index_for_gate.saturating_add(1);
+
+            // Per RFD 0027 §4.5 #2 (Hardening H2): Finish::ToolUse
+            // means "this turn ends because the model is requesting
+            // tools" — it MUST be paired with at least one tool call
+            // in the assistant message. A provider stream that emits
+            // Finish::ToolUse with empty tool_calls is malformed
+            // (or adversarial); reject explicitly so the runtime
+            // doesn't fall through to the no-tools "this turn ended,
+            // emit TurnComplete" path on a malformed signal.
+            if matches!(finish, FinishReason::ToolUse) && tool_calls.is_empty() {
+                return Err(RuntimeError::ToolUseFinishWithoutCalls);
+            }
 
             if tool_calls.is_empty() {
                 // drain queued steering messages — convert into next user turn
@@ -1566,6 +1707,32 @@ pub enum RuntimeError {
     /// via direct construction in their own runtime layer.
     #[error("tool `{tool}` panicked: {message}")]
     ToolPanicked { tool: String, message: String },
+    /// Per-session token budget cap exceeded (Hardening §4.5 #3, H2).
+    /// `cfg.max_session_tokens` was crossed by the cumulative input +
+    /// output tokens reported via `Usage` events. Embedders treating
+    /// this as recoverable can bump `max_session_tokens` and retry.
+    #[error("session token budget exhausted: used {used}, cap {cap}")]
+    BudgetExhausted { used: u64, cap: u64 },
+    /// Per-turn tool-invocation cap exceeded (Hardening §4.5 #3, H2).
+    /// `cfg.max_tool_invocations_per_turn` was reached and the model
+    /// kept emitting `ToolCallComplete` events. Indicates the model
+    /// is in a tool-call loop or the cap is sized too low for the
+    /// workload.
+    #[error("per-turn tool-invocation cap exceeded: invoked {invoked}, cap {cap}")]
+    InvocationCapExceeded { invoked: usize, cap: usize },
+    /// Tool-recursion depth cap exceeded (Hardening §4.5 #3, H2 reserved).
+    /// Currently produced only via direct construction; the in-loop
+    /// enforcement against `cfg.max_recursion` lands in H2.5 once the
+    /// recursion sites are audited.
+    #[error("tool recursion depth exceeded: depth {depth}, cap {cap}")]
+    DepthExceeded { depth: usize, cap: usize },
+    /// `Finish { reason: ToolUse }` was emitted with no tool calls
+    /// in the same assistant message (Hardening §4.5 #2). Indicates
+    /// either a malformed provider stream or a model trying to mark
+    /// the turn as a tool-use turn without actually requesting any
+    /// tools.
+    #[error("Finish::ToolUse received with no tool calls in the assistant message")]
+    ToolUseFinishWithoutCalls,
 }
 
 impl RuntimeError {
