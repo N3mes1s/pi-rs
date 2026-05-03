@@ -26,5 +26,5 @@ pi_ai         = "0.1"
 pi_tools_core = "0.1"
 pi_sandbox    = "0.1"
 pi_agent_core = "0.1"
-notes = "Initial 0.x. Façade + 7 hardening commits + 5 examples."
+notes = "Initial 0.x. Façade + 7 hardening commits + 6 examples + quick_start convenience."
 security = false

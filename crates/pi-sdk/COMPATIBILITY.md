@@ -11,7 +11,7 @@ the matrix entry.
 
 | pi-sdk | pi-tool-types | pi-ai | pi-tools-core | pi-sandbox | pi-agent-core | Notes |
 |--------|---------------|-------|---------------|------------|---------------|-------|
-| 0.1.0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | Initial 0.x. Façade + 7 hardening commits + 5 examples. |
+| 0.1.0 | 0.1 | 0.1 | 0.1 | 0.1 | 0.1 | Initial 0.x. Façade + 7 hardening commits + 6 examples + quick_start convenience. |
 
 `⚠ SEC` flag = MINOR release shipped a security-CVE breaking change
 under the §3 escape hatch. Read the changelog before upgrading.
