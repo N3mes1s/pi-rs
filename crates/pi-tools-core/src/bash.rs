@@ -10,6 +10,14 @@ use crate::{resolve_path, truncate_for_model, Tool, ToolContext, ToolError};
 /// holding a worker indefinitely.
 pub const BASH_MAX_TIMEOUT_MS: u64 = 600_000;
 
+/// Per RFD 0027 §4.5 #7 (Hardening H4): clamp a model-supplied
+/// `timeout_ms` to [`BASH_MAX_TIMEOUT_MS`]. Extracted from the invoke
+/// body so the arithmetic is unit-testable without spinning up a real
+/// 10-minute bash process (per code-review finding #2, pass-2).
+pub fn clamp_timeout_ms(requested: u64) -> u64 {
+    requested.min(BASH_MAX_TIMEOUT_MS)
+}
+
 /// Default per-tool input size cap (RFD 0027 §4.5 #7). Applies before
 /// validation; an oversized input is rejected outright. 64 KiB is large
 /// enough for any reasonable bash command but blocks adversarial mega-
@@ -23,7 +31,7 @@ impl Tool for BashTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash".into(),
-            description: "Run a shell command synchronously and return stdout, stderr, and exit code. Use `timeout_ms` for a hard limit (default 120000, max 600000). The `cwd` argument is jailed to the agent's working directory.".into(),
+            description: "Run a shell command synchronously and return stdout, stderr, and exit code. Use `timeout_ms` for a hard limit (default 120000, max 600000). The `cwd` argument is jailed to the agent's working directory; NOTE: only the cwd argument is checked, the shell command body itself is unrestricted (a model can still `cd /etc; cat shadow` once bash starts). For real isolation use a microvm or remote sandbox provider.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -67,11 +75,9 @@ impl Tool for BashTool {
         // Per RFD 0027 §4.5 #7 (Hardening H4): clamp timeout_ms to
         // 600_000 (10 minutes). Pre-H4 a model could pass
         // `timeout_ms: u64::MAX` and the worker would block indefinitely.
-        let timeout_ms = input
-            .get("timeout_ms")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(120_000)
-            .min(BASH_MAX_TIMEOUT_MS);
+        let timeout_ms = clamp_timeout_ms(
+            input.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(120_000),
+        );
 
         // Per RFD 0027 §4.5 #6 (Hardening H4): cwd jail check.
         // Pre-H4 the model could pass `cwd: "../../../"` and run
@@ -189,7 +195,6 @@ fn jail_check(
 #[cfg(test)]
 mod h4_tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn jail_check_accepts_subdirectory() {
@@ -244,13 +249,8 @@ mod h4_tests {
     }
 
     #[tokio::test]
-    async fn bash_clamps_timeout_to_max() {
-        // We don't run a 10-minute command in tests; we just verify
-        // the clamping arithmetic by passing a much larger value and
-        // checking the spec'd ceiling. The actual clamp lives in the
-        // invoke() body — exercised via a quick `true` command with a
-        // huge timeout that the clamp reduces to 600_000 ms (which
-        // never matters because `true` returns instantly).
+    async fn bash_clamps_timeout_to_max_smoke() {
+        // Smoke check: u64::MAX + `true` doesn't overflow / panic.
         let tool = BashTool;
         let input = json!({"command": "true", "timeout_ms": u64::MAX});
         let ctx = ToolContext {
@@ -259,6 +259,20 @@ mod h4_tests {
         };
         let res = tool.invoke(&ctx, "id", input).await.expect("should run");
         assert!(!res.is_error, "true should exit 0");
+    }
+
+    #[test]
+    fn clamp_timeout_arithmetic_caps_at_max() {
+        // Per code-review finding #2 (pass-2): exercise the clamp
+        // arithmetic directly. A future refactor that drops `.min()`
+        // ships red here without paying the 10-minute integration-test
+        // cost of running an actual `sleep 600` bash command.
+        assert_eq!(clamp_timeout_ms(0), 0);
+        assert_eq!(clamp_timeout_ms(1), 1);
+        assert_eq!(clamp_timeout_ms(120_000), 120_000);
+        assert_eq!(clamp_timeout_ms(BASH_MAX_TIMEOUT_MS), BASH_MAX_TIMEOUT_MS);
+        assert_eq!(clamp_timeout_ms(BASH_MAX_TIMEOUT_MS + 1), BASH_MAX_TIMEOUT_MS);
+        assert_eq!(clamp_timeout_ms(u64::MAX), BASH_MAX_TIMEOUT_MS);
     }
 
     #[tokio::test]
@@ -305,7 +319,4 @@ mod h4_tests {
         );
     }
 
-    // Silence unused-import warnings when no other paths use these.
-    #[allow(dead_code)]
-    fn _path_buf_use(_: PathBuf) {}
 }

@@ -148,7 +148,12 @@ impl ToolRegistry {
     /// Internal convenience for the built-in `with_*` constructors,
     /// where each tool is statically known to be unique. Panics on
     /// collision (programmer error).
-    pub(crate) fn register_unwrap(&mut self, tool: Arc<dyn Tool>) {
+    ///
+    /// Per code-review finding #8 (pass-2): kept module-private (no
+    /// `pub(crate)` back-door for tests/futures to bypass the H3
+    /// `Result<()>` check). The only callers are the `with_*`
+    /// constructors in this same `impl ToolRegistry` block.
+    fn register_unwrap(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.spec().name.clone();
         self.register(tool).unwrap_or_else(|_| {
             panic!("internal collision in built-in registry for `{name}`")

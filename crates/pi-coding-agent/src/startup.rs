@@ -348,11 +348,25 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         // registering the extension tools so there are no duplicates.
         extensions::apply_replacements(&mut tools, &loaded_exts);
         for t in extensions::extension_tools(&loaded_exts) {
-            // Per RFD 0027 §4.5 #5 (Hardening H3): extensions
-            // intentionally override builtins they replaced via
-            // `apply_replacements` above. Use the explicit override
-            // so the override is auditable in code-review.
-            tools.register_or_replace(t);
+            // Per RFD 0027 §4.5 #5 (Hardening H3) + code-review
+            // finding #4 (pass-2): apply_replacements above already
+            // unregistered builtins that extensions declared they
+            // replace. So at this point each extension tool's name
+            // SHOULD be unique. Use the strict `register` path so a
+            // collision (two extensions both claiming the same name
+            // without declaring each other in `replaces_builtin`)
+            // surfaces as a hard startup error instead of silently
+            // shadowing — that pattern was the exact pre-H3 bypass
+            // we set out to kill, and the previous use of
+            // register_or_replace re-introduced it one layer up.
+            let name = t.spec().name.clone();
+            tools.register(t).unwrap_or_else(|_| {
+                panic!(
+                    "extension tool collision: `{name}` registered by multiple extensions \
+                     and not declared in `replaces_builtin` — fix the offending \
+                     extension manifest"
+                )
+            });
         }
         // Fire-and-forget startup hooks (errors are only warned, never fatal).
         extensions::run_startup_hooks(&loaded_exts).await;

@@ -64,6 +64,13 @@ pub struct GateContext {
 impl GateContext {
     /// Construct a top-level (depth 0, no parent) gate context for a
     /// given session_id and turn.
+    ///
+    /// Per code-review finding #3 (pass-2): this is the canonical
+    /// constructor for embedders writing `ToolGate` impls outside the
+    /// pi-rs workspace. `#[non_exhaustive]` blocks struct-literal
+    /// construction from external crates, so without this helper
+    /// embedders writing tests for their own `approve()` impl have
+    /// no way to build a `GateContext`.
     pub fn top_level(session_id: impl Into<String>, turn_index: u32) -> Self {
         Self {
             session_id: session_id.into(),
@@ -71,6 +78,27 @@ impl GateContext {
             parent_session: None,
             recursion_depth: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod gate_context_tests {
+    use super::*;
+
+    #[test]
+    fn top_level_round_trips_session_id_and_turn() {
+        let ctx = GateContext::top_level("sess-abc", 7);
+        assert_eq!(ctx.session_id, "sess-abc");
+        assert_eq!(ctx.turn_index, 7);
+        assert!(ctx.parent_session.is_none());
+        assert_eq!(ctx.recursion_depth, 0);
+    }
+
+    #[test]
+    fn top_level_accepts_owned_string() {
+        let s: String = "sess-owned".into();
+        let ctx = GateContext::top_level(s, 0);
+        assert_eq!(ctx.session_id, "sess-owned");
     }
 }
 
@@ -1336,20 +1364,21 @@ impl AgentSession {
                     match invoke_fut.catch_unwind().await {
                         Ok(r) => r.map_err(|e| e.to_string()),
                         Err(panic_payload) => {
-                            let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>()
-                            {
-                                (*s).to_string()
-                            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                                s.clone()
-                            } else {
-                                "tool panicked (non-string payload)".to_string()
-                            };
+                            // Per code-review finding #1 (pass-2): use the
+                            // RuntimeError::ToolPanicked variant constructor
+                            // so the variant identity is exercised. Display
+                            // produces `"tool `{name}` panicked: {message}"`
+                            // — the same shape as the prior inline format.
+                            let err = RuntimeError::tool_panic_message(
+                                call.name.as_str(),
+                                panic_payload.as_ref(),
+                            );
                             tracing::warn!(
                                 tool = %call.name,
-                                panic = %msg,
+                                err = %err,
                                 "tool.invoke() panicked; caught by H1 hardening guard"
                             );
-                            Err(format!("tool `{}` panicked: {}", call.name, msg))
+                            Err(err.to_string())
                         }
                     }
                 };
@@ -1543,9 +1572,14 @@ impl RuntimeError {
     /// Construct a [`ToolPanicked`](Self::ToolPanicked) variant from a
     /// `std::panic::catch_unwind` payload. Useful for embedders
     /// implementing their own `Tool::invoke` wrapper.
+    ///
+    /// Per code-review finding #6 (commit-pass-2): takes
+    /// `&(dyn Any + Send)` (idiomatic) instead of `&Box<dyn Any + Send>`
+    /// to avoid `clippy::borrowed_box`. Callers using `&boxed_payload`
+    /// continue to work via auto-deref.
     pub fn tool_panic_message(
         tool: impl Into<String>,
-        payload: &Box<dyn std::any::Any + Send>,
+        payload: &(dyn std::any::Any + Send),
     ) -> Self {
         let message = if let Some(s) = payload.downcast_ref::<&'static str>() {
             (*s).to_string()
