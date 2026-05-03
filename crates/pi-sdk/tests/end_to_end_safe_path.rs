@@ -23,13 +23,25 @@
 
 #![cfg(feature = "mocks")]
 
-use pi_sdk::{
-    quick_start, AgentEventKind, AuthMethod, MockProvider,
-};
+// Per code-review pass-8 NIT #2: AgentEventKind dropped from imports
+// (was unused; the test name's reference to "prompt drive" is what
+// suggested it). MockProvider/Arc kept because the doc-comment
+// explains why they're not wired through (`quick_start` doesn't
+// expose a hook); the `let _ = TypeId::of::<MockProvider>();` line
+// at the bottom prevents an unused-import warning.
+use pi_sdk::{quick_start, AuthMethod, MockProvider};
 use std::sync::Arc;
 
 #[tokio::test]
-async fn quick_start_runs_a_prompt_end_to_end_with_a_mock_provider() {
+// Per code-review pass-8 NIT #1: renamed from
+// `quick_start_runs_a_prompt_end_to_end_with_a_mock_provider`. The
+// body never drove a prompt — it constructs+drops a session — so
+// the previous name overpromised. The actual coverage is
+// "construct a runtime via the safe path, verify safe defaults
+// landed, verify session creation succeeds." A real prompt-drive
+// is in examples/03_custom_tool.rs (which uses MockProvider via
+// the full builder, not quick_start).
+async fn quick_start_constructs_a_session_with_safe_defaults_and_empty_auth() {
     // 1. Build the safe-by-default runtime.
     let runtime = quick_start("anthropic", "claude-haiku-4-5-20251001")
         .expect("quick_start should produce a runnable runtime");

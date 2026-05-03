@@ -29,6 +29,23 @@ fn rootfs_version_current_matches_inlined_const() {
     // itself; this test guards the rename.
     let v = RootfsVersion::current();
     assert_eq!(v.0, pi_sandbox::microvm::ROOTFS_VERSION);
+
+    // Per code-review pass-8 NON-BLOCKING #3: the const ALSO lives in
+    // `pi_sandbox::cache::ROOTFS_VERSION` (alongside ROOTFS_URL etc.
+    // that maintainers paste from build.sh's output). pass-7 NIT #2
+    // unified them via `pub use crate::cache::ROOTFS_VERSION` in
+    // microvm/types.rs. A future regression that re-introduces a
+    // literal duplicate (say, copy-pasting the const into types.rs)
+    // would silently boot the wrong cached image because the
+    // launcher's version-check uses cache.rs's const. This assert
+    // ensures both names resolve to the same value, so the regression
+    // fails immediately.
+    assert_eq!(
+        pi_sandbox::cache::ROOTFS_VERSION,
+        pi_sandbox::microvm::ROOTFS_VERSION,
+        "ROOTFS_VERSION must be a single source of truth — \
+         microvm::ROOTFS_VERSION should `pub use crate::cache::ROOTFS_VERSION`"
+    );
 }
 
 #[test]

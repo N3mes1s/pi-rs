@@ -69,7 +69,7 @@ pub use pi_ai::{
 
 // ─── Tools ────────────────────────────────────────────────────────
 pub use pi_tool_types::{ToolError, ToolResult, ToolSpec};
-pub use pi_tools::{Tool, ToolContext, ToolRegistry};
+pub use pi_tools::{DuplicateName, Tool, ToolContext, ToolRegistry};
 
 // ─── Sandbox ──────────────────────────────────────────────────────
 pub use pi_sandbox::{
