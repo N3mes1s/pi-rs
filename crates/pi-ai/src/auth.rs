@@ -149,6 +149,13 @@ impl AuthStorage {
     ///
     /// Returns `Ok` even if no env vars matched — embedders may want
     /// to start empty and `set` later.
+    ///
+    /// **Asymmetry note vs. deprecated `from_env()`:** non-UTF8 env
+    /// vars surface here as `Err(VarError::NotUnicode(_))` — the
+    /// caller decides how to handle. The deprecated `from_env()`
+    /// silently skips non-UTF8 vars (uses `if let Ok(...)`). Embedders
+    /// migrating from `from_env()` may discover non-UTF8 env vars on
+    /// hosts where they previously went unnoticed.
     pub fn from_env_explicit(
         allowlist: &[(&str, &str)],
     ) -> Result<Self, std::env::VarError> {
@@ -185,6 +192,14 @@ impl AuthStorage {
     /// store via `Arc<Mutex<...>>`; modifying credentials through the
     /// scoped view is visible to the parent and vice versa. The scope
     /// is purely a read/write policy applied on top.
+    ///
+    /// **Composition semantics:** `s.scoped(["a"]).scoped(["b"])`
+    /// **replaces** the scope — it does not intersect. The second
+    /// `scoped` discards the first's `scope` field and installs `["b"]`
+    /// as the new policy, so providers in `"a"` that aren't in `"b"`
+    /// are no longer visible. Embedders needing intersection should
+    /// compute it caller-side and pass the result as a single
+    /// `scoped(...)` call.
     pub fn scoped<I, S>(&self, allow: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -204,6 +219,15 @@ impl AuthStorage {
     /// embedder wants to enforce "credentials are immutable after
     /// init" — useful in long-running services where a runtime
     /// regression that mutates auth would be surprising.
+    ///
+    /// **Caveat — view-local, not store-wide:** `sealed()` is a
+    /// per-view policy applied on top of the shared `Arc<Mutex<...>>`
+    /// credential store. Other (non-sealed) clones of the same
+    /// underlying store can still mutate it; a sealed view will see
+    /// those mutations on the next `get()`. Embedders requiring a
+    /// true seal must drop all non-sealed clones first (or never
+    /// hand them out in the first place — wrap construction in a
+    /// builder that returns only the sealed view).
     pub fn sealed(self) -> Self {
         Self { sealed: true, ..self }
     }
@@ -320,14 +344,22 @@ fn atomic_write_secure(path: &std::path::Path, data: &AuthData) -> std::io::Resu
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
     // Temp file lives next to the target so rename(2) is atomic
-    // on the same filesystem. Suffix is unique-per-process.
+    // on the same filesystem. Suffix is unique-per-process-and-call:
+    // pid + nanos + monotonic AtomicU64 counter. The counter prevents
+    // collisions on hosts with low-resolution clocks where two
+    // parallel `set()` calls could otherwise produce identical
+    // (pid, nanos) pairs and the second `create_new` would fail
+    // silently (per code-review finding #4, pass-3).
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
     let tmp = path.with_extension(format!(
-        "tmp.{}.{}",
+        "tmp.{}.{}.{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
-            .unwrap_or(0)
+            .unwrap_or(0),
+        TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
 
     {

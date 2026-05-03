@@ -90,6 +90,9 @@ fn from_env_picks_up_known_keys() {
     std::env::remove_var("OPENAI_API_KEY");
     std::env::remove_var("FIREWORKS_API_KEY");
 
+    // H5 deprecation kept for test back-compat (this test asserts
+    // from_env's specific multi-var slurp semantics).
+    #[allow(deprecated)]
     let storage = AuthStorage::from_env();
     match storage.get("anthropic") {
         Some(AuthMethod::ApiKey { value }) => assert_eq!(value, "test-anthropic-key"),
