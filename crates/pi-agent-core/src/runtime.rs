@@ -1322,20 +1322,24 @@ impl AgentSession {
                     g.session_input_tokens.saturating_add(g.session_output_tokens);
                 if total > session_cap {
                     let cap = session_cap;
+                    let session_input = g.session_input_tokens;
+                    let session_output = g.session_output_tokens;
                     drop(g);
                     tracing::warn!(
                         used = total,
                         cap,
                         "per-session token budget exhausted"
                     );
-                    // Synthesize a final Usage event whose `input_tokens`/
-                    // `output_tokens` reflect the cumulative session totals
-                    // — matches the figures in `BudgetExhausted` so
-                    // log-correlation tools see one consistent number
-                    // (pass-4 finding #4).
+                    // Per code-review pass-4 finding #4 + pass-5 #3:
+                    // synthesize a final Usage event whose
+                    // `input_tokens`/`output_tokens` BOTH reflect the
+                    // cumulative session totals — pre-fix the
+                    // `output_tokens` field accidentally carried the
+                    // per-turn value, mismatching the figures in
+                    // `RuntimeError::BudgetExhausted`.
                     let cumulative_usage = Usage {
-                        input_tokens: total.saturating_sub(usage_total.output_tokens),
-                        output_tokens: usage_total.output_tokens,
+                        input_tokens: session_input,
+                        output_tokens: session_output,
                         ..usage_total.clone()
                     };
                     self.emit(AgentEventKind::Usage { usage: cumulative_usage })

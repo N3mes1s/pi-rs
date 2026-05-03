@@ -111,7 +111,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .tools(tools)
         .settings(Settings {
             provider: "anthropic".into(),
-            model: "test".into(),
+            // Use a real model alias so ModelRegistry::resolve()
+            // finds it. The MockProvider intercepts all actual API
+            // calls, so the model id is just a registry key.
+            model: "claude-haiku-4-5-20251001".into(),
             ..Settings::default()
         })
         .system_prompt("You are a dice oracle.")
@@ -124,7 +127,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let session = runtime.create_session(Some(tx))?;
     tokio::spawn(async move {
-        let _ = session.prompt("Roll 3d6.".into()).await;
+        // Surface prompt errors so silent failures are visible. Pre-fix
+        // the underscored `let _ = ...` discarded UnknownModel.
+        if let Err(e) = session.prompt("Roll 3d6.".into()).await {
+            eprintln!("[error] prompt failed: {e}");
+        }
     });
 
     while let Some(evt) = rx.recv().await {

@@ -98,10 +98,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The factory will see this provider name + ProviderKind in
             // the cfg argument. For a real service you'd populate
             // ModelRegistry with a ProviderConfig referencing your
-            // service's name; here we just satisfy the runtime's
-            // dispatch glue.
-            provider: "echo".into(),
-            model: "echo-1".into(),
+            // service's name; here we use a real anthropic model alias
+            // so ModelRegistry::resolve() finds it (the EchoFactory
+            // intercepts the actual API call regardless of model id).
+            provider: "anthropic".into(),
+            model: "claude-haiku-4-5-20251001".into(),
             ..Settings::default()
         })
         .system_prompt("you are echo")
@@ -116,7 +117,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let session = runtime.create_session(Some(tx))?;
     tokio::spawn(async move {
-        let _ = session.prompt("anything".into()).await;
+        if let Err(e) = session.prompt("anything".into()).await {
+            eprintln!("[error] prompt failed: {e}");
+        }
     });
     while let Some(evt) = rx.recv().await {
         match evt.kind {

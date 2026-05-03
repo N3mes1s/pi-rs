@@ -212,6 +212,9 @@ Per RFD 0027 §3:
 - ANSI / bidi / C1 escape sequences in JSONL (`WireSerializer`).
 - Auth file world-readable on multi-user hosts (0o600 + atomic rename).
 - Env-var slurp risk (deprecated `from_env()`, opt-in `from_env_explicit`).
+- Pathological tool-call loops in a single turn (per-turn invocation cap, default 64).
+- Adversarial provider that emits `Finish::ToolUse` with zero tool calls (rejected as `ToolUseFinishWithoutCalls`).
+- Per-session token budget overruns (`max_session_tokens` cap, default 10M; `0` = disabled).
 
 **What pi-sdk does NOT defend against, by design:**
 
@@ -225,7 +228,7 @@ Per RFD 0027 §3:
 
 ## Security disclosure
 
-Coordinated disclosure: see [SECURITY.md](../../SECURITY.md). RUSTSEC advisory namespace reserved.
+Coordinated disclosure: report security issues via [GitHub Security Advisories](https://github.com/n3mes1s/playground/security/advisories) on the pi-rs repo. A `SECURITY.md` with the disclosure address ships before the first crates.io publish (RFD 0027 Commit I); RUSTSEC advisory namespace reserved.
 
 ## License
 
@@ -234,6 +237,6 @@ Dual MIT / Apache-2.0.
 ## See also
 
 - [RFD 0027](../../rfd/0027-pi-rs-sdk.md) — full design contract, threat model, hardening contract.
-- [RFD 0023](../../rfd/0023-microvm-sandbox-provider.md) — local microVM sandbox.
-- [RFD 0026](../../rfd/0026-remote-sandbox-transports.md) — remote sandbox transports.
-- [RFD 0028](../../rfd/0028-compiled-agents.md) — compiled agents from TOML manifest (consumer of this SDK).
+- [RFD 0023](../../rfd/0023-sandbox-microvm.md) — local microVM sandbox.
+- [RFD 0026](../../rfd/0026-sandbox-remote.md) — remote sandbox transports.
+- RFD 0028 (planned) — compiled agents from TOML manifest (future consumer of this SDK).

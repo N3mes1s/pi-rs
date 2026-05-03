@@ -22,9 +22,9 @@
 
 use async_trait::async_trait;
 use pi_sdk::{
-    AgentEventKind, AgentSessionRuntime, AuthStorage, ModelRegistry, RuntimeConfig,
-    SandboxError, SandboxExecution, SandboxProvider, SessionManager, Settings, ToolContext,
-    ToolRegistry,
+    AgentEventKind, AgentSessionRuntime, AuthStorage, FinishReason, ModelRegistry,
+    RuntimeConfig, SandboxError, SandboxExecution, SandboxProvider, SessionManager, Settings,
+    StreamEvent, StreamEventKind, ToolContext, ToolRegistry,
 };
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -85,12 +85,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .tools(ToolRegistry::with_readonly_extras())
         .settings(Settings {
             provider: "anthropic".into(),
-            model: "test".into(),
+            // Real model alias so ModelRegistry::resolve() succeeds.
+            model: "claude-haiku-4-5-20251001".into(),
             ..Settings::default()
         })
         .system_prompt("you are an inspector")
         .cwd(std::env::current_dir()?)
-        .with_provider_factory(MockProvider::new().with_text_response("done").into_factory())
+        // Per code-review pass-5 finding #6: drive a tool call through
+        // the sandbox so the audit log actually records something.
+        // MockProvider with canned turns: turn 1 = ToolCall, turn 2 =
+        // text response after the tool result.
+        .with_provider_factory(
+            MockProvider::new()
+                .with_canned_turns(vec![
+                    vec![
+                        StreamEvent::new(StreamEventKind::ToolCallComplete {
+                            id: "tu_1".into(),
+                            name: "read".into(),
+                            input: serde_json::json!({"path": "Cargo.toml"}),
+                        }),
+                        StreamEvent::new(StreamEventKind::Finish {
+                            reason: FinishReason::ToolUse,
+                        }),
+                    ],
+                    vec![
+                        StreamEvent::new(StreamEventKind::TextDelta {
+                            text: "audited the read".into(),
+                        }),
+                        StreamEvent::new(StreamEventKind::Finish {
+                            reason: FinishReason::Stop,
+                        }),
+                    ],
+                ])
+                .into_factory(),
+        )
         .with_sandbox_provider(sandbox)
         .build()?;
 
@@ -98,7 +126,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let session = runtime.create_session(Some(tx))?;
     tokio::spawn(async move {
-        let _ = session.prompt("List the project files.".into()).await;
+        if let Err(e) = session.prompt("List the project files.".into()).await {
+            eprintln!("[error] prompt failed: {e}");
+        }
     });
     while let Some(evt) = rx.recv().await {
         if matches!(evt.kind, AgentEventKind::TurnComplete) {
