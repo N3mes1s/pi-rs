@@ -15,6 +15,7 @@ members = [
     "crates/pi-sandbox-worker",
     "crates/pi-sandbox-rootfs",
     "crates/pi-sdk",
+    "crates/pi-sdk-canary",
 ]
 
 [workspace.package]
@@ -88,6 +89,7 @@ pi-sandbox-worker = { path = "crates/pi-sandbox-worker" }
 pi-sandbox-rootfs = { path = "crates/pi-sandbox-rootfs" }
 pi-orchestrate = { path = "crates/pi-orchestrate" }
 pi-sdk = { path = "crates/pi-sdk" }
+pi-sdk-canary = { path = "crates/pi-sdk-canary" }
 
 [profile.release]
 lto = "fat"
