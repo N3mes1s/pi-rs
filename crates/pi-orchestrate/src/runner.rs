@@ -217,12 +217,24 @@ pub fn run_with(
 
             // Implementer dispatch.
             let implementer = agent_for(DispatchRole::Implementer, m, default_reviewer);
+            // Thread any non-fatal prune warnings into the DISPATCHED
+            // detail even on the successful path, so the operator can
+            // see partial-cleanup failures in state.jsonl without
+            // having to grep runner logs.
+            let dispatched_detail = if prune_warnings.is_empty() {
+                format!("iter={iter} agent={implementer}")
+            } else {
+                format!(
+                    "iter={iter} agent={implementer}; prune warnings: {}",
+                    prune_warnings.join("; ")
+                )
+            };
             emit_event(
                 &mut log,
                 &m.id,
                 if iter == 1 { "PENDING" } else { "REVIEWED" },
                 "DISPATCHED",
-                &format!("iter={iter} agent={implementer}"),
+                &dispatched_detail,
                 &mut events_for,
             )?;
             let imp_outcome = dispatcher
