@@ -91,12 +91,20 @@ pub use pi_agent_core::{
 pub mod build;
 pub use build::{build_runtime_config, BuildConfig};
 
+// ─── Top-level error type (Commit C per RFD 0027 §1) ─────────────
+//
+// One thiserror-based facade so embedders catch one error type instead
+// of `anyhow`-chaining `pi_ai::AiError`, `pi_sandbox::SandboxError`,
+// `pi_tool_types::ToolError`, and `pi_agent_core::RuntimeError` from
+// different call sites.
+pub mod error;
+pub use error::{Error, Result};
+
 // ─── Deferred (specified in RFD 0027 §1, ship in later commits) ───
 //
 // The following surface is part of the SDK contract but lands in
 // follow-up commits per RFD 0027 §Implementation schedule:
 //
-//   - `pi_sdk::Error` + `pi_sdk::Result` — Commit C (top-level error type).
 //   - `pi_sdk::cost::{CostRegistry, estimate_cost_usd}` — Commit E.
 //   - `pi_sdk::mocks::{MockProvider, MockSandboxProvider}` — Commit D
 //     (gated on the `mocks` feature).
