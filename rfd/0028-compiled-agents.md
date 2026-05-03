@@ -1,7 +1,7 @@
 # RFD 0028 — Compiled agents from TOML manifest (meta + split into A/B/C/D)
 
-- **Status:** Draft (v0.3)
-- **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1 + v0.2 passes)
+- **Status:** Draft (v0.4)
+- **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1, v0.2, v0.3 passes)
 - **Created:** 2026-05-03
 - **Implemented:** *(pending sub-commits Commit A–Commit D)*
 
@@ -397,9 +397,12 @@ async fn main() -> std::process::ExitCode {
     });
 
     // create_agent_session returns `(AgentSessionRuntime, AgentSession)`.
-    // The runtime is held alive across `prompt(...).await` — dropping
-    // it would close the provider/event channel. Bind both via tuple
-    // pattern; `_runtime` keeps it alive until end-of-scope.
+    // We bind the runtime to `_runtime` (rather than `_`) for clarity,
+    // but `AgentSession` carries its own `Arc<RuntimeConfig>` clone
+    // (pi-agent-core/src/runtime.rs:649,882) and the provider is built
+    // lazily from `self.cfg` inside `prompt(...)`. Dropping `_runtime`
+    // would NOT close the provider/event channel; the binding is
+    // stylistic, not load-bearing.
     let (_runtime, session) = match create_agent_session(cfg, Some(event_tx)) {
         Ok(rs) => rs,
         Err(_) => return std::process::ExitCode::from(1),
@@ -636,6 +639,16 @@ verify the *split* itself works:
 
 ## Revision history
 
+- **v0.4 (2026-05-03):** rfd-critic v0.3 pass returned
+  `NEEDS_REVISION` solely because the v0.3 `_runtime` lifetime
+  comment claimed dropping `_runtime` would close the
+  provider/event channel — false. `AgentSession` carries its own
+  `Arc<RuntimeConfig>` clone (`runtime.rs:649,882`) and the
+  provider is built lazily inside `prompt(...)`. v0.4 corrects
+  the comment to state the binding is stylistic, not
+  load-bearing. No other findings; critic explicitly stated
+  "that's the only thing blocking READY."
+
 - **v0.3 (2026-05-03):** rfd-critic v0.2 pass returned
   `NEEDS_REVISION` — closed v0.1's 4 critical (3 cleanly, 1
   partially) but introduced 2 new criticals while rewriting the
@@ -656,10 +669,13 @@ verify the *split* itself works:
     not on the streamed event surface.
   - **N2 (`create_agent_session` returns a tuple):** Verified
     the real signature is `Result<(AgentSessionRuntime,
-    AgentSession)>`. Template now binds via `let (_runtime,
-    session) = ...;` with a comment explaining `_runtime` must
-    stay alive through `prompt(...).await` so the provider /
-    event channel doesn't close.
+    AgentSession)>`. Template binds via `let (_runtime,
+    session) = ...;`. (v0.3 had a false rationale claiming
+    `_runtime` must stay alive to keep the channel open;
+    rfd-critic v0.3 caught it — `AgentSession` carries its own
+    `Arc<RuntimeConfig>` clone at `runtime.rs:649,882`, so
+    dropping the runtime is harmless. v0.4 corrects the comment
+    to "binding is stylistic, not load-bearing.")
   - **N3 (`§A`/`§B` collides loosely with `Commit A`/`Commit B`
     style RFD 0023 uses):** Renamed all `§A`/`§B`/`§C`/`§D` →
     `Commit A`/`Commit B`/`Commit C`/`Commit D` for vocabulary
