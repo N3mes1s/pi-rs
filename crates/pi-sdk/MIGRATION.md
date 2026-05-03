@@ -19,7 +19,35 @@ the in-flight working tree and the most recent published version
 
 ## [Unreleased]
 
-No breaking changes since 0.1.0 (not yet published).
+No breaking changes since 0.1.0 (not yet published). Several
+additive APIs are available for embedders to migrate to ahead of
+the eventual breaking changes documented in the "0.x → 1.0" section
+below:
+
+- **`Settings::builder()` (polish-8)** — additive. The breaking
+  `#[non_exhaustive]` mark on `Settings` is deferred to 1.0; the
+  builder is the migration target. Embedders constructing via
+  struct literal today (`Settings { provider: "x".into(),
+  ..Settings::default() }`) can switch to `Settings::builder().
+  provider("x").build()` now to avoid the migration churn at 1.0.
+- **`AuthStorage::from_env_explicit_iter` (polish-2)** — additive.
+  IntoIterator-shaped variant of `from_env_explicit`. Embedders
+  building allowlists dynamically (`Vec<(String, String)>`) call
+  this; the original slice-based form continues to work.
+- **`ConfigBuilder::cwd_from_env()` + `build()`-time default to
+  `current_dir()` (polish)** — additive ergonomics. `.cwd(path)`
+  call sites still work; if omitted, defaults to current_dir.
+- **`RuntimeConfig::with_max_session_tokens / with_max_tool_
+  invocations_per_turn / with_max_recursion` (polish-6)** —
+  additive. Post-build setters mirror the builder for the
+  `RuntimeConfig::builder().build()?.with_max_*(N)` chain
+  pattern. NOT for `quick_start` (which returns
+  `AgentSessionRuntime`, not a config — embedders bumping caps
+  after `quick_start` should rebuild via `RuntimeConfig::builder()`
+  directly).
+- **`Pricing::cost_for(usage)` (polish-9)** — additive. Compute
+  USD cost without a CostRegistry lookup; same arithmetic as
+  `estimate_cost_usd`. Useful for hot loops.
 
 ---
 
@@ -84,7 +112,38 @@ is removed; `with_unsafe_extras()` is the only name. The semantics
 + let tools = ToolRegistry::with_unsafe_extras();
 ```
 
-### 4. Sandbox launcher traits leave `*-unstable` features
+### 4. `Settings { ..Settings::default() }` → `Settings::builder()`
+
+`Settings` becomes `#[non_exhaustive]` at 1.0 per RFD §3 blanket
+policy. The struct-literal-with-spread pattern stops compiling
+from external crates:
+
+```rust
+- let s = Settings {
+-     provider: "anthropic".into(),
+-     model: "claude-haiku-4-5-20251001".into(),
+-     ..Settings::default()
+- };
++ let s = Settings::builder()
++     .provider("anthropic")
++     .model("claude-haiku-4-5-20251001")
++     .build();
+```
+
+For fields not surfaced as named setters (LSP, monitor, evolve,
+task overrides), use the `with` escape hatch:
+
+```rust
+let s = Settings::builder()
+    .provider("anthropic")
+    .with(|s| s.evolve.enabled = false)
+    .build();
+```
+
+The builder ships in 0.x (polish-8) so embedders can migrate
+ahead of the 1.0 freeze.
+
+### 5. Sandbox launcher traits leave `*-unstable` features
 
 In 0.x (and 1.0 + 1.1) the microvm + remote sandbox launcher traits
 ship behind:
@@ -116,6 +175,9 @@ The `-unstable`-suffixed features stay as deprecated aliases for
 | `ToolGate::approve(name, input)`           | `ToolGate::approve(ctx, name, input)`            | 0.1.0 (breaking; pre-1.0 ok per §3)   |
 | `ToolRegistry::register(tool)` returns `()` | returns `Result<(), DuplicateName>`              | 0.1.0 (breaking; pre-1.0 ok per §3)   |
 | `pi_sandbox_rootfs::ROOTFS_VERSION`        | `pi_sandbox::microvm::ROOTFS_VERSION`            | 0.1.0    |
+| `Settings { ..Settings::default() }` literal | `Settings::builder().<...>.build()`            | 1.0 (builder ships in 0.x as additive prerequisite, polish-8) |
+| `AuthStorage::from_env_explicit(&[...])` slice form | unchanged; or `from_env_explicit_iter(iter)` for dynamic allowlists | 0.1.0 (polish-2) |
+| `RuntimeConfig::builder().build()?` then mutate `cfg.max_session_tokens = N` | `.build()?.with_max_session_tokens(N)` (post-build setter, polish-6) | 0.1.0 |
 
 ## See also
 

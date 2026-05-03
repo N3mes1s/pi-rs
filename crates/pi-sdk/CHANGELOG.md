@@ -42,6 +42,15 @@ versioning follows [SemVer](https://semver.org/) per RFD 0027 §3.
 - `AuthStorage::from_env_explicit_iter` for IntoIterator-shaped allowlists (polish-2, pass-3 #6).
 - Display smoke tests for the four future-additive `Error` variants (polish, pass-1 #12).
 - Extension-collision panic message names BOTH colliding extensions, not just the tool (polish-2, pass-3 #5).
+- `MIGRATION.md` scaffold + sandbox network-omission doc on `LocalProcessProvider::with_readonly_defaults` (polish-3, pass-1 #11).
+- Link to `MIGRATION.md` / `COMPATIBILITY.md` / `CHANGELOG.md` from the README "See also" section (polish-4).
+- `tests/end_to_end_safe_path.rs` integration test: asserts `quick_start` produces a runtime with empty AuthStorage + readonly tool surface + sandbox provider wired (polish-5; renamed in polish-7 per pass-8 NIT #1).
+- `RuntimeConfig::with_max_session_tokens / with_max_tool_invocations_per_turn / with_max_recursion` post-build setters (polish-6, mirror of `ConfigBuilder`); doc-comments call out last-write-wins composition vs the builder (pass-9 NIT #2) and clarify they do NOT compose with `quick_start` (pass-9 NON-BLOCKING #1).
+- `tests/no_features_smoke.rs` — 5 default-features tests covering the surface that ships when `mocks` is OFF; symbol-existence sweep over ~30 re-exports including the 6 concrete provider types and the dyn-trait surfaces (polish-7; expanded in polish-9 per pass-9 NIT #3). Top-of-file EDITORS POLICY warns against importing mocks-gated symbols (pass-9 NIT #4).
+- `DuplicateName` re-exported through pi-sdk (was reachable only via pi-tools).
+- Strengthened `rootfs_version_current_matches_inlined_const` test: also asserts `cache::ROOTFS_VERSION == microvm::ROOTFS_VERSION` so a future literal-duplicate regression fails immediately (review-feedback-8 + pass-7 NIT #2).
+- `Settings::builder()` + `SettingsBuilder` — fluent builder for the most-set fields (provider/model/thinking/compact_threshold/theme/route/no_tools) plus a `with(impl FnOnce(&mut Settings))` escape hatch for the long tail. Additive prerequisite for the eventual `#[non_exhaustive]` mark on Settings (polish-8, pass-1 #8 partial).
+- `Pricing::cost_for(usage) -> f64` — compute USD cost directly without a CostRegistry lookup. Same arithmetic as `estimate_cost_usd`; useful for hot loops where the embedder already has a Pricing in hand (polish-9).
 
 ### Removed
 - `pi_coding_agent::sdk` deprecated shim (Commit K). Embedders use `pi-sdk` directly. The shim was added in Commit A as the back-compat bridge during the SDK extraction; its removal closes the SDK-extraction track.
