@@ -1,0 +1,25 @@
+[package]
+name = "pi-build"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Compile a TOML manifest into a standalone Rust binary embedding pi-sdk (RFD 0028 Commit A — manifest schema + validate verb)"
+publish = false   # v1 of pi-build ships from workspace via `cargo install --path crates/pi-build`; promoted to crates.io with pi-sdk 0.2 per RFD 0028 Open Question #1.
+
+[lib]
+name = "pi_build"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pi-build"
+path = "src/bin/pi-build.rs"
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+semver.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]

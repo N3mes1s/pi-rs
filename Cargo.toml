@@ -16,6 +16,7 @@ members = [
     "crates/pi-sandbox-rootfs",
     "crates/pi-sdk",
     "crates/pi-sdk-canary",
+    "crates/pi-build",
 ]
 
 [workspace.package]
@@ -69,6 +70,7 @@ unicode-segmentation = "1"
 serde_yaml = "0.9"
 tiktoken-rs = "0.5"
 toml = "0.8"
+semver = "1"
 include_dir = "0.7"
 textwrap = "0.16"
 pulldown-cmark = "0.9"
@@ -96,6 +98,7 @@ pi-sandbox-rootfs = { path = "crates/pi-sandbox-rootfs", version = "0.1.0" }
 pi-orchestrate = { path = "crates/pi-orchestrate", version = "0.1.0" }
 pi-sdk = { path = "crates/pi-sdk", version = "0.1.0" }
 pi-sdk-canary = { path = "crates/pi-sdk-canary", version = "0.1.0" }
+pi-build = { path = "crates/pi-build", version = "0.1.0" }
 
 [profile.release]
 lto = "fat"
