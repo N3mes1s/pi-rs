@@ -33,9 +33,25 @@ impl LocalProcessProvider {
     }
 
     /// Create a provider backed by the default built-in tools
-    /// (`read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`).
+    /// (`read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`,
+    /// `web_search`).
     pub fn with_defaults() -> Self {
         Self::new(ToolRegistry::with_extras())
+    }
+
+    /// Create a provider backed by the **read-only** built-in tools
+    /// (`read`, `grep`, `find`, `ls`). No shell, no fs mutation, no
+    /// network. Per RFD 0027 §4.5 #12 (Hardening H7): the
+    /// safe-by-default constructor for embedders that don't yet have
+    /// a microvm sandbox configured.
+    ///
+    /// Note: this provider still runs in-process; the safety guarantee
+    /// is that the registered tool surface cannot mutate the filesystem
+    /// or shell out, NOT that arbitrary code in the agent process is
+    /// isolated. For real isolation use `MicroVmProvider`
+    /// (RFD 0023) or `RemoteProvider` (RFD 0026) once those land.
+    pub fn with_readonly_defaults() -> Self {
+        Self::new(ToolRegistry::with_readonly_extras())
     }
 }
 

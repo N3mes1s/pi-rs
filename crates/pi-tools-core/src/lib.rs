@@ -82,6 +82,34 @@ impl ToolRegistry {
         r
     }
 
+    /// Read-only inspection tool set: `read`, `grep`, `find`, `ls`. No
+    /// shell, no filesystem mutation. Per RFD 0027 §4.5 #12 (Hardening
+    /// H7): the safe-by-default tool set for embedders.
+    pub fn with_readonly_extras() -> Self {
+        let mut r = Self::default();
+        r.register(Arc::new(read::ReadTool));
+        r.register(Arc::new(grep::GrepTool));
+        r.register(Arc::new(find::FindTool));
+        r.register(Arc::new(ls::LsTool));
+        r
+    }
+
+    /// Full tool set including `bash` (code execution) and the
+    /// mutation tools (`write`, `edit`). Per RFD 0027 §4.5 #12: the
+    /// name itself is the safety signal — production callers should
+    /// prefer `with_readonly_extras()` or build the registry
+    /// explicitly via `new()` + `register()`.
+    ///
+    /// `with_unsafe_extras()` is the renamed-for-safety alias of
+    /// `with_extras()`. Both return the identical tool set today;
+    /// pi-rs's own binary continues to use `with_extras()` and
+    /// `with_defaults()`. Per RFD 0027 §3 deprecation policy, the
+    /// older names live until SDK 1.0+4 MINOR releases (~6 months
+    /// past 1.0).
+    pub fn with_unsafe_extras() -> Self {
+        Self::with_extras()
+    }
+
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.inner.insert(tool.spec().name, tool);
     }

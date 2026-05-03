@@ -47,6 +47,24 @@ impl ToolRegistry {
         r
     }
 
+    /// Read-only inspection tool set: `read`, `grep`, `find`, `ls`. No
+    /// shell, no filesystem mutation, no network. Per RFD 0027 §4.5 #12
+    /// (Hardening H7): the safe-by-default tool set for SDK embedders.
+    pub fn with_readonly_extras() -> Self {
+        Self(pi_tools_core::ToolRegistry::with_readonly_extras())
+    }
+
+    /// Full tool set including `bash` (code execution), mutation
+    /// tools (`write`, `edit`), and `web_search`. The name itself is
+    /// the safety signal — production callers should prefer
+    /// `with_readonly_extras()` or build the registry explicitly.
+    ///
+    /// `with_unsafe_extras()` is the renamed-for-safety alias of
+    /// `with_extras()`; both return the identical tool set today.
+    pub fn with_unsafe_extras() -> Self {
+        Self::with_extras()
+    }
+
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.0.register(tool);
     }

@@ -89,7 +89,7 @@ pub use pi_agent_core::{
 // at 1.0 it becomes a deprecated wrapper around `RuntimeConfig::builder()`
 // (which lands in Commit B per RFD 0027 §4).
 pub mod build;
-pub use build::{build_runtime_config, BuildConfig};
+pub use build::{build_runtime_config, quick_start, BuildConfig};
 
 // ─── Top-level error type (Commit C per RFD 0027 §1) ─────────────
 //
