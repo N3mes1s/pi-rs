@@ -38,7 +38,7 @@
 //! second invocation). Each is on the v2 roadmap in RFD 0021.
 
 use crate::dispatch::{agent_for, Dispatch, DispatchRole};
-use crate::merge::{cherry_pick_to_target, git_checkout, rev_parse, MergeOutcome};
+use crate::merge::{cherry_pick_to_target, git_checkout, prune_stale_worktrees, rev_parse, MergeOutcome};
 use crate::plan::topological_order;
 use crate::schema::Campaign;
 use crate::verdict::{parse_verdict, MergeReadiness};
@@ -189,8 +189,14 @@ pub fn run_with(
             // the previous milestone's cherry-pick), so the
             // implementer reads the wrong files and the reviewer
             // diffs the wrong refs.
-            let (prune_warnings, checkout_result) = git_checkout(repo_root, &m.branch);
-            if let Err(e) = checkout_result {
+            //
+            // Defensive cleanup: prune any stale worktrees that have
+            // m.branch checked out before we attempt the checkout
+            // (observed on 2026-05-04 in sdk-bedrock-azure-streaming-timeout).
+            // Non-fatal prune warnings are threaded into the state.jsonl
+            // detail so the operator can diagnose partial-cleanup failures.
+            let prune_warnings = prune_stale_worktrees(repo_root, &m.branch);
+            if let Err(e) = git_checkout(repo_root, &m.branch) {
                 // Build a detail string that includes any non-fatal
                 // prune warnings alongside the checkout error, so the
                 // operator can diagnose partial-cleanup failures from

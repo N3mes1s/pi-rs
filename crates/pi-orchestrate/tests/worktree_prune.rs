@@ -8,9 +8,11 @@
 //!   git refuses because the branch is already checked out in another
 //!   worktree.
 //!
-//! The fix: `git_checkout` now calls `prune_stale_worktrees` first,
-//! which removes any registered worktrees that have the target branch
-//! checked out before the actual checkout is attempted.
+//! The fix: the runner now calls `prune_stale_worktrees` immediately before
+//! `git_checkout`, which removes any registered worktrees that have the
+//! target branch checked out before the actual checkout is attempted.
+//! `git_checkout` itself preserves its original `std::io::Result<()>`
+//! signature; warning plumbing is done at the call site (runner.rs).
 
 use pi_orchestrate::{git_checkout, prune_stale_worktrees};
 use std::path::Path;
@@ -103,17 +105,21 @@ fn prune_removes_stale_worktree_and_checkout_succeeds() {
         "Expected no warnings from prune_stale_worktrees, got: {warnings:?}"
     );
 
-    // The stale worktree directory's git metadata should be cleaned up.
-    // Now checkout should succeed.
-    let (_warnings, result) = git_checkout(repo, "feat");
-    result.expect("git_checkout must succeed after prune");
+    // Now checkout should succeed (git_checkout preserves its original
+    // std::io::Result<()> signature; the runner calls prune_stale_worktrees
+    // separately and threads warnings into state.jsonl detail).
+    git_checkout(repo, "feat").expect("git_checkout must succeed after prune");
     assert_eq!(current_branch(repo), "feat");
 }
 
-// ─── test: full git_checkout wrapper removes stale worktree ──────────────────
+// ─── test: caller pattern — prune then checkout removes stale worktree ───────
+//
+// This mirrors what runner::run_with does: call prune_stale_worktrees first,
+// collect warnings, then call git_checkout. The stale worktree is gone and the
+// branch is checked out in the main repo.
 
 #[test]
-fn git_checkout_succeeds_when_stale_worktree_exists() {
+fn prune_then_git_checkout_succeeds_when_stale_worktree_exists() {
     let repo_dir = tempdir().unwrap();
     let repo = repo_dir.path();
     make_repo_with_branch(repo, "feat");
@@ -132,15 +138,13 @@ fn git_checkout_succeeds_when_stale_worktree_exists() {
         String::from_utf8_lossy(&wt_out.stderr)
     );
 
-    // git_checkout should transparently clean up the worktree and
-    // succeed, rather than returning an error.
-    let (warnings, result) =
-        git_checkout(repo, "feat");
-    result.expect("git_checkout should clean up stale worktree and succeed");
+    // Mirror the runner call pattern: prune first, then checkout.
+    let warnings = prune_stale_worktrees(repo, "feat");
     assert!(
         warnings.is_empty(),
         "Expected no prune warnings, got: {warnings:?}"
     );
+    git_checkout(repo, "feat").expect("git_checkout should succeed after prune_stale_worktrees");
     assert_eq!(current_branch(repo), "feat", "HEAD must be on feat after checkout");
 
     // The stale worktree path still exists on disk (we hold a TempDir for it)

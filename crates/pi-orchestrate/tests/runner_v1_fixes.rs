@@ -565,14 +565,18 @@ assignment = "do alpha"
 /// event detail — i.e. the formatting `"iter={} agent={}; prune warnings: {}"` 
 /// is exercised when warnings are non-empty.
 ///
-/// We do this by directly calling `git_checkout` in a scenario where
+/// We do this by directly calling `prune_stale_worktrees` in a scenario where
 /// `git worktree remove --force` fails (registry entry made read-only),
 /// capturing the returned warnings, and asserting:
 ///   (a) warnings is non-empty
 ///   (b) the constructed detail string has the expected shape
+///
+/// Note: `git_checkout` preserves its original `std::io::Result<()>` signature;
+/// the runner calls `prune_stale_worktrees` separately and threads warnings into
+/// state.jsonl detail fields. This test validates that pattern.
 #[test]
 fn d1_prune_warnings_format_in_dispatched_detail() {
-    use pi_orchestrate::git_checkout;
+    use pi_orchestrate::prune_stale_worktrees;
 
     let repo_dir = tempdir().unwrap();
     let repo = repo_dir.path();
@@ -627,7 +631,7 @@ fn d1_prune_warnings_format_in_dispatched_detail() {
 
     // git_checkout must return warnings (from the failed remove) even
     // though the checkout itself may fail too.
-    let (warnings, _checkout_result) = git_checkout(repo, "feat");
+    let warnings = prune_stale_worktrees(repo, "feat");
 
     // Restore permissions so tempdir cleanup doesn't panic.
     std::fs::set_permissions(

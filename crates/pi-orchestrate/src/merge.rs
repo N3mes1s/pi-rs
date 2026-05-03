@@ -210,36 +210,22 @@ pub fn prune_stale_worktrees(repo_root: &Path, branch: &str) -> Vec<String> {
 /// `m.branch` before dispatch, so post-merge milestones executed on
 /// `target_branch`.
 ///
-/// Before performing the checkout, calls [`prune_stale_worktrees`] to
-/// remove any registered worktrees that have `branch` checked out —
-/// this is the defensive fix for the race where a reviewer subprocess
-/// leaves a worktree behind on the very branch we're about to check
-/// out (observed on 2026-05-04 in `sdk-bedrock-azure-streaming-timeout`).
-///
-/// Returns `(warnings, result)` where `warnings` is the (possibly empty)
-/// list of non-fatal messages from the prune step and `result` is `Ok(())`
-/// on success or an `Err` if the checkout itself failed. Callers are
-/// expected to surface any warnings in their state.jsonl detail so the
-/// operator can see partial-cleanup failures.
-pub fn git_checkout(repo_root: &Path, branch: &str) -> (Vec<String>, std::io::Result<()>) {
-    // Defensively clean up stale worktrees before we attempt the checkout.
-    let warnings = prune_stale_worktrees(repo_root, branch);
-
-    let result = (|| {
-        let out = Command::new("git")
-            .args(["checkout", "-q", branch])
-            .current_dir(repo_root)
-            .output()?;
-        if !out.status.success() {
-            return Err(std::io::Error::other(format!(
-                "git checkout {branch} failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-        Ok(())
-    })();
-
-    (warnings, result)
+/// **Note:** callers that need the defensive stale-worktree cleanup
+/// should call [`prune_stale_worktrees`] immediately before this
+/// function and surface any returned warnings in their state detail.
+/// The runner (`runner::run_with`) does this already.
+pub fn git_checkout(repo_root: &Path, branch: &str) -> std::io::Result<()> {
+    let out = Command::new("git")
+        .args(["checkout", "-q", branch])
+        .current_dir(repo_root)
+        .output()?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(format!(
+            "git checkout {branch} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
 }
 
 /// Resolve `git rev-parse <ref>` in the given repo.
