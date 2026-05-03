@@ -1,14 +1,8 @@
 //! `quick_start` — first-touch convenience for embedders.
 //!
-//! Per RFD 0027 §1 + §4.5 #8 (Hardening H7) + the polish-15 cleanup:
-//! this module used to also expose `BuildConfig` + `build_runtime_config`
-//! as a struct-literal-shaped alternative to `RuntimeConfig::builder()`.
-//! That surface was the seed of the SDK extraction (originally
-//! `pi_coding_agent::sdk::BuildConfig`); when Commit K removed the
-//! pi_coding_agent::sdk shim it became pure overlap with the canonical
-//! builder, and per the user's pre-publish "remove migration cruft"
-//! direction it was deleted. Embedders use `RuntimeConfig::builder()`.
-//! `quick_start` survives because it's a genuinely-useful one-liner.
+//! Wires the safe defaults (in_memory auth, readonly tools, in-process
+//! sandbox) per RFD 0027 §1 + §4.5 #8. Production embedders construct
+//! via `RuntimeConfig::builder()` directly.
 
 use crate::{
     AgentSessionRuntime, AuthStorage, Error, LocalProcessProvider, ModelRegistry,

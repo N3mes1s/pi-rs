@@ -22,8 +22,9 @@ use pi_tools::{ToolContext, ToolRegistry};
 
 use crate::provider::{SandboxError, SandboxExecution, SandboxProvider};
 
-/// Local-process sandbox provider (no external process boundary, but
-/// scoped to a private tmpdir per execution context).
+/// In-process "sandbox" provider — runs every tool inline in the
+/// agent process, in `ctx.cwd` (no per-invocation tmpdir, no namespace
+/// boundary). See the module-level docs for the trust-model caveats.
 ///
 /// The `ToolRegistry` is held by reference-count and must contain the
 /// same tools the agent would use inline. The caller (runtime config)

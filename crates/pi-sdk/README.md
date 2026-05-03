@@ -118,7 +118,7 @@ The README tells you the safe path; this checklist tells you what to verify befo
 
 ### Authentication & secrets
 
-- [ ] **Use `AuthStorage::from_env_explicit([("anthropic", "MY_TENANT_ANTHROPIC_KEY"), ...])` to scan env vars in production** so the allowlist is auditable in code-review. (The unsafe `from_env()` slurp-all-17-vars shape was removed pre-publish per polish-12; only the explicit allowlist form survives.)
+- [ ] **Use `AuthStorage::from_env_explicit([("anthropic", "MY_TENANT_ANTHROPIC_KEY"), ...])` to scan env vars in production** so the allowlist is auditable in code-review. There is no env-slurp-all constructor; only the explicit allowlist form is exposed.
 - [ ] If running multi-tenant, use `AuthStorage::scoped(provider_filter)` to deny cross-tenant credential bleed.
 - [ ] If credentials should not change after init, `AuthStorage::sealed()`.
 - [ ] On-disk auth files are written with `0o600` + atomic rename; verify your filesystem honors POSIX modes (NFS sometimes doesn't).

@@ -59,7 +59,7 @@
 
 // ─── Provider / model ─────────────────────────────────────────────
 pub use pi_ai::{
-    AnthropicProvider, AuthMethod, AuthStorage, AzureOpenAiProvider,
+    AiError, AnthropicProvider, AuthMethod, AuthStorage, AzureOpenAiProvider,
     BedrockAnthropicProvider, ContentBlock, EventStream, FinishReason,
     GenerateRequest, GenerateResponse, GoogleProvider, Message, ModelInfo,
     ModelRegistry, OpenAiCompatProvider, OpenAiProvider, Provider,
@@ -88,10 +88,10 @@ pub use pi_agent_core::{
     create_agent_session, default_system_prompt, AgentEvent, AgentEventKind,
     AgentSession, AgentSessionRuntime, Compactor, ConfigBuilder, ConfigError,
     ContextFile, DefaultProviderFactory, EventSender, EvolveSettings, GateContext,
-    MonitorSettings, ProviderFactory, QueueMode, RouteMode, RuntimeConfig,
-    RuntimeError, SessionEntry, SessionEntryKind, SessionManager, SessionMeta,
-    SessionTree, Settings, SettingsBuilder, StreamInterceptor, ThinkingSetting,
-    ToolGate, ToolGateOutcome, WireSerializer,
+    InterceptAction, MonitorSettings, OutcomeSource, ProviderFactory, QueueMode,
+    RouteMode, RuntimeConfig, RuntimeError, SessionEntry, SessionEntryKind,
+    SessionManager, SessionMeta, SessionTree, Settings, SettingsBuilder,
+    StreamInterceptor, ThinkingSetting, ToolGate, ToolGateOutcome, WireSerializer,
 };
 
 // ─── quick_start convenience ──────────────────────────────────────

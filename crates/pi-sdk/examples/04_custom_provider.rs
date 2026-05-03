@@ -17,10 +17,10 @@
 
 use async_trait::async_trait;
 use pi_sdk::{
-    AgentEventKind, AgentSessionRuntime, AuthMethod, AuthStorage, EventStream, FinishReason,
-    GenerateRequest, ModelInfo, ModelRegistry, Provider, ProviderConfig, ProviderFactory,
-    ProviderKind, RuntimeConfig, RuntimeError, SessionManager, Settings, StreamEvent,
-    StreamEventKind, ToolRegistry,
+    AgentEventKind, AgentSessionRuntime, AiError, AuthMethod, AuthStorage, EventStream,
+    FinishReason, GenerateRequest, ModelInfo, ModelRegistry, Provider, ProviderConfig,
+    ProviderFactory, ProviderKind, RuntimeConfig, RuntimeError, SessionManager, Settings,
+    StreamEvent, StreamEventKind, ToolRegistry,
 };
 use std::sync::Arc;
 
@@ -53,7 +53,7 @@ impl Provider for EchoProvider {
         &self,
         _req: GenerateRequest,
         _model: &ModelInfo,
-    ) -> Result<EventStream, pi_ai::AiError> {
+    ) -> Result<EventStream, AiError> {
         // Real impl: open an HTTP/SSE connection, parse SSE chunks,
         // map each to a StreamEvent. For this example we yield one
         // TextDelta + one Finish.
