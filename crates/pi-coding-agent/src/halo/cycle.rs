@@ -1081,8 +1081,10 @@ fn step_evolve_tick(ctx: &mut CycleCtx) -> StepResult {
     let mut settings = Settings::load(&global);
     settings.merge_project(&project);
 
-    // Auth: file then env.
+    // Auth: file then env. Per RFD 0027 §4.5 #8: binary uses
+    // deprecated from_env() intentionally (own-machine trust model).
     let auth = AuthStorage::open(auth_path()).unwrap_or_else(|_| AuthStorage::in_memory());
+    #[allow(deprecated)]
     let env = AuthStorage::from_env();
     for (p, _) in AuthStorage::ENV_KEYS {
         if let Some(m) = env.get(p) {

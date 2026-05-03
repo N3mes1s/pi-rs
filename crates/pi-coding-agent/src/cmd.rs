@@ -81,8 +81,10 @@ pub async fn run_internal_evolve_tick() -> anyhow::Result<()> {
     let mut settings = Settings::load(&global);
     settings.merge_project(&project);
 
-    // Auth: file then env.
+    // Auth: file then env. Per RFD 0027 §4.5 #8: the binary scans
+    // every env var (own-machine trust model); SDK uses from_env_explicit.
     let auth = AuthStorage::open(auth_path()).unwrap_or_else(|_| AuthStorage::in_memory());
+    #[allow(deprecated)]
     let env = AuthStorage::from_env();
     for (p, _) in AuthStorage::ENV_KEYS {
         if let Some(m) = env.get(p) {
@@ -494,8 +496,10 @@ pub async fn run_refresh_models() -> anyhow::Result<()> {
     use crate::context::{agent_dir, auth_path};
     use pi_ai::{discovered_cache_path, refresh_and_save, AuthStorage, ModelRegistry};
 
-    // Load creds: file first, env second (env wins).
+    // Load creds: file first, env second (env wins). Per RFD 0027 §4.5 #8:
+    // binary uses the deprecated from_env() intentionally.
     let auth = AuthStorage::open(auth_path()).unwrap_or_else(|_| AuthStorage::in_memory());
+    #[allow(deprecated)]
     let env = AuthStorage::from_env();
     for (p, _) in AuthStorage::ENV_KEYS {
         if let Some(m) = env.get(p) {

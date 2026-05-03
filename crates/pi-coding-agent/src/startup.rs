@@ -99,7 +99,11 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
 
     // 3. auth.
     let auth = AuthStorage::open(auth_path()).unwrap_or_else(|_| AuthStorage::in_memory());
-    // overlay env keys (env wins for fresh shells).
+    // overlay env keys (env wins for fresh shells). Per RFD 0027 §4.5 #8
+    // the binary intentionally scans every supported env var (matches
+    // the user's own-machine trust model). The SDK exposes
+    // `from_env_explicit` for the embedder case.
+    #[allow(deprecated)]
     let env = AuthStorage::from_env();
     for (p, _) in AuthStorage::ENV_KEYS {
         if let Some(m) = env.get(p) {

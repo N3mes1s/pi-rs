@@ -40,6 +40,12 @@ pub struct BuildConfig {
 
 impl Default for BuildConfig {
     fn default() -> Self {
+        // Deprecated `from_env()` retained here for back-compat (RFD
+        // 0027 §3 deprecation policy: lives until 1.0+4 MINOR).
+        // Embedders should prefer `quick_start` (Hardening §4.5 #8)
+        // or build via `RuntimeConfig::builder()` with
+        // `AuthStorage::from_env_explicit(allowlist)`.
+        #[allow(deprecated)]
         let auth = AuthStorage::from_env();
         let registry = ModelRegistry::new(auth.clone());
         Self {
