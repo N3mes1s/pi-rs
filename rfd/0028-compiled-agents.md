@@ -1,6 +1,6 @@
 # RFD 0028 — Compiled agents from TOML manifest (meta + split into A/B/C/D)
 
-- **Status:** Draft (v0.9; meta READY in v0.4, Commit A READY in v0.5, Commit B READY in v0.8, Commit C v1 spec pending critic)
+- **Status:** Draft (v0.10; meta READY in v0.4, Commit A READY in v0.5, Commit B READY in v0.8, Commit C READY in v0.9, Commit D v1 spec pending critic)
 - **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1, v0.2, v0.3, Commit A v1, Commit A v0.5, Commit B v1, Commit B v0.7 passes)
 - **Created:** 2026-05-03
 - **Implemented:** *(pending sub-commits Commit A–Commit D)*
@@ -1230,10 +1230,12 @@ pi-build <agent.toml> [--out DIR] [--build] [--target T]
 Implementation detail: pi-build spawns cargo via
 `tokio::process::Command::spawn` (Commit B already takes a
 tokio dep), inheriting the operator's `PATH`, `CARGO_HOME`,
-`RUSTUP_HOME`. Pi-build does NOT inject any cargo flags
-beyond what the manifest's profile + the operator's `--target`
-asks for. **No hidden codegen flags, no `RUSTFLAGS` injection,
-no `-C strip`** beyond what's in the generated Cargo.toml.
+`RUSTUP_HOME`. Pi-build does NOT inject codegen flags or
+`RUSTFLAGS` or `-C` overrides; profile tuning lives in the
+generated `Cargo.toml` (B.4) where the operator can audit
++ override it. The ONLY flag pi-build adds beyond what the
+operator passed is `--manifest-path <out>/Cargo.toml`, which
+points cargo at the generated tree.
 
 ##### C.3 — Operator artifacts
 
@@ -1272,6 +1274,27 @@ Reserved for Commit C v2's `pi-build verify <binary>` verb
 diffs against the binary's embedded source). v1 just writes
 the file; nothing reads it yet.
 
+`pi_sdk_version_pin` is intentionally NOT a separate field —
+the caret-pin in the generated `Cargo.toml` is a deterministic
+function of `(manifest_sha256, pi_build_version)` per B.4, so
+Commit C v2's `verify` reconstructs it rather than trusting
+the lockfile. Two-source truth is a stale-data magnet.
+
+##### C.3.1 — `--out` semantics
+
+| State of `--out` directory at codegen time | Behavior |
+|---|---|
+| Doesn't exist | pi-build creates it (incl. parents); writes the artifact tree. |
+| Exists, empty | Writes the artifact tree directly. |
+| Exists, non-empty, no `--force` | pi-build refuses with exit 73 (`EX_CANTCREAT`) and stderr `<out>: directory not empty; pass --force to overwrite`. |
+| Exists, non-empty, `--force` | **Wipe-then-write**: pi-build `std::fs::remove_dir_all(<out>)` followed by re-creation + write. Atomic from the operator's perspective: either the new tree replaces the old completely, or the old is preserved (the `remove_dir_all` failure path leaves the old tree intact). |
+
+The wipe-then-write semantics matter because cargo's
+`target/` directory accumulates artifacts. An "overwrite
+in place" model would leave stale `target/` entries from a
+prior generation, defeating the determinism story (a
+follow-up `cargo build` would link against stale objects).
+
 ##### C.4 — Cross-compile matrix (informational)
 
 pi-build has zero opinion on which targets the operator builds
@@ -1299,8 +1322,11 @@ Default `--release` with the B.4 Cargo.toml's `lto = "thin"`
 
 - `lto = "thin"` — LLVM thin LTO: ~10-30% smaller binary, ~5%
   faster runtime, ~50% longer link step than no LTO. Choosing
-  `"thin"` over `"fat"` keeps the build under ~3 minutes on a
-  typical laptop.
+  `"thin"` over `"fat"` keeps incremental rebuilds under
+  ~3 minutes on a typical laptop. The cold first build (with
+  the full pi-sdk + tokio + serde transitive graph) is closer
+  to 4-6 minutes; cargo's incremental cache amortises
+  subsequent builds.
 - `strip = true` — drops debug symbols. Saves 5-30 MB
   depending on dependency graph depth. Operators wanting
   symbols for crash analysis use `--debug` or a custom
@@ -1367,6 +1393,21 @@ Out of scope (whole 0028 series, future RFDs):
   pi-build invokes it with EXACTLY the flags the operator
   asked for plus `--manifest-path <out>/Cargo.toml`. No
   injected `RUSTFLAGS`, no `-C` overrides.
+- **`--target` not installed:** `pi-build agent.toml --target
+  nonexistent-triple-unknown --build` exits 75 (`EX_TEMPFAIL`);
+  stderr surfaces cargo's `error[E0463]` / `could not find
+  target` line verbatim. Pi-build does NOT pre-flight via
+  `rustup target list --installed` (would break the
+  "no toolchain management" promise of C.2).
+- **cargo not on PATH:** invoke pi-build with
+  `PATH=/var/empty --build`; tokio's `Command::spawn` returns
+  `io::ErrorKind::NotFound` synchronously. Pi-build maps to
+  exit 75 with stderr `pi-build: cargo not found on PATH`.
+  Spawn-time error is NOT propagated as a panic or generic
+  exit 1.
+- **`--out` semantics matrix** (per C.3.1): one test per row
+  of the table, asserting the documented exit code +
+  filesystem outcome for each of the four states.
 
 Commit C's v1 deliverable: build-related flag implementations
 in `pi-build` (cargo subprocess + flag forwarding) + the
@@ -1375,49 +1416,279 @@ in `pi-build` (cargo subprocess + flag forwarding) + the
 
 #### Commit D — Halo integration
 
-Halo (RFD 0025) is pi-rs's autonomous-loop supervisor. Today
-halo invokes `pi --orchestrate` as a subprocess (verified
-RFD 0025 Commit Composition with pi-orchestrate, lines 247-258).
+##### D.1 — Background
 
-Commit D adds a **second** subprocess shape halo knows how to spawn —
-a compiled-agent binary — using the same subprocess machinery,
-NOT a new "cycle-kind plug-in" surface. (rfd-critic v0.1 noted
-that halo today has no cycle-kind dispatch; inventing one
-would balloon the LoC estimate and re-architect halo.)
+Halo (RFD 0025) is pi-rs's autonomous-loop supervisor. Today
+each halo cycle invokes `pi --orchestrate` as a subprocess
+(verified RFD 0025 §Composition with pi-orchestrate, lines
+247-258); halo provides the outer loop, pi-orchestrate runs
+one campaign of agent decisions per cycle.
+
+Commit D adds a **second** subprocess shape halo knows how to
+spawn — a compiled-agent binary — using the same subprocess
+machinery, NOT a new "cycle-kind plug-in" surface. (rfd-critic
+v0.1 finding: halo today has no cycle-kind dispatch trait;
+inventing one would balloon the LoC estimate and re-architect
+halo.) Commit D is a *generalisation* of halo's existing spawn
+path: the hardcoded `pi --orchestrate` invocation becomes
+"any binary in the operator's halo.toml."
+
+The killer use case: operator writes a `fix-flaky-tests.toml`
+manifest (Commit A), `pi-build`s it once (Commits B+C), commits
+the binary to a `bin/` dir, points halo at it. Halo runs it
+forever, attributes spend to its daily budget, alerts on
+non-zero exits, throttles on budget breach.
+
+##### D.2 — `halo.toml` schema additions
+
+Today's `halo.toml` (RFD 0025 §Config: `<repo>/.pi/halo.toml`,
+line 530 onward) has a single implicit cycle shape: orchestrate.
+Commit D adds the `[[cycle]]` array-of-tables for the operator
+to declare one or more compiled-agent cycles:
 
 ```toml
-# halo.toml — supervisor config.
+# .pi/halo.toml — supervisor config (Commit D additions only).
+
+# Existing fields (RFD 0025) — unchanged: clone path, daily
+# spend budget, target_branch, etc.
+
+# NEW: array of compiled-agent cycle declarations. If empty or
+# absent, halo's behavior is unchanged from today (pre-Commit-D).
+# If non-empty, halo runs the listed cycles in declaration
+# order, one per supervisor tick, then loops.
 [[cycle]]
-binary = "./fix-flaky-tests"      # path resolved relative to halo cwd, or $PATH
-args   = ["--jsonl"]              # appended after the binary path
-prompt = "Audit yesterday's flaky CI failures and propose fixes."
-on_exit = { 0 = "continue", 1 = "alert", 3 = "throttle" }
+name    = "fix-flaky-tests"        # display name for cycle log + alerts.
+binary  = "./bin/fix-flaky-tests"  # path resolved relative to .pi/halo.toml's
+                                   # parent dir, OR $PATH if no `/` in the value.
+args    = ["--jsonl"]              # appended after the binary; v1 ALWAYS
+                                   # forces `--jsonl` for spend attribution
+                                   # to work (D.5). Operator's `args` are
+                                   # appended; if they ALSO list `--jsonl`
+                                   # the dup is harmless (Commit B's
+                                   # arg parser is `any(|a| a == "--jsonl")`).
+prompt  = "Audit yesterday's flaky CI failures and propose fixes."
+                                   # Piped to the binary's stdin (Commit B's
+                                   # read_prompt_from_args_or_stdin honours
+                                   # stdin when not a tty).
+on_exit = { 0 = "continue", 1 = "alert", 2 = "alert",
+            3 = "throttle", 64 = "alert", 65 = "alert",
+            73 = "alert", 75 = "throttle" }
+                                   # Required keys: 0. Other exit codes
+                                   # default to "alert" if unspecified.
+                                   # Values: "continue" | "alert" | "throttle".
+timeout_secs = 1800                # Wall-clock cap. Halo SIGTERMs at the cap;
+                                   # exit synthesised as code 124 mapped per
+                                   # the table (default "alert"). Default
+                                   # absent = no cap (halo waits forever;
+                                   # not recommended).
 ```
 
-Halo:
+Halo's existing `[[cycle]] kind = "orchestrate"` (implicit
+today) becomes one of two shapes; orchestrate cycles continue
+to work without any operator-side change. The new shape is
+distinguished by the presence of `binary`.
 
-1. Spawns the binary in a halo-owned worktree (per RFD 0025
-   §Halo-owned clone precondition) — same subprocess plumbing
-   that today spawns `pi --orchestrate`.
-2. Pipes the prompt to stdin (or appends as the final CLI arg
-   per Commit B's `read_prompt_from_args_or_stdin` helper).
-3. Streams the binary's stdout `--jsonl` lines into the halo
-   cycle log.
-4. Maps the agent's exit code to a halo policy (continue /
-   alert / throttle) per `on_exit`.
-5. Attributes the agent's spend (parsed from `Usage`-kind JSONL
-   lines per Commit B's wire format) to halo's daily-budget ledger.
+##### D.3 — Subprocess plumbing
 
-Compiled agents are inert (they don't loop themselves) — halo
-provides the outer loop. This is the killer use case: operators
-write a TOML, halo runs it forever.
+Halo's existing orchestrate-spawn code at
+`crates/pi-orchestrate/src/runner.rs` (per RFD 0025 §86) is
+the model. Commit D refactors it into a generic
+`spawn_cycle_subprocess(cmd: &CycleCommand) -> CycleOutcome`
+function shared by both shapes:
 
-Commit D's deliverable: halo subprocess-cycle support for arbitrary
-binaries (not just `pi --orchestrate`) + JSONL stdout parser
-+ spend attribution + integration test. ~600 LoC.
+```rust
+// crates/pi-coding-agent/src/halo/cycle/spawn.rs (NEW)
 
-Commit D explicitly does NOT add a new halo cycle-kind plug-in trait —
-that's a halo refactor + would need its own RFD.
+pub struct CycleCommand<'a> {
+    pub name:    &'a str,
+    pub binary:  &'a Path,
+    pub args:    &'a [String],
+    pub prompt:  &'a str,             // piped to stdin
+    pub cwd:     &'a Path,            // halo-owned clone (RFD 0025 §259)
+    pub env:     &'a [(String, String)], // explicit env passthrough only
+    pub timeout: Option<Duration>,
+}
+
+pub struct CycleOutcome {
+    pub exit_code:    i32,
+    pub events:       Vec<AgentEvent>, // parsed from stdout JSONL
+    pub stderr_tail:  String,          // last 16 KiB of stderr
+    pub wall_time:    Duration,
+    pub spend_usd:    f64,             // sum of Usage events × pricing (D.5)
+}
+```
+
+Halo invokes via `tokio::process::Command::new(cmd.binary)`,
+attaches `Stdio::piped()` for both stdin and stdout (so we can
+write the prompt + read JSONL), and `Stdio::piped()` for stderr
+(so we can capture the tail for the cycle log).
+
+##### D.4 — JSONL stdout parser
+
+Reads stdout line-by-line; each line is `serde_json::from_str::<AgentEvent>`.
+Per §Cross-cutting #4 + B.13 invariant 2, the wire format is
+guaranteed-stable AgentEvent JSON.
+
+```rust
+fn parse_event_line(line: &str) -> Option<AgentEvent> {
+    if line.trim().is_empty() { return None; }
+    match serde_json::from_str::<AgentEvent>(line) {
+        Ok(evt) => Some(evt),
+        Err(e) => {
+            // Bad JSONL line → log to halo cycle log, KEEP READING.
+            // A single malformed line MUST NOT abort the cycle.
+            tracing::warn!(line, error = ?e, "compiled-agent JSONL parse failed");
+            None
+        }
+    }
+}
+```
+
+The "skip bad line, keep reading" stance handles the case where
+a future Commit B revision adds a new `AgentEventKind` variant
+that this halo doesn't know — `serde_json` deserialise fails,
+halo logs + drops, cycle continues. Cross-version parser
+fragility is the only path to a "halo throws on a benign
+forward-compat" failure mode.
+
+##### D.5 — Spend attribution
+
+Halo today maintains a daily-budget ledger at
+`~/.pi/halo/<repo>/usage.jsonl` (per RFD 0025 §549-553). Each
+orchestrate cycle's spend is wall-clock-bounded estimated.
+
+Compiled-agent cycles get **precise** spend attribution from the
+`AgentEventKind::Usage { usage }` events emitted by the agent
+binary on stdout (Commit B's pump emits Usage on every turn).
+Halo's spend computation:
+
+```rust
+fn cycle_spend(events: &[AgentEvent], pricing: &CostRegistry,
+               model_id: &str) -> f64 {
+    use pi_sdk::AgentEventKind;
+    use pi_sdk::cost::estimate_cost_usd;
+    events.iter()
+        .filter_map(|e| match &e.kind {
+            AgentEventKind::Usage { usage } => Some(usage),
+            _ => None,
+        })
+        .map(|usage| estimate_cost_usd(usage, model_id, pricing))
+        .sum()
+}
+```
+
+`pi_sdk::cost::estimate_cost_usd` (RFD 0027 Commit E) is the
+canonical price-table lookup; halo passes the model_id from
+the cycle's first AgentEvent's session metadata (or, as a
+fallback, the operator's `halo.toml [[cycle]] model_hint`
+field — added in D.2 only if implementation finds the
+session-metadata path unreliable).
+
+The summed `spend_usd` lands in `usage.jsonl` as a
+**precise** ledger row (the "best-effort estimated" caveat
+that orchestrate rows carry per RFD 0025 §552-554 does NOT
+apply; compiled-agent rows are computed from the agent's
+own Usage events).
+
+##### D.6 — Exit-code policy mapping
+
+The `on_exit` table in `halo.toml` `[[cycle]]` declares one of
+three policies per exit code:
+
+| Policy | Halo behavior |
+|---|---|
+| `"continue"` | Halo logs the cycle outcome, advances to the next cycle. The standard happy-path. |
+| `"alert"` | Halo logs + emits an alert (per RFD 0025's existing alert plumbing — `~/.pi/halo/<repo>/alerts.jsonl`), continues to the next cycle. Operator review expected. |
+| `"throttle"` | Halo logs + delays the next cycle by `2^streak * base_delay` (exponential backoff, capped at 1 hour). After 5 consecutive throttles, halo pauses entirely. Used for "this is degraded but not broken" — e.g., budget exhaustion or transient build failure. |
+
+Required: a row for exit `0`. Unspecified codes default to
+`"alert"` — the safe-by-default choice. If the operator wants
+"unknown exit codes are fine, just log and continue," they
+explicitly write `"*" = "continue"` (catch-all wildcard,
+optional).
+
+##### D.7 — Out-of-scope (Commit D v1)
+
+- **Cycle-kind plug-in dispatch trait.** Halo currently has no
+  dynamic cycle-kind registry; Commit D piggybacks on the
+  static "if `[[cycle]]` has `binary`, spawn that path"
+  conditional. A real plug-in trait (so third-party crates
+  could register custom cycle kinds) is a halo refactor RFD,
+  not Commit D.
+- **Multi-cycle parallelism.** v1 runs cycles serially in
+  declaration order. Parallel cycles need an orchestration-
+  level capability halo doesn't have (cf. RFD 0021's
+  `[orchestrate].parallel` deferral).
+- **In-process compiled agents.** Halo always spawns a
+  subprocess; loading the agent's `main` as a library and
+  invoking it in-process would be faster but requires
+  pi-build to emit a `lib.rs` shape — not in scope for
+  Commit B v1 either.
+- **Forward-compat parser auto-upgrade.** If a compiled
+  agent emits an `AgentEventKind` variant this halo doesn't
+  know, halo skip-and-logs (D.4). It does NOT attempt to
+  hot-update its own pi-sdk version to learn the new variant.
+- **Live cycle cancellation by the operator.** v1 honours
+  `timeout_secs` (halo SIGTERMs the agent) but does NOT
+  expose `pi --halo-cancel <cycle-name>` mid-cycle. Defer to
+  a halo follow-up RFD.
+
+##### D.8 — Test plan
+
+- **End-to-end with MockProvider:** halo.toml with one
+  compiled-agent `[[cycle]]` pointing at a binary built from
+  the dice-oracle.toml fixture (Commit A) compiled with
+  `--features mocks` (Commit B's manifest can opt into
+  features via Cargo.toml — but for v1, this just means
+  the test harness builds the agent under `--features mocks`
+  externally, NOT that halo.toml has a `features` field).
+  Halo runs 3 cycles; assert cycle log has 3 rows, each with
+  an `events: [...]` array containing exactly one `Usage`,
+  one `TurnComplete`.
+- **Spend attribution precision:** MockProvider returns a
+  fixed `Usage { input_tokens: 1000, output_tokens: 500 }`;
+  CostRegistry has a known $1/MTok input + $5/MTok output
+  rate; assert `cycle_spend = 1000/1e6 * 1 + 500/1e6 * 5 =
+  $0.0035` (within float epsilon).
+- **on_exit policy plumbing:** binary that exits 1 → halo
+  emits an alert row in `alerts.jsonl`. Binary that exits 3
+  → halo delays the next cycle by ≥ `base_delay` seconds.
+  Binary that exits 0 → no alert, no delay.
+- **Bad JSONL line skip:** harness binary that emits one
+  valid JSONL line, one literal "garbage", one more valid
+  JSONL line. Halo MUST log a warning, parse 2 events, NOT
+  abort the cycle.
+- **`timeout_secs` enforcement:** harness binary that sleeps
+  forever on stdin read. `timeout_secs = 5` → halo SIGTERMs
+  after ~5s, synthesised exit code 124, mapped to "alert"
+  (default for unspecified codes).
+- **`binary` path resolution:** `binary = "./bin/agent"`
+  resolves relative to the halo.toml's parent dir
+  (NOT halo's cwd, NOT `$PATH`). `binary = "agent"` (no `/`)
+  resolves via `$PATH`. Test both.
+- **stderr tail capture:** harness emits 100 KiB to stderr;
+  halo retains the last 16 KiB only in `CycleOutcome.stderr_tail`.
+
+##### D.9 — Deliverable
+
+- `crates/pi-coding-agent/src/halo/cycle/spawn.rs` — NEW;
+  the `spawn_cycle_subprocess` function + `CycleCommand` /
+  `CycleOutcome` types. ~250 LoC.
+- `crates/pi-coding-agent/src/halo/cycle/jsonl.rs` — NEW;
+  the JSONL parser + spend computation. ~120 LoC.
+- `crates/pi-coding-agent/src/halo/config.rs` — extend
+  the existing config with `[[cycle]]` schema. ~80 LoC.
+- `crates/pi-coding-agent/src/halo/run.rs` — refactor the
+  cycle-driver loop to dispatch by cycle shape. ~100 LoC
+  delta.
+- Tests: `crates/pi-coding-agent/tests/halo_compiled_agent.rs`
+  (D.8 fixtures + assertions). ~250 LoC.
+
+Total: ~800 LoC. (v0.4 sketch said ~600; expansion +
+JSONL parser + spend attribution + the test harness add ~200.)
+
+Commit D explicitly does NOT add a new halo cycle-kind plug-in
+trait — that's a halo refactor + would need its own RFD.
 
 ### What we're NOT designing
 
@@ -1530,6 +1801,52 @@ verify the *split* itself works:
   significantly).
 
 ## Revision history
+
+- **v0.10 (2026-05-03):** Commit C reached READY in v0.9.
+  Applied v0.9 critic's 5 sub-blocker deltas inline as polish
+  (C.2 "no flags injected" carve-out for `--manifest-path`,
+  C.3 `pi_sdk_version_pin` derivability statement, new
+  C.3.1 `--out` semantics table including `--force` =
+  wipe-then-write rationale, C.5 build-time soften for cold
+  first build, C.7 added 3 negative-path tests).
+
+  Now expanding Commit D from sketch to full spec
+  (sub-sections D.1-D.9). Plus housekeeping fix for a residual
+  `Commit Composition` artifact from the v0.3 § global
+  replace.
+
+  Commit D sub-sections added:
+  - D.1 — background framing (halo today spawns
+    `pi --orchestrate`; Commit D generalises to "any binary
+    in halo.toml [[cycle]]"; killer use case is
+    operator-authored fix-flaky-tests-style agents running
+    forever under halo's outer loop).
+  - D.2 — `halo.toml` `[[cycle]]` schema additions
+    (`name`, `binary`, `args`, `prompt`, `on_exit` table,
+    `timeout_secs`); halo ALWAYS forces `--jsonl` for spend
+    attribution (D.5).
+  - D.3 — subprocess plumbing (`spawn_cycle_subprocess` shared
+    by orchestrate + compiled-agent shapes; new types
+    `CycleCommand` / `CycleOutcome`).
+  - D.4 — JSONL stdout parser (skip-and-log on bad lines or
+    forward-compat unknown variants; cycle keeps reading).
+  - D.5 — spend attribution (precise, computed from agent's
+    own `Usage` events × `pi_sdk::cost::estimate_cost_usd`;
+    NO "best-effort estimated" caveat unlike orchestrate
+    rows).
+  - D.6 — `on_exit` policy mapping table (continue / alert /
+    throttle); unspecified codes default to "alert"; required
+    row for exit 0; optional `"*"` catch-all.
+  - D.7 — out-of-scope (cycle-kind plug-in trait, parallel
+    cycles, in-process compiled agents, forward-compat
+    parser auto-upgrade, live cancellation).
+  - D.8 — test plan (e2e MockProvider, spend precision,
+    on_exit plumbing, bad-JSONL-skip, `timeout_secs`,
+    `binary` path resolution rules, stderr tail).
+  - D.9 — deliverable: ~800 LoC across 4 files in
+    crates/pi-coding-agent/src/halo/, plus integration
+    tests (was ~600 in v0.4 sketch; expansion +
+    JSONL parser + spend attribution + test harness add ~200).
 
 - **v0.9 (2026-05-03):** Commit B reached READY in v0.8. Now
   expanding Commit C from sketch (~30 lines) to full spec
