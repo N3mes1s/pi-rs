@@ -2,6 +2,7 @@
 //! and halo-owned-clone precondition validator.
 
 pub mod backlog;
+pub mod compiled_agent;
 pub mod config;
 pub mod cycle;
 pub mod jsonl;
