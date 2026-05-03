@@ -65,6 +65,20 @@ pub struct CycleSubprocessCommand<'a> {
     /// Halo's signal flag — set by the run.rs handler. `spawn`
     /// polls this every 500 ms and SIGTERMs the child on detect.
     pub signal_received: Arc<AtomicBool>,
+    /// When `true`, inherit stdout + stderr from the parent so
+    /// child diagnostics flow to the operator's terminal directly
+    /// (the orchestrate-cycle shape — cargo's compile output is
+    /// what the operator wants to see live). When `false` (the
+    /// default for compiled-agent cycles), pipe stdout for JSONL
+    /// parsing and ring-buffer stderr at 16 KiB.
+    ///
+    /// Phase 2d added this so `step_orchestrate` could share the
+    /// primitive without losing operator visibility into cargo
+    /// runs. With `inherit_stdio = true`, the resulting
+    /// `CycleSubprocessOutcome.events` is always empty and
+    /// `stderr_tail` is always "" — the parent's stdio handles
+    /// own the bytes.
+    pub inherit_stdio: bool,
 }
 
 /// Result of spawning a cycle subprocess.
@@ -130,15 +144,22 @@ pub fn spawn_cycle_subprocess(
 ) -> Result<CycleSubprocessOutcome, SubprocessError> {
     let started = Instant::now();
 
-    let mut child = build_command(cmd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| SubprocessError::Spawn {
-            bin: cmd.binary.display().to_string(),
-            source: e,
-        })?;
+    let mut command = build_command(cmd);
+    command.stdin(Stdio::piped());
+    if cmd.inherit_stdio {
+        // Orchestrate-cycle shape: cargo's diagnostics go straight
+        // to the operator's terminal. No JSONL parsing, no stderr
+        // ring-buffering.
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        // Compiled-agent shape: pipe stdout for JSONL parsing,
+        // pipe stderr for the 16 KiB ring-buffer.
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
+    let mut child = command.spawn().map_err(|e| SubprocessError::Spawn {
+        bin: cmd.binary.display().to_string(),
+        source: e,
+    })?;
 
     let child_pid = child.id() as i32;
     cmd.pid_shared.store(child_pid, Ordering::SeqCst);
@@ -152,96 +173,102 @@ pub fn spawn_cycle_subprocess(
         Ok(())
     });
 
-    // Stdout: byte-level chunked reader → assemble lines → parse.
+    // Stdout + stderr handling depends on inherit_stdio.
+    // - inherit_stdio = true (orchestrate shape): no reader threads
+    //   spawned; child writes directly to operator's terminal.
+    //   events_buf + stderr_tail stay empty.
+    // - inherit_stdio = false (compiled-agent shape): byte-level
+    //   chunked stdout reader + 16 KiB ring-buffered stderr.
     //
-    // Adversarial-review fixes (post-Phase-1):
+    // Stdout reader fixes from prior reviewer passes (only
+    // applied when inherit_stdio = false):
     //  - `BufRead::lines()` returned `Err(InvalidData)` on any
     //    non-UTF-8 byte and the previous `let Ok(line) = line
-    //    else { break };` silently dropped every subsequent line
-    //    (including the final Usage + TurnComplete events that
-    //    drive spend). Now we read raw bytes and `from_utf8_lossy`
-    //    each line — invalid bytes become U+FFFD, parse_event_line
-    //    rejects malformed JSON, the loop continues.
-    //  - `BufRead::lines()` would also allocate a single huge
-    //    `String` if the child emitted a 1 GiB line without a
-    //    newline, OOM'ing halo. The MAX_JSONL_LINE_BYTES cap
-    //    bounds in-flight memory; over-cap lines are dropped
-    //    with one warn-log per occurrence.
-    let mut stdout = child.stdout.take().expect("piped stdout");
+    //    else { break };` silently dropped every subsequent line.
+    //    Now we read raw bytes and `from_utf8_lossy` each line.
+    //  - `BufRead::lines()` could allocate a 1 GiB `String` on a
+    //    runaway child. MAX_JSONL_LINE_BYTES bounds in-flight memory.
     let events_buf = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
-    let events_writer = events_buf.clone();
-    let stdout_handle = thread::spawn(move || {
-        let mut chunk = [0u8; STDOUT_CHUNK_BYTES];
-        let mut line_buf: Vec<u8> = Vec::with_capacity(STDOUT_CHUNK_BYTES);
-        let mut overflowed = false;
-        loop {
-            match stdout.read(&mut chunk) {
-                Ok(0) => break, // EOF
-                Ok(n) => {
-                    for &b in &chunk[..n] {
-                        if b == b'\n' {
-                            if !overflowed {
-                                let s = String::from_utf8_lossy(&line_buf);
-                                if let Some(evt) = parse_event_line(&s) {
-                                    let mut guard = events_writer
-                                        .lock()
-                                        .expect("events mutex poisoned");
-                                    guard.push(evt);
-                                }
-                            }
-                            line_buf.clear();
-                            overflowed = false;
-                            continue;
-                        }
-                        if line_buf.len() < MAX_JSONL_LINE_BYTES {
-                            line_buf.push(b);
-                        } else if !overflowed {
-                            tracing::warn!(
-                                cap = MAX_JSONL_LINE_BYTES,
-                                "compiled-agent JSONL line exceeded {} bytes; dropping until next newline",
-                                MAX_JSONL_LINE_BYTES
-                            );
-                            overflowed = true;
-                        }
-                    }
-                }
-                Err(_) => break, // Genuine I/O error (not EOF) — bail.
-            }
-        }
-        // Trailing partial line (no terminating \n) — try to parse.
-        if !overflowed && !line_buf.is_empty() {
-            let s = String::from_utf8_lossy(&line_buf);
-            if let Some(evt) = parse_event_line(&s) {
-                let mut guard = events_writer.lock().expect("events mutex poisoned");
-                guard.push(evt);
-            }
-        }
-    });
-
-    // Stderr: ring-buffered to the last STDERR_TAIL_BYTES.
-    let stderr = child.stderr.take().expect("piped stderr");
     let stderr_tail = Arc::new(Mutex::new(Vec::<u8>::with_capacity(STDERR_TAIL_BYTES)));
-    let stderr_writer = stderr_tail.clone();
-    let stderr_handle = thread::spawn(move || {
-        let mut reader = stderr;
-        let mut chunk = [0u8; 4096];
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let mut guard = stderr_writer.lock().expect("stderr mutex poisoned");
-                    let total = guard.len() + n;
-                    if total > STDERR_TAIL_BYTES {
-                        let drop = total - STDERR_TAIL_BYTES;
-                        let drop = drop.min(guard.len());
-                        guard.drain(..drop);
+
+    let stdout_handle = if cmd.inherit_stdio {
+        None
+    } else {
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let events_writer = events_buf.clone();
+        Some(thread::spawn(move || {
+            let mut chunk = [0u8; STDOUT_CHUNK_BYTES];
+            let mut line_buf: Vec<u8> = Vec::with_capacity(STDOUT_CHUNK_BYTES);
+            let mut overflowed = false;
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        for &b in &chunk[..n] {
+                            if b == b'\n' {
+                                if !overflowed {
+                                    let s = String::from_utf8_lossy(&line_buf);
+                                    if let Some(evt) = parse_event_line(&s) {
+                                        let mut guard = events_writer
+                                            .lock()
+                                            .expect("events mutex poisoned");
+                                        guard.push(evt);
+                                    }
+                                }
+                                line_buf.clear();
+                                overflowed = false;
+                                continue;
+                            }
+                            if line_buf.len() < MAX_JSONL_LINE_BYTES {
+                                line_buf.push(b);
+                            } else if !overflowed {
+                                tracing::warn!(
+                                    cap = MAX_JSONL_LINE_BYTES,
+                                    "compiled-agent JSONL line exceeded {} bytes; dropping until next newline",
+                                    MAX_JSONL_LINE_BYTES
+                                );
+                                overflowed = true;
+                            }
+                        }
                     }
-                    guard.extend_from_slice(&chunk[..n]);
+                    Err(_) => break,
                 }
-                Err(_) => break,
             }
-        }
-    });
+            if !overflowed && !line_buf.is_empty() {
+                let s = String::from_utf8_lossy(&line_buf);
+                if let Some(evt) = parse_event_line(&s) {
+                    let mut guard = events_writer.lock().expect("events mutex poisoned");
+                    guard.push(evt);
+                }
+            }
+        }))
+    };
+
+    let stderr_handle = if cmd.inherit_stdio {
+        None
+    } else {
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        let stderr_writer = stderr_tail.clone();
+        Some(thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut guard = stderr_writer.lock().expect("stderr mutex poisoned");
+                        let total = guard.len() + n;
+                        if total > STDERR_TAIL_BYTES {
+                            let drop = total - STDERR_TAIL_BYTES;
+                            let drop = drop.min(guard.len());
+                            guard.drain(..drop);
+                        }
+                        guard.extend_from_slice(&chunk[..n]);
+                    }
+                    Err(_) => break,
+                }
+            }
+        }))
+    };
 
     // Wait loop: poll for exit, signal, or timeout.
     let mut signaled = false;
@@ -269,8 +296,8 @@ pub fn spawn_cycle_subprocess(
 
     // Drain readers + clear the shared-pid rendezvous.
     let _ = stdin_handle.join();
-    let _ = stdout_handle.join();
-    let _ = stderr_handle.join();
+    if let Some(h) = stdout_handle { let _ = h.join(); }
+    if let Some(h) = stderr_handle { let _ = h.join(); }
     cmd.pid_shared.store(0, Ordering::SeqCst);
 
     let exit_code = match exit_status {
@@ -391,6 +418,10 @@ mod tests {
             timeout,
             pid_shared,
             signal_received: signal,
+            // Default: pipe stdio so tests can assert events +
+            // stderr_tail. The orchestrate-shape `inherit_stdio: true`
+            // path is exercised by `inherit_stdio_skips_event_parsing`.
+            inherit_stdio: false,
         }
     }
 
@@ -709,6 +740,55 @@ exit 0
             outcome.events.len(),
             2,
             "2 MiB line should be dropped; bookend lines should still parse"
+        );
+    }
+
+    #[test]
+    fn inherit_stdio_skips_event_parsing_and_stderr_capture() {
+        // Phase 2d: orchestrate-shape spawn. inherit_stdio = true
+        // means the child writes directly to our stdout/stderr
+        // (which `cargo test` captures); events_buf + stderr_tail
+        // stay empty. The wait + signal + timeout machinery still
+        // works.
+        let tmp = tempfile::tempdir_in("/home/nemesis/code").unwrap();
+        let bin = write_script(
+            tmp.path(),
+            "agent",
+            r#"#!/bin/sh
+printf '%s\n' '{"session_id":"s","entry_id":"e1","timestamp":0,"kind":{"type":"session_started","id":"s","cwd":"/x","model":"m","provider":"p"}}'
+printf 'diag\n' >&2
+exit 0
+"#,
+        );
+        let env = empty_env();
+        let signal = Arc::new(AtomicBool::new(false));
+        let pid = Arc::new(AtomicI32::new(0));
+        let args: Vec<String> = vec![];
+        // Build the inherit_stdio variant by hand (cmd_for's
+        // default is pipe-mode).
+        let cmd = CycleSubprocessCommand {
+            name: "orchestrate-like",
+            binary: &bin,
+            args: &args,
+            prompt: "",
+            cwd: tmp.path(),
+            env_extra: &env,
+            timeout: None,
+            pid_shared: pid,
+            signal_received: signal,
+            inherit_stdio: true,
+        };
+        let outcome = spawn_cycle_subprocess(&cmd).expect("spawn ok");
+        assert_eq!(outcome.exit_code, 0);
+        // Events buffer is empty (no JSONL parsing thread).
+        assert!(
+            outcome.events.is_empty(),
+            "inherit_stdio = true → events MUST be empty (no parser)"
+        );
+        // stderr_tail empty too (no ring-buffer thread).
+        assert!(
+            outcome.stderr_tail.is_empty(),
+            "inherit_stdio = true → stderr_tail MUST be empty"
         );
     }
 

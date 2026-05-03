@@ -654,52 +654,68 @@ fn step_prep_branch(ctx: &mut CycleCtx) -> StepResult {
 }
 
 fn step_orchestrate(ctx: &mut CycleCtx) -> StepResult {
+    use crate::halo::subprocess::{spawn_cycle_subprocess, CycleSubprocessCommand};
+    use std::collections::BTreeMap;
+
     let campaign_path = ctx
         .halo_dir
         .join(format!("cycle-{}-campaign.toml", ctx.cycle));
 
     ctx.orchestrate_start = Some(Instant::now());
 
-    // Spawn orchestrate as a subprocess in its own process group.
-    use std::os::unix::process::CommandExt;
-    let mut cmd = std::process::Command::new(
-        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pi")),
+    // Phase 2d: refactored onto the shared spawn primitive.
+    // Behaviorally identical to the previous inline std::process::Command
+    // path, with two improvements over the v1 inline shape:
+    // 1. PG-wide SIGTERM on signal/timeout (vs the old "wait for the
+    //    child to notice" path that orphaned grandchildren).
+    // 2. Centralised process_group(0) + pid_shared rendezvous.
+    //
+    // `inherit_stdio: true` keeps the operator's terminal showing
+    // cargo's diagnostics during orchestrate runs — the very reason
+    // Phase 2b deferred this refactor until the flag was added.
+    let pid_shared = ctx
+        .orchestrate_pid_shared
+        .clone()
+        .unwrap_or_else(|| Arc::new(AtomicI32::new(0)));
+
+    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pi"));
+    let args: Vec<String> = vec![
+        "--orchestrate".into(),
+        campaign_path.display().to_string(),
+    ];
+    let mut env_extra: BTreeMap<String, String> = BTreeMap::new();
+    env_extra.insert("PI_HALO_SUPPRESS_DETACHED_EVOLVE".into(), "1".into());
+    env_extra.insert(
+        "GIT_DIR".into(),
+        ctx.repo_root.join(".git").display().to_string(),
     );
-    cmd.args(["--orchestrate", &campaign_path.display().to_string()])
-        .env("PI_HALO_SUPPRESS_DETACHED_EVOLVE", "1")
-        .env("GIT_DIR", ctx.repo_root.join(".git").display().to_string())
-        .current_dir(ctx.repo_root)
-        .stdin(std::process::Stdio::null());
-    // Safety: process_group is safe to call before exec.
-    cmd.process_group(0);
 
-    let child = cmd
-        .spawn()
-        .map_err(|e| StepError::Failed(format!("spawn orchestrate: {e}")))?;
-    let child_pid = child.id();
-    ctx.orchestrate_child_pid = Some(child_pid);
-
-    // Publish pid so the signal handler in run.rs can kill the PG.
-    if let Some(ref shared) = ctx.orchestrate_pid_shared {
-        shared.store(child_pid as i32, Ordering::SeqCst);
-    }
-
-    // Wait, checking for signals periodically.
-    let output = wait_child(child, ctx.signal_received.clone(), Duration::from_millis(500));
-    ctx.orchestrate_elapsed_secs = ctx
-        .orchestrate_start
-        .map(|s| s.elapsed().as_secs_f64())
-        .unwrap_or(0.0);
-
-    // Clear shared pid — orchestrate is gone.
-    if let Some(ref shared) = ctx.orchestrate_pid_shared {
-        shared.store(0, Ordering::SeqCst);
-    }
-
-    let exit_code = match output {
-        Ok(status) => status.code().unwrap_or(-1),
-        Err(_) => -1,
+    let cmd = CycleSubprocessCommand {
+        name: "orchestrate",
+        binary: &current_exe,
+        args: &args,
+        // Orchestrate today reads no stdin; pass empty prompt
+        // (the writer thread sends 0 bytes + closes the pipe,
+        // child sees immediate EOF — equivalent to Stdio::null
+        // for stdin-ignorant children).
+        prompt: "",
+        cwd: ctx.repo_root,
+        env_extra: &env_extra,
+        // No timeout — orchestrate has its own internal budget
+        // guards (per-cycle overspend threshold, etc.).
+        timeout: None,
+        pid_shared,
+        signal_received: ctx.signal_received.clone(),
+        inherit_stdio: true,
     };
+
+    let outcome = match spawn_cycle_subprocess(&cmd) {
+        Ok(o) => o,
+        Err(e) => return Err(StepError::Failed(format!("spawn orchestrate: {e}"))),
+    };
+
+    ctx.orchestrate_elapsed_secs = outcome.wall_time.as_secs_f64();
+    let exit_code = outcome.exit_code;
     ctx.orchestrate_exit = exit_code;
     ctx.orchestrate_merged = exit_code == 0;
 
@@ -712,11 +728,14 @@ fn step_orchestrate(ctx: &mut CycleCtx) -> StepResult {
             "exit_code": exit_code,
             "merged_count": if exit_code == 0 { 1 } else { 0 },
             "failed_count": if exit_code == 2 { 1 } else { 0 },
+            "wall_seconds": outcome.wall_time.as_secs_f64(),
+            "signaled": outcome.signaled,
+            "timed_out": outcome.timed_out,
         }),
     )
     .ok();
 
-    if ctx.signal_received.load(Ordering::SeqCst) {
+    if ctx.signal_received.load(Ordering::SeqCst) || outcome.signaled {
         return Err(StepError::Aborted("sigint".into()));
     }
 

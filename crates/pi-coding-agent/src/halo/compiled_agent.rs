@@ -116,6 +116,11 @@ pub fn run_compiled_agent_cycle(
         timeout: spec.timeout(),
         pid_shared: inputs.pid_shared.clone(),
         signal_received: inputs.signal_received.clone(),
+        // Compiled-agent shape: pipe stdout for JSONL parsing,
+        // ring-buffer stderr for the alerts.jsonl + state.jsonl
+        // diagnostics. Orchestrate uses `inherit_stdio: true` —
+        // see step_orchestrate in cycle.rs.
+        inherit_stdio: false,
     };
 
     let outcome = spawn_cycle_subprocess(&cmd).map_err(CompiledAgentError::Spawn)?;
