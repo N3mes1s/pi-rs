@@ -352,11 +352,13 @@ impl RuntimeConfig {
     /// so embedders chaining off `RuntimeConfig::builder().build()?`
     /// can adjust caps fluently:
     ///
-    ///     RuntimeConfig::builder()
-    ///         .session_manager(...).auth_storage(...).model_registry(...)
-    ///         .tools(...).settings(...).system_prompt(...).build()?
-    ///         .with_max_session_tokens(50_000)
-    ///         .with_max_tool_invocations_per_turn(20)
+    /// ```text
+    /// RuntimeConfig::builder()
+    ///     .session_manager(...).auth_storage(...).model_registry(...)
+    ///     .tools(...).settings(...).system_prompt(...).build()?
+    ///     .with_max_session_tokens(50_000)
+    ///     .with_max_tool_invocations_per_turn(20)
+    /// ```
     ///
     /// **Composition note** (per code-review pass-9 NIT #2 +
     /// pass-10 NIT #2): if both the `ConfigBuilder` and this

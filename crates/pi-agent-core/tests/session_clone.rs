@@ -80,6 +80,7 @@ fn clone_branch_returns_new_id_and_replays_entries() {
             SessionEntryKind::EvolveMarker { .. } => "evolve_marker",
             SessionEntryKind::RoutingDecision { .. } => "routing_decision",
             SessionEntryKind::SandboxAction { .. } => "sandbox_action",
+            SessionEntryKind::InterceptorInjection { .. } => "interceptor_injection",
         })
         .collect();
     assert_eq!(

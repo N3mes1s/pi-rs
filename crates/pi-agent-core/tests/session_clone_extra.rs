@@ -73,6 +73,7 @@ fn clone_branch_replays_multiple_tool_pairs_in_order() {
             SessionEntryKind::EvolveMarker { .. } => "evolve_marker",
             SessionEntryKind::RoutingDecision { .. } => "routing_decision",
             SessionEntryKind::SandboxAction { .. } => "sandbox_action",
+            SessionEntryKind::InterceptorInjection { .. } => "interceptor_injection",
         })
         .collect();
     assert_eq!(

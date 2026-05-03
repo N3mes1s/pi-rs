@@ -441,6 +441,7 @@ fn clone_precondition_rejects_missing_expected_root() {
         proposer: Default::default(),
         cycle: Default::default(),
         orchestrate: Default::default(),
+        compiled_agents: Default::default(),
     };
     let err = pi_coding_agent::halo::check_halo_clone_preconditions(dir.path(), &cfg)
         .unwrap_err();
@@ -466,6 +467,7 @@ fn clone_precondition_rejects_non_matching_path() {
         proposer: Default::default(),
         cycle: Default::default(),
         orchestrate: Default::default(),
+        compiled_agents: Default::default(),
     };
     let err = pi_coding_agent::halo::check_halo_clone_preconditions(dir.path(), &cfg)
         .unwrap_err();
@@ -505,6 +507,7 @@ fn clone_precondition_rejects_dirty_tree() {
         proposer: Default::default(),
         cycle: Default::default(),
         orchestrate: Default::default(),
+        compiled_agents: Default::default(),
     };
     let err = pi_coding_agent::halo::check_halo_clone_preconditions(path, &cfg).unwrap_err();
     assert!(
