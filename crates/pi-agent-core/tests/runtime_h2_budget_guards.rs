@@ -310,3 +310,79 @@ async fn saturating_add_does_not_panic_on_max_token_usage() {
         "expected BudgetExhausted on u64::MAX usage, got {res:?}"
     );
 }
+
+/// Regression: every terminal-Err path must emit `TurnComplete` *before*
+/// returning, so generated channel pumps (`crates/pi-build/src/codegen.rs`)
+/// that `break` only on `TurnComplete` don't hang forever.
+///
+/// This test spins up a session with a 1-token cap (guaranteed to trip on
+/// turn 1 with a provider that reports ≥1 output token), subscribes to
+/// the event channel, calls `prompt`, and asserts that:
+///   1. `TurnComplete` was received at least once, AND
+///   2. the `prompt` future resolved to `Err(BudgetExhausted)`.
+#[tokio::test]
+async fn turn_complete_emitted_before_budget_exhausted_err() {
+    let turns = vec![vec![
+        ev(StreamEventKind::TextDelta { text: "hi".into() }),
+        ev(StreamEventKind::Usage {
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+                cost_usd: 0.0,
+            },
+        }),
+        ev(StreamEventKind::Finish {
+            reason: FinishReason::Stop,
+        }),
+    ]];
+
+    // Cap of 1 token: total=2 after the turn, so BudgetExhausted fires.
+    let auth = AuthStorage::in_memory();
+    auth.set("anthropic", AuthMethod::ApiKey { value: "k".into() });
+    let mut settings = Settings::default();
+    settings.provider = "anthropic".into();
+    settings.model = "sonnet".into();
+    let cfg = RuntimeConfig::builder()
+        .session_manager(SessionManager::in_memory())
+        .auth_storage(auth.clone())
+        .model_registry(ModelRegistry::new(auth))
+        .tools(ToolRegistry::new())
+        .settings(settings)
+        .system_prompt("you are pi")
+        .cwd(std::env::current_dir().unwrap())
+        .with_provider_factory(Arc::new(MockFactory(MockProvider::new(turns))))
+        .with_max_session_tokens(1)
+        .with_max_tool_invocations_per_turn(64)
+        .build_unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_runtime, session) = create_agent_session(cfg, Some(tx)).expect("session");
+
+    // Run prompt and collect all events concurrently.
+    let prompt_fut = tokio::spawn(async move { session.prompt("budget test".into()).await });
+
+    // Drain events until TurnComplete arrives (or channel closes).
+    let mut saw_turn_complete = false;
+    while let Some(event) = rx.recv().await {
+        if matches!(event.kind, pi_agent_core::AgentEventKind::TurnComplete) {
+            saw_turn_complete = true;
+            break;
+        }
+    }
+
+    // Now await the prompt result — it must have resolved (or be resolving
+    // very shortly after TurnComplete was sent).
+    let result = prompt_fut.await.expect("prompt task panicked");
+
+    assert!(
+        saw_turn_complete,
+        "TurnComplete was never emitted before Err(BudgetExhausted)"
+    );
+    assert!(
+        matches!(result, Err(RuntimeError::BudgetExhausted { .. })),
+        "expected BudgetExhausted, got {result:?}"
+    );
+}

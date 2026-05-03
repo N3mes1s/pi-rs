@@ -1180,6 +1180,7 @@ impl AgentSession {
         loop {
             if self.inner.lock().await.aborted {
                 self.emit(AgentEventKind::Aborted).await;
+                self.emit(AgentEventKind::TurnComplete).await;
                 return Err(RuntimeError::Aborted);
             }
 
@@ -1283,6 +1284,7 @@ impl AgentSession {
                     })
                     .await;
                     self.emit(AgentEventKind::Aborted).await;
+                    self.emit(AgentEventKind::TurnComplete).await;
                     return Err(RuntimeError::Provider(message));
                 }
             };
@@ -1299,6 +1301,7 @@ impl AgentSession {
             while let Some(ev) = stream.next().await {
                 if self.inner.lock().await.aborted {
                     self.emit(AgentEventKind::Aborted).await;
+                    self.emit(AgentEventKind::TurnComplete).await;
                     return Err(RuntimeError::Aborted);
                 }
                 let ev = match ev {
@@ -1318,6 +1321,7 @@ impl AgentSession {
                         })
                         .await;
                         self.emit(AgentEventKind::Aborted).await;
+                        self.emit(AgentEventKind::TurnComplete).await;
                         return Err(RuntimeError::Provider(message));
                     }
                 };
@@ -1351,6 +1355,7 @@ impl AgentSession {
                                 cap = self.cfg.max_tool_invocations_per_turn,
                                 "per-turn tool-invocation cap exceeded; remaining tool calls dropped"
                             );
+                            self.emit(AgentEventKind::TurnComplete).await;
                             return Err(RuntimeError::InvocationCapExceeded {
                                 invoked: tool_calls.len() + 1,
                                 cap: self.cfg.max_tool_invocations_per_turn,
@@ -1393,6 +1398,7 @@ impl AgentSession {
                             message: message.clone(),
                         })
                         .await;
+                        self.emit(AgentEventKind::TurnComplete).await;
                         return Err(RuntimeError::Provider(message));
                     }
                     _ => {}
@@ -1455,6 +1461,7 @@ impl AgentSession {
             // Otherwise replay tooling sees a bogus assistant turn
             // followed by an out-of-band runtime error.
             if matches!(finish, FinishReason::ToolUse) && tool_calls.is_empty() {
+                self.emit(AgentEventKind::TurnComplete).await;
                 return Err(RuntimeError::ToolUseFinishWithoutCalls);
             }
 
@@ -1504,6 +1511,7 @@ impl AgentSession {
                     };
                     self.emit(AgentEventKind::Usage { usage: cumulative_usage })
                         .await;
+                    self.emit(AgentEventKind::TurnComplete).await;
                     return Err(RuntimeError::BudgetExhausted { used: total, cap });
                 }
             }
