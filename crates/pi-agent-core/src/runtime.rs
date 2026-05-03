@@ -151,6 +151,23 @@ mod config_builder_cwd_tests {
             .expect("cwd_from_env should produce a valid cwd");
         assert_eq!(cfg.cwd, std::env::current_dir().unwrap());
     }
+
+    #[test]
+    fn runtime_config_with_max_helpers_chain_off_built_config() {
+        // Per polish-6: embedders constructing via `quick_start` (or
+        // any other path that returns an already-built RuntimeConfig)
+        // should be able to bump the H2 caps without going back through
+        // the builder.
+        let cfg = minimal_builder()
+            .build()
+            .expect("base builder should succeed")
+            .with_max_session_tokens(50_000)
+            .with_max_tool_invocations_per_turn(10)
+            .with_max_recursion(2);
+        assert_eq!(cfg.max_session_tokens, 50_000);
+        assert_eq!(cfg.max_tool_invocations_per_turn, 10);
+        assert_eq!(cfg.max_recursion, 2);
+    }
 }
 
 /// Approval gate consulted before each tool invocation. The runtime
@@ -327,6 +344,30 @@ impl RuntimeConfig {
     /// of running inline.
     pub fn with_sandbox_provider(mut self, provider: Arc<dyn SandboxProvider>) -> Self {
         self.sandbox_provider = Some(provider);
+        self
+    }
+
+    /// Set the per-session token cap (Hardening §4.5 #3, H2). Returns
+    /// `self` for chaining. Mirrors `ConfigBuilder::with_max_session_tokens`
+    /// so embedders that already have a constructed `RuntimeConfig`
+    /// (e.g. from `quick_start`) can adjust the cap without re-running
+    /// the builder. `n = 0` disables the cap.
+    pub fn with_max_session_tokens(mut self, n: u64) -> Self {
+        self.max_session_tokens = n;
+        self
+    }
+
+    /// Set the per-turn tool-invocation cap (Hardening §4.5 #3, H2).
+    /// Returns `self` for chaining. Mirrors the builder.
+    pub fn with_max_tool_invocations_per_turn(mut self, n: usize) -> Self {
+        self.max_tool_invocations_per_turn = n;
+        self
+    }
+
+    /// Set the tool-recursion depth cap (Hardening §4.5 #3, H2 reserved).
+    /// Returns `self` for chaining. Enforcement lands in H2.5.
+    pub fn with_max_recursion(mut self, n: usize) -> Self {
+        self.max_recursion = n;
         self
     }
 }
