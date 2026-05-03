@@ -30,7 +30,7 @@ pub use oauth::{
     TokenResponse,
 };
 pub use provider::{
-    AnthropicProvider, AzureOpenAiProvider, BedrockAnthropicProvider, GenerateRequest,
+    AnthropicProvider, AzureOpenAiProvider, BedrockAnthropicProvider, EventStream, GenerateRequest,
     GenerateResponse, GoogleProvider, OpenAiCompatProvider, OpenAiProvider, Provider, ProviderKind,
 };
 pub use registry::{ApiKind, ModelInfo, ModelRegistry, ProviderConfig};

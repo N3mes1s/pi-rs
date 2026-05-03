@@ -17,6 +17,7 @@ pi-ai.workspace = true
 pi-tools.workspace = true
 pi-agent-core.workspace = true
 pi-tui.workspace = true
+pi-sdk.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
