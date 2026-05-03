@@ -22,15 +22,18 @@
 //!   * NO overall request timeout — streaming responses can legitimately
 //!     run for many minutes (especially with `thinking=high|xhigh`).
 //!
-//! ## What this client does NOT give you
+//! ## Idle-stream timeout
 //!
-//! An *idle-stream* timeout: "fail if no SSE event arrives for N seconds".
-//! That requires wrapping `bytes_stream()` in a `tokio::time::timeout`
-//! per-chunk. It's the right next step but a bigger change; flagged as a
-//! TODO. Until that lands, a malformed response that produces 200 OK + an
-//! empty (but technically still-open) body will still hang. The `tcp_keepalive`
-//! above closes that hole *partially* by detecting peers that have actually
-//! gone away; a peer that's there but choosing not to send still wins.
+//! [`streaming_idle_timeout`] returns the max time a streaming provider
+//! is allowed to go silent between SSE events before the read loop
+//! surfaces an error. A peer that ACKs TCP segments but never sends a
+//! frame (real-world cause: gpt-5.4 with `thinking=xhigh` got into a
+//! state on 2026-05-03 where the Responses connection stayed
+//! ESTABLISHED with empty queues for 58 minutes after the 14th tool
+//! turn — `tcp_keepalive` doesn't help since the peer is alive) gets
+//! caught here by wrapping each `next().await` in `tokio::time::timeout`.
+//! Default 120s, override via `PI_STREAMING_IDLE_TIMEOUT_SECS=N` (set
+//! to a generous value in CI).
 
 use std::time::Duration;
 
@@ -62,5 +65,60 @@ pub fn streaming_client_or_default() -> reqwest::Client {
             );
             reqwest::Client::new()
         }
+    }
+}
+
+/// Maximum interval an SSE/streaming provider is allowed to go silent
+/// between events before the read loop must surface an error. Wrap
+/// each `Stream::next().await` in `tokio::time::timeout` with this
+/// value to make a peer that ACKs but never sends fail fast instead of
+/// parking the agent in `epoll_pwait` forever.
+///
+/// Default 120s. Overridable via `PI_STREAMING_IDLE_TIMEOUT_SECS=<n>`
+/// (parsed as `u64`; 0 disables the timeout entirely — only useful in
+/// tests that intentionally exercise long silences). An unparseable
+/// value is treated as the default.
+pub fn streaming_idle_timeout() -> Duration {
+    const DEFAULT_SECS: u64 = 120;
+    let secs = std::env::var("PI_STREAMING_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SECS);
+    Duration::from_secs(secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serialise env-var probing — Rust tests run in parallel and
+    /// `set_var` is process-global. A `Mutex` keeps the three test
+    /// cases below from interleaving each other's overrides.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn idle_timeout_defaults_to_120s_when_unset() {
+        let _g = env_lock();
+        std::env::remove_var("PI_STREAMING_IDLE_TIMEOUT_SECS");
+        assert_eq!(streaming_idle_timeout(), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn idle_timeout_respects_env_override() {
+        let _g = env_lock();
+        std::env::set_var("PI_STREAMING_IDLE_TIMEOUT_SECS", "30");
+        assert_eq!(streaming_idle_timeout(), Duration::from_secs(30));
+        std::env::remove_var("PI_STREAMING_IDLE_TIMEOUT_SECS");
+    }
+
+    #[test]
+    fn idle_timeout_falls_back_on_unparseable() {
+        let _g = env_lock();
+        std::env::set_var("PI_STREAMING_IDLE_TIMEOUT_SECS", "not-a-number");
+        assert_eq!(streaming_idle_timeout(), Duration::from_secs(120));
+        std::env::remove_var("PI_STREAMING_IDLE_TIMEOUT_SECS");
     }
 }

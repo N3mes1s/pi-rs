@@ -347,7 +347,28 @@ pub async fn stream_responses(
             return Some((Ok(StreamEvent::new(StreamEventKind::Finish { reason })), st));
         }
         loop {
-            let next = st.es.next().await;
+            let idle = crate::http::streaming_idle_timeout();
+            let polled = if idle.is_zero() {
+                Ok(st.es.next().await)
+            } else {
+                tokio::time::timeout(idle, st.es.next()).await
+            };
+            let next = match polled {
+                Ok(n) => n,
+                Err(_) => {
+                    st.done = true;
+                    return Some((
+                        Ok(StreamEvent::new(StreamEventKind::Error {
+                            message: format!(
+                                "openai responses: SSE stream idle for {}s — \
+                                 provider stopped sending events",
+                                idle.as_secs()
+                            ),
+                        })),
+                        st,
+                    ));
+                }
+            };
             let ev = match next {
                 Some(Ok(ev)) => ev,
                 Some(Err(e)) => {
