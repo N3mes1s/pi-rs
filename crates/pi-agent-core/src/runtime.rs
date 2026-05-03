@@ -1195,7 +1195,7 @@ impl AgentSession {
                     g.tools.clone(),
                 )
             };
-            let (provider_name, model_name, thinking) = self
+            let (provider_name, model_name, thinking) = match self
                 .apply_routing(
                     router_mode,
                     force_override,
@@ -1205,21 +1205,41 @@ impl AgentSession {
                     &messages,
                     &tools,
                 )
-                .await?;
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    self.emit(AgentEventKind::TurnComplete).await;
+                    return Err(e);
+                }
+            };
 
-            let (provider_cfg, model_info) = self
+            let (provider_cfg, model_info) = match self
                 .cfg
                 .model_registry
                 .resolve(&format!("{}/{}", provider_name, model_name))
                 .or_else(|| self.cfg.model_registry.resolve(&model_name))
-                .ok_or_else(|| RuntimeError::UnknownModel(model_name.clone()))?;
+                .ok_or_else(|| RuntimeError::UnknownModel(model_name.clone()))
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    self.emit(AgentEventKind::TurnComplete).await;
+                    return Err(e);
+                }
+            };
 
             let auth = self
                 .cfg
                 .auth_storage
                 .get(&provider_cfg.name)
                 .unwrap_or(AuthMethod::None);
-            let provider = build_provider(&self.cfg, provider_cfg.clone(), auth)?;
+            let provider = match build_provider(&self.cfg, provider_cfg.clone(), auth) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.emit(AgentEventKind::TurnComplete).await;
+                    return Err(e);
+                }
+            };
 
             let mut system = self.cfg.system_prompt.clone();
             for ctx in &self.cfg.context_files {
