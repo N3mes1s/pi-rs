@@ -36,7 +36,7 @@ versioning follows [SemVer](https://semver.org/) per RFD 0027 §3.
 - `deny.toml` — bans (no MAJOR-version duplicates), licenses (MIT/Apache-2.0/BSD/ISC/MPL/Zlib allow-list, GPL/AGPL denied per RFD §6), sources (crates.io only) (Commit I).
 - `SECURITY.md` — coordinated disclosure via GitHub Security Advisories, RUSTSEC namespace reservation, supported-versions table (Commit I).
 - `RELEASING.md` — per-release checklist, publish order (9 crates in dependency order), rate-limited publish loop, post-publish steps, yank/recovery procedures (Commit J-prep).
-- Workspace-deps `version = "0.1.0"` on every path-dep; `license/repository/authors.workspace = true` on the 9 publishable crates + `publish = false` on the 5 binary-side crates (Commit J-prep + pass-6 #3).
+- Workspace-deps `version = "0.1.0"` on every path-dep; `license/repository/authors.workspace = true` on the 9 publishable crates + `publish = false` on the 7 binary-side / scaffolding crates (Commit J-prep + pass-6 #3).
 - `ROOTFS_VERSION` const inlined into `pi-sandbox/src/microvm/types.rs` (was `pi_sandbox_rootfs::ROOTFS_VERSION`); the rootfs scaffolding crate stays `publish = false` so `pi-sandbox` is a publishable leaf (pass-6 #1).
 - `ConfigBuilder::cwd_from_env()` helper + `build()` defaults `cwd` to `current_dir()` (polish, pass-1 #9).
 - `AuthStorage::from_env_explicit_iter` for IntoIterator-shaped allowlists (polish-2, pass-3 #6). **Removed in polish-13** — collapsed into `from_env_explicit` which now accepts the same IntoIterator shape.
