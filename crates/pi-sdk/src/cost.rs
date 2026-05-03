@@ -1,9 +1,11 @@
 //! Per-model cost helper for `pi-sdk`.
 //!
 //! Per RFD 0027 §1 + Commit E: every embedder writes the same
-//! per-model price table. Ship one. `CostRegistry::default()` returns
-//! best-effort prices; embedders override via
-//! [`CostRegistry::override_for`].
+//! per-model price table. Ship one.
+//! [`CostRegistry::with_bundled_defaults`] returns the seeded
+//! best-effort table; [`CostRegistry::default`] (and
+//! [`CostRegistry::empty`]) is empty. Embedders override individual
+//! entries via [`CostRegistry::override_for`].
 //!
 //! The underlying price math (`pi_ai::compute_cost`) already exists
 //! and is shared across providers. This module is the embedder-facing
@@ -92,8 +94,10 @@ impl Pricing {
 
 /// In-memory map of model_id → `Pricing`.
 ///
-/// `default()` seeds a best-effort table refreshed each MINOR. Use
-/// `override_for` to pin contract pricing.
+/// [`with_bundled_defaults`](Self::with_bundled_defaults) seeds a
+/// best-effort table refreshed each MINOR. [`default`](Self::default)
+/// (and [`empty`](Self::empty)) returns an empty registry. Use
+/// [`override_for`](Self::override_for) to pin contract pricing.
 #[derive(Clone, Debug, Default)]
 pub struct CostRegistry {
     prices: HashMap<String, Pricing>,

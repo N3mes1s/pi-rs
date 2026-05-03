@@ -33,11 +33,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .auth_storage(auth.clone())
         .model_registry(ModelRegistry::new(auth))
         .tools(ToolRegistry::with_readonly_extras())
-        .settings(Settings {
-            provider: "anthropic".into(),
-            model: "claude-haiku-4-5-20251001".into(),
-            ..Settings::default()
-        })
+        .settings(
+            Settings::builder()
+                .provider("anthropic")
+                .model("claude-haiku-4-5-20251001")
+                .build(),
+        )
         .system_prompt("You are a CI inspector. Read the repo, do not modify it.")
         .cwd(std::env::current_dir()?)
         .with_sandbox_provider(Arc::new(LocalProcessProvider::with_readonly_defaults()))

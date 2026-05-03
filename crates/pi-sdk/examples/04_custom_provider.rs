@@ -94,17 +94,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .auth_storage(auth.clone())
         .model_registry(ModelRegistry::new(auth))
         .tools(ToolRegistry::new())
-        .settings(Settings {
+        .settings(
             // The factory will see this provider name + ProviderKind in
             // the cfg argument. For a real service you'd populate
             // ModelRegistry with a ProviderConfig referencing your
             // service's name; here we use a real anthropic model alias
             // so ModelRegistry::resolve() finds it (the EchoFactory
             // intercepts the actual API call regardless of model id).
-            provider: "anthropic".into(),
-            model: "claude-haiku-4-5-20251001".into(),
-            ..Settings::default()
-        })
+            Settings::builder()
+                .provider("anthropic")
+                .model("claude-haiku-4-5-20251001")
+                .build(),
+        )
         .system_prompt("you are echo")
         .cwd(std::env::current_dir()?)
         .with_provider_factory(Arc::new(EchoFactory {

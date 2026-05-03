@@ -128,8 +128,7 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     } else {
         // The pi binary opts into the full tool surface (incl. bash).
         // SDK embedders use `with_readonly_extras()` or the explicit
-        // builder pattern instead. Per polish-12 the old `with_extras`
-        // alias was removed.
+        // builder pattern instead.
         ToolRegistry::with_unsafe_extras()
     };
     if !settings.tools.is_empty() {

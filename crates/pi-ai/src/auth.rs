@@ -26,11 +26,11 @@ pub enum AuthMethod {
 /// - On-disk persistence uses `0o600` perms + atomic temp + rename
 ///   on write so a partial write or umask-leak cannot expose
 ///   credentials to other users on the host.
-/// - [`from_env`](Self::from_env) is **deprecated** at H5: it slurps
-///   17 env vars unconditionally, a CWE-526 magnet for embedders that
-///   inherit a parent process environment they don't fully trust. Use
-///   [`from_env_explicit`](Self::from_env_explicit) and name the keys
-///   you trust.
+/// - The pre-H5 `from_env()` constructor (which slurped 17 env vars
+///   unconditionally — a CWE-526 magnet for embedders that inherit
+///   a parent-process environment they don't fully trust) was removed
+///   pre-publish in polish-12. Use [`from_env_explicit`](Self::from_env_explicit)
+///   and name the keys you trust.
 /// - [`scoped`](Self::scoped) creates a per-tenant view that filters
 ///   out other providers — multi-tenant embedders use this to deny
 ///   cross-tenant credential bleed in shared-runtime setups.
@@ -448,6 +448,41 @@ mod h5_tests {
         let s = AuthStorage::in_memory().scoped(["anthropic"]);
         // openai is outside the scope → panic.
         s.set("openai", AuthMethod::ApiKey { value: "x".into() });
+    }
+
+    #[test]
+    fn scoped_then_scoped_replaces_rather_than_intersects() {
+        // Documented at auth.rs scoped()'s "Composition semantics"
+        // doc-comment: `s.scoped(["a"]).scoped(["b"])` REPLACES the
+        // scope, it does not intersect. If a future refactor changes
+        // this to intersect (which would silently hide credentials
+        // from existing embedders), this test fails loudly.
+        let s = AuthStorage::in_memory();
+        s.set("anthropic", AuthMethod::ApiKey { value: "a".into() });
+        s.set("openai", AuthMethod::ApiKey { value: "o".into() });
+        let view = s.scoped(["anthropic"]).scoped(["openai"]);
+        assert!(
+            view.get("openai").is_some(),
+            "second scoped() must REPLACE the first, exposing openai"
+        );
+        assert!(
+            view.get("anthropic").is_none(),
+            "second scoped() must REPLACE the first, hiding anthropic"
+        );
+    }
+
+    #[test]
+    fn sealed_then_scoped_preserves_seal() {
+        // Documented at auth.rs sealed()'s "preserved through scoped"
+        // hint: `s.sealed().scoped([...])` returns a sealed+scoped
+        // view; subsequent `set` panics. Lock the contract in.
+        let s = AuthStorage::in_memory();
+        s.set("anthropic", AuthMethod::ApiKey { value: "a".into() });
+        let view = s.sealed().scoped(["anthropic"]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            view.set("anthropic", AuthMethod::ApiKey { value: "b".into() });
+        }));
+        assert!(result.is_err(), "sealed seal must propagate through scoped()");
     }
 
     #[test]

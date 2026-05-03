@@ -14,7 +14,6 @@ use crate::{
     AgentSessionRuntime, AuthStorage, Error, LocalProcessProvider, ModelRegistry,
     RuntimeConfig, SessionManager, Settings, ToolRegistry,
 };
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Convenience wiring for first-touch demos and docs.rs examples.
@@ -56,7 +55,8 @@ pub fn quick_start(provider: &str, model: &str) -> Result<AgentSessionRuntime, E
                 .build(),
         )
         .system_prompt(pi_agent_core::default_system_prompt().to_string())
-        .cwd(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        // `cwd` defaults to `current_dir()` inside `ConfigBuilder::build()`
+        // (per polish-1) — no need to set it explicitly here.
         .with_sandbox_provider(Arc::new(LocalProcessProvider::with_readonly_defaults()))
         .build()?;
     Ok(AgentSessionRuntime::new(cfg))

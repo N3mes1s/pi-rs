@@ -14,7 +14,7 @@ versioning follows [SemVer](https://semver.org/) per RFD 0027 §3.
 - `pi_sdk::cost::{CostRegistry, Pricing, estimate_cost_usd, sum_session_cost_usd}` with bundled price defaults for major models (Commit E).
 - `pi_sdk::quick_start(provider, model)` convenience for first-touch demos (safe-by-default: in_memory auth, readonly tools, no shell) (Commit H7).
 - `ToolRegistry::with_readonly_extras()` — read/grep/find/ls only, no shell, no fs mutation (Commit H7).
-- `ToolRegistry::with_unsafe_extras()` — alias for `with_extras()`, name signals risk (Commit H7).
+- `ToolRegistry::with_unsafe_extras()` — full tool set (read/write/edit/bash + grep/find/ls + web_search); the name itself signals risk (Commit H7).
 - `LocalProcessProvider::with_readonly_defaults()` (Commit H7).
 - README + 5 examples + doc-tested README (Commit F).
 
@@ -25,7 +25,7 @@ versioning follows [SemVer](https://semver.org/) per RFD 0027 §3.
 - `ToolGate::approve` now takes `GateContext { session_id, turn_index, parent_session, recursion_depth }` (Commit H3). `GateContext::top_level()` constructor for embedders.
 - `ToolRegistry::register` returns `Result<(), DuplicateName>` (Commit H3). New `register_or_replace` for explicit overrides.
 - `bash` tool: `cwd` argument canonicalize-jailed against `ctx.cwd`; `timeout_ms` clamped at 600 s; per-tool input cap (64 KiB) (Commit H4).
-- `AuthStorage` hardening (Commit H5): `0o600` perms + atomic temp + rename on write; `from_env_explicit(allowlist)` for opt-in env scanning; `scoped(allowlist)` for per-tenant restriction; `sealed()` for post-init immutability; `from_env()` deprecated.
+- `AuthStorage` hardening (Commit H5): `0o600` perms + atomic temp + rename on write; `from_env_explicit(allowlist)` for opt-in env scanning replacing the H5-deprecated (and polish-12-removed) implicit-slurp `from_env()`; `scoped(allowlist)` for per-tenant restriction; `sealed()` for post-init immutability.
 - `WireSerializer` for JSONL session entries (Commit H6): 1 MiB per-field cap, ANSI escape stripping, C1 + bidi-override `\u`-escape.
 - `SessionEntryKind::InterceptorInjection` variant distinguishes synthetic-user from real operator input (Commit H6).
 
@@ -51,12 +51,13 @@ versioning follows [SemVer](https://semver.org/) per RFD 0027 §3.
 - Strengthened `rootfs_version_current_matches_inlined_const` test: also asserts `cache::ROOTFS_VERSION == microvm::ROOTFS_VERSION` so a future literal-duplicate regression fails immediately (review-feedback-8 + pass-7 NIT #2).
 - `Settings::builder()` + `SettingsBuilder` — fluent builder for the most-set fields (provider/model/thinking/compact_threshold/theme/route/no_tools) plus a `with(impl FnOnce(&mut Settings))` escape hatch for the long tail. Additive prerequisite for the eventual `#[non_exhaustive]` mark on Settings (polish-8, pass-1 #8 partial).
 - `Pricing::cost_for(usage) -> f64` — compute USD cost directly without a CostRegistry lookup. Same arithmetic as `estimate_cost_usd`; useful for hot loops where the embedder already has a Pricing in hand (polish-9).
+- Re-exports through pi-sdk for `RouteMode`, `ThinkingSetting`, `QueueMode`, `MonitorSettings`, `EvolveSettings` (polish-17, pass-12 NIT #9). `SettingsBuilder::thinking(t)` / `.route(r)` previously took types not reachable through `pi_sdk::*`; embedders now have the full settings-field type set.
+- `scoped_then_scoped_replaces_rather_than_intersects` + `sealed_then_scoped_preserves_seal` regression tests in pi-ai/src/auth.rs (polish-17, pass-12 NIT #13). Lock the documented composition semantics into the test suite.
 
 ### Removed
 - `pi_coding_agent::sdk` deprecated shim (Commit K). Embedders use `pi-sdk` directly. The shim was added in Commit A as the back-compat bridge during the SDK extraction; its removal closes the SDK-extraction track.
 - `AuthStorage::from_env()` (polish-12). Was `#[deprecated]` since H5; the unsafe slurp-all-17-vars shape is gone. Binary callers use `AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS)` (own-machine trust model is auditable in code-review). SDK embedders use `from_env_explicit` with a narrower allowlist.
 - `ToolRegistry::with_extras()` (polish-12). Was a name carrying no safety signal — replaced by `with_unsafe_extras()` per RFD §4.5 #12. The post-H7 alias was kept only for migration during 0.1; pre-publish there are no embedders to migrate, so the alias was dropped. Internal pi-rs binary callers (startup.rs, sandbox-worker dispatch) updated to `with_unsafe_extras()`.
-- `BuildConfig::default()` no longer scans env vars (polish-12). Returns `AuthStorage::in_memory()`; embedders wanting auto-discovery name the providers they trust via `AuthStorage::from_env_explicit(...)` and pass the result on `BuildConfig.auth` explicitly.
 - `#[allow(deprecated)]` annotations across pi-coding-agent (startup, cmd, halo) and pi-ai tests — no longer needed once the deprecated symbol is gone.
 - `AuthStorage::from_env_explicit_iter` (polish-13). Consolidated into `from_env_explicit` which now accepts any `IntoIterator<Item = (impl Into<String>, impl AsRef<str>)>`. Slice callers migrate via bare-array literal (`[("a","b")]`) or `.iter().copied()` for the static `ENV_KEYS` slice.
 - `BuildConfig` + `build_runtime_config` (polish-15). Were the seed of the SDK extraction (originally `pi_coding_agent::sdk::BuildConfig`); when Commit K removed the `pi_coding_agent::sdk` shim they became pure overlap with `RuntimeConfig::builder()`. Per the user's pre-publish "remove migration cruft" direction they were dropped. Embedders use `RuntimeConfig::builder()` directly. `quick_start` survives as the one-liner first-touch convenience.

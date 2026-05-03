@@ -103,10 +103,6 @@ impl ToolRegistry {
     /// prefer [`with_readonly_extras`](Self::with_readonly_extras)
     /// or build the registry explicitly via [`new`](Self::new) +
     /// [`register`](Self::register).
-    ///
-    /// (Polish-12: previously this was an alias for `with_extras()`;
-    /// the alias was removed pre-publish since 0.x has no committed
-    /// back-compat surface yet.)
     pub fn with_unsafe_extras() -> Self {
         let mut r = Self::with_defaults();
         r.register_unwrap(Arc::new(grep::GrepTool));

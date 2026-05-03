@@ -171,7 +171,7 @@ The README tells you the safe path; this checklist tells you what to verify befo
 
 ## Examples
 
-The five examples in [`examples/`](examples/) cover the embedder shapes most likely to come up:
+The six examples in [`examples/`](examples/) cover the embedder shapes most likely to come up:
 
 | Example | What it shows |
 |---|---|

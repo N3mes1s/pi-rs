@@ -119,8 +119,6 @@ The `-unstable`-suffixed features stay as deprecated aliases for
 |--------------------------------------------|--------------------------------------------------|----------|
 | `pi_coding_agent::sdk::*`                  | `pi_sdk::*`                                      | 0.1.0    |
 | `LocalProcessProvider::with_defaults()`    | `LocalProcessProvider::with_readonly_defaults()` (safer) or unchanged | 0.1.0    |
-| `ToolRegistry::with_extras()`              | `ToolRegistry::with_unsafe_extras()`             | removed pre-publish (polish-12) |
-| `AuthStorage::from_env()`                  | `AuthStorage::from_env_explicit(allowlist)`      | removed pre-publish (polish-12) |
 | `ToolGate::approve(name, input)`           | `ToolGate::approve(ctx, name, input)`            | 0.1.0 (breaking; pre-1.0 ok per §3)   |
 | `ToolRegistry::register(tool)` returns `()` | returns `Result<(), DuplicateName>`              | 0.1.0 (breaking; pre-1.0 ok per §3)   |
 | `pi_sandbox_rootfs::ROOTFS_VERSION`        | `pi_sandbox::microvm::ROOTFS_VERSION`            | 0.1.0    |

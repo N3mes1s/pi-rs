@@ -83,12 +83,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // intercepts every tool dispatch; the actual Tool impls
         // never run.
         .tools(ToolRegistry::with_readonly_extras())
-        .settings(Settings {
-            provider: "anthropic".into(),
+        .settings(
             // Real model alias so ModelRegistry::resolve() succeeds.
-            model: "claude-haiku-4-5-20251001".into(),
-            ..Settings::default()
-        })
+            Settings::builder()
+                .provider("anthropic")
+                .model("claude-haiku-4-5-20251001")
+                .build(),
+        )
         .system_prompt("you are an inspector")
         .cwd(std::env::current_dir()?)
         // Per code-review pass-5 finding #6: drive a tool call through

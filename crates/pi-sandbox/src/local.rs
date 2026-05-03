@@ -1,14 +1,21 @@
-//! `LocalProcessProvider` — MVP in-process sandbox implementation.
+//! `LocalProcessProvider` — MVP in-process "sandbox" implementation.
 //!
-//! Every tool decision is executed inline in the agent process, but runs
-//! inside a dedicated **per-invocation temporary directory** rather than
-//! directly in the agent's cwd. This makes file-system side effects from
-//! one call visible to the next call in the same provider, and gives a
-//! natural blast radius boundary for analysis.
+//! Every tool decision is executed inline in the agent process, in
+//! `ctx.cwd` (no per-invocation tmpdir, no namespace boundary). The
+//! name `LocalProcessProvider` reflects that this is the same trust
+//! domain as the embedder; "sandbox" here is the trait name, not a
+//! capability claim. The safety story comes from the registered tool
+//! surface (use [`with_readonly_defaults`](LocalProcessProvider::with_readonly_defaults)
+//! to drop shell + fs-mutation), NOT from process or filesystem
+//! isolation.
+//!
+//! For real isolation use `MicroVmProvider` (RFD 0023) or
+//! `RemoteProvider` (RFD 0026) — both ship behind `*-unstable` SDK
+//! features until those RFDs land.
 //!
 //! Future versions can swap the inner `tool.invoke()` call for a real
-//! subprocess (serialised input over stdin, stdout captured), but the trait
-//! surface and telemetry shape stay identical.
+//! subprocess (serialised input over stdin, stdout captured), but the
+//! trait surface and telemetry shape stay identical.
 
 use async_trait::async_trait;
 use pi_tools::{ToolContext, ToolRegistry};

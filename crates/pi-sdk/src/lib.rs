@@ -87,10 +87,11 @@ pub use pi_sandbox::{
 pub use pi_agent_core::{
     create_agent_session, default_system_prompt, AgentEvent, AgentEventKind,
     AgentSession, AgentSessionRuntime, Compactor, ConfigBuilder, ConfigError,
-    ContextFile, DefaultProviderFactory, EventSender, GateContext, ProviderFactory,
-    RuntimeConfig, RuntimeError, SessionEntry, SessionEntryKind, SessionManager,
-    SessionMeta, SessionTree, Settings, SettingsBuilder, StreamInterceptor, ToolGate,
-    ToolGateOutcome, WireSerializer,
+    ContextFile, DefaultProviderFactory, EventSender, EvolveSettings, GateContext,
+    MonitorSettings, ProviderFactory, QueueMode, RouteMode, RuntimeConfig,
+    RuntimeError, SessionEntry, SessionEntryKind, SessionManager, SessionMeta,
+    SessionTree, Settings, SettingsBuilder, StreamInterceptor, ThinkingSetting,
+    ToolGate, ToolGateOutcome, WireSerializer,
 };
 
 // ─── quick_start convenience ──────────────────────────────────────
@@ -98,12 +99,6 @@ pub use pi_agent_core::{
 // One-liner for first-touch demos that wires the safe defaults
 // (in_memory auth, readonly tools, in-process sandbox). Production
 // embedders construct via `RuntimeConfig::builder()` directly.
-//
-// (Polish-15: BuildConfig + build_runtime_config used to live here too
-// as the seed of the SDK extraction; they were pure overlap with the
-// canonical builder once Commit K removed the pi_coding_agent::sdk
-// shim, so per the user's pre-publish "remove migration cruft"
-// direction they were dropped.)
 pub mod build;
 pub use build::quick_start;
 
@@ -136,20 +131,3 @@ pub mod mocks;
 #[cfg(feature = "mocks")]
 pub use mocks::{MockProvider, MockProviderFactory, MockSandboxProvider, MockSandboxCall};
 
-// ─── Deferred (specified in RFD 0027 §1, ship in later commits) ───
-//
-// The following surface is part of the SDK contract but lands in
-// follow-up commits per RFD 0027 §Implementation schedule:
-//
-//   - `pi_sdk::cost::{CostRegistry, estimate_cost_usd}` — Commit E.
-//   - `pi_sdk::mocks::{MockProvider, MockSandboxProvider}` — Commit D
-//     (gated on the `mocks` feature).
-//   - `pi_sdk::quick_start(provider, model)` — Commit H7 (Hardening §4.5
-//     #8 + UX review). Wires `AuthStorage::in_memory()` (NO env scan) +
-//     read-only tools + in-process executor for first-touch demos.
-//   - `InProcessExecutor` (renamed from `LocalProcessProvider`) —
-//     Commit H7 (Hardening §4.5 #12 default-surface safety renames).
-//
-// Embedders pinning `pi-sdk = "0.1"` who write code referencing these
-// names get a clear "unresolved import" error rather than silent
-// behavior drift.

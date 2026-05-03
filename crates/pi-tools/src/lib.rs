@@ -49,10 +49,6 @@ impl ToolRegistry {
     /// should prefer [`with_readonly_extras`](Self::with_readonly_extras)
     /// or build the registry explicitly via [`new`](Self::new) +
     /// [`register`](Self::register).
-    ///
-    /// (Polish-12: previously aliased to `with_extras`; the alias was
-    /// removed pre-publish since 0.x has no committed back-compat
-    /// surface yet.)
     pub fn with_unsafe_extras() -> Self {
         let mut r = Self(pi_tools_core::ToolRegistry::with_unsafe_extras());
         r.register(Arc::new(WebSearchTool::default()))
