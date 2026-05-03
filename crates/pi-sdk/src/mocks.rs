@@ -19,7 +19,6 @@
 //! 80% case: "I want to assert that my embedder code path produces
 //! the right `AgentEvent`s for a known input/output."
 
-use crate::Error;
 use async_trait::async_trait;
 use pi_ai::{
     AiError, AuthMethod, EventStream, FinishReason, GenerateRequest, ModelInfo, Provider,
@@ -41,6 +40,11 @@ use std::sync::Mutex as StdMutex;
 /// for compatibility with `Settings::default()`. Override via
 /// `with_provider_kind` / `with_provider_name` if your test asserts
 /// on the provider config.
+///
+/// Per RFD 0027 §3 (blanket `#[non_exhaustive]`): private fields
+/// are sufficient — the struct is constructible only via
+/// `MockProvider::new()` plus the chained `with_*` setters, never
+/// via struct literal from outside the SDK.
 #[derive(Clone)]
 pub struct MockProvider {
     cfg: ProviderConfig,
@@ -157,6 +161,10 @@ impl Provider for MockProvider {
 
 /// Trivial `ProviderFactory` wrapping a `MockProvider`. Embedders
 /// install via `RuntimeConfig::builder().with_provider_factory(...)`.
+///
+/// Per RFD 0027 §3 (blanket `#[non_exhaustive]`): private fields keep
+/// the struct unconstructible from outside the SDK except via
+/// `MockProvider::into_factory()`.
 pub struct MockProviderFactory {
     inner: MockProvider,
 }
@@ -177,6 +185,10 @@ impl ProviderFactory for MockProviderFactory {
 /// returns a configurable `SandboxExecution` (default: empty stdout,
 /// exit 0). Embedders use this to assert that their tool surface
 /// dispatches correctly without spinning up a real microvm.
+///
+/// Per RFD 0027 §3 (blanket `#[non_exhaustive]`): private fields keep
+/// the struct unconstructible from outside the SDK except via
+/// `MockSandboxProvider::new()` plus the chained `with_*` setters.
 #[derive(Clone)]
 pub struct MockSandboxProvider {
     response_stdout: Arc<StdMutex<String>>,
@@ -187,7 +199,13 @@ pub struct MockSandboxProvider {
 }
 
 /// Recorded `execute_tool` invocation against a `MockSandboxProvider`.
+///
+/// Per RFD 0027 §3 (blanket `#[non_exhaustive]`): marked so that
+/// future fields (call_id, cwd, timestamp, etc.) can be added
+/// MINOR-additively. Constructed only by the SDK runtime; embedders
+/// receive these via `MockSandboxProvider::calls()`.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct MockSandboxCall {
     pub tool_name: String,
     pub input: serde_json::Value,
@@ -274,31 +292,12 @@ impl SandboxProvider for MockSandboxProvider {
     }
 }
 
-// ─── Convenience: convert any pi_sdk::Error from Mock paths ────
-
-impl From<MockSandboxCall> for Error {
-    fn from(call: MockSandboxCall) -> Self {
-        Error::Other(format!("mock sandbox call recorded: {}", call.tool_name))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn mock_provider_default_emits_finish_only() {
-        let p = MockProvider::new();
-        let cfg = p.config().clone();
-        assert_eq!(cfg.name, "anthropic");
-        assert!(matches!(cfg.kind, ProviderKind::Anthropic));
-    }
-
-    #[tokio::test]
-    async fn mock_provider_with_text_response_emits_text_then_finish() {
-        use futures::StreamExt;
-        let p = MockProvider::new().with_text_response("hi");
-        let req = GenerateRequest {
+    fn empty_request() -> GenerateRequest {
+        GenerateRequest {
             model: "test".into(),
             system: None,
             messages: vec![],
@@ -307,8 +306,11 @@ mod tests {
             temperature: None,
             max_output_tokens: None,
             extras: serde_json::Value::Null,
-        };
-        let model = ModelInfo {
+        }
+    }
+
+    fn empty_model_info() -> ModelInfo {
+        ModelInfo {
             provider: "anthropic".into(),
             id: "test".into(),
             alias: None,
@@ -323,8 +325,49 @@ mod tests {
             cache_read_cost_per_mtok: None,
             cache_write_cost_per_mtok: None,
             api_kind: pi_ai::ApiKind::default(),
-        };
-        let mut stream = p.stream(req, &model).await.expect("stream");
+        }
+    }
+
+    #[test]
+    fn mock_provider_default_config_is_anthropic() {
+        // Config-shape smoke check (the existing assertion).
+        let p = MockProvider::new();
+        let cfg = p.config().clone();
+        assert_eq!(cfg.name, "anthropic");
+        assert!(matches!(cfg.kind, ProviderKind::Anthropic));
+    }
+
+    #[tokio::test]
+    async fn mock_provider_default_emits_finish_only() {
+        // Per code-review finding #5: actually drive the stream and
+        // assert the "finish only" claim, not just the config shape.
+        use futures::StreamExt;
+        let p = MockProvider::new();
+        let mut stream = p.stream(empty_request(), &empty_model_info()).await.expect("stream");
+        let mut events = Vec::new();
+        while let Some(ev) = stream.next().await {
+            events.push(ev.unwrap());
+        }
+        assert_eq!(
+            events.len(),
+            1,
+            "default MockProvider should emit exactly one event (Finish), got {events:?}"
+        );
+        assert!(
+            matches!(events[0].kind, StreamEventKind::Finish { .. }),
+            "default MockProvider's only event should be Finish, got {:?}",
+            events[0].kind
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_provider_with_text_response_emits_text_then_finish() {
+        use futures::StreamExt;
+        let p = MockProvider::new().with_text_response("hi");
+        let mut stream = p
+            .stream(empty_request(), &empty_model_info())
+            .await
+            .expect("stream");
         let mut events = Vec::new();
         while let Some(ev) = stream.next().await {
             events.push(ev.unwrap());

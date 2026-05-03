@@ -1,58 +1,43 @@
 //! Minimal embed example for `pi-sdk`.
 //!
-//! Sends one prompt to an Anthropic-backed agent and prints the streamed
-//! response. The fully-fledged example (with cost tracking, cancellation,
-//! and structured-error handling) ships in `examples/02_realistic_ci_agent.rs`
-//! once Commits B-E land.
+//! Demonstrates the SAFE-by-default `quick_start` path:
+//! - `AuthStorage::in_memory()` (NO env scan, no CWE-526 risk),
+//! - `ToolRegistry::with_readonly_extras()` (read/grep/find/ls only,
+//!   no shell, no fs mutation),
+//! - `LocalProcessProvider::with_readonly_defaults()` as sandbox.
+//!
+//! Embedders supplying credentials for one explicit provider do so
+//! AFTER `quick_start` returns — the runtime starts with zero secrets.
 //!
 //! Run with:
 //!     ANTHROPIC_API_KEY=sk-... cargo run --example 01_minimal -p pi-sdk
 
-use pi_sdk::{
-    build_runtime_config, AgentEventKind, AgentSessionRuntime, AuthStorage, BuildConfig,
-    LocalProcessProvider, Settings, ToolRegistry,
-};
-use std::sync::Arc;
+use pi_sdk::{quick_start, AgentEventKind, AuthMethod};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 1. Wire up auth from env. Anthropic / OpenAI / Google auto-detected.
-    //
-    // NOTE on safety: `from_env()` slurps every supported provider's env var
-    // unconditionally. Production embedders should prefer `from_env_explicit`
-    // (lands in Commit H5 per RFD 0027 §4.5 #8); for this minimal demo the
-    // existing seed-module shape is preserved.
-    let auth = AuthStorage::from_env();
+    // 1. Build a SAFE-by-default runtime. No env scan, no shell tools,
+    //    no fs-mutation tools. Embedders adding `bash` / `write` / `edit`
+    //    must do so explicitly via `RuntimeConfig::builder()` — see the
+    //    crate-root docs for that pattern.
+    let runtime = quick_start("anthropic", "claude-haiku-4-5-20251001")?;
 
-    // 2. Build a runtime config with the default tool set + a real sandbox.
-    let cfg = build_runtime_config(BuildConfig {
-        auth: auth.clone(),
-        // Demo convenience: `with_extras()` registers eight tools —
-        // read/write/edit/bash + grep/find/ls/web_search.
-        // Production agents should use `ToolRegistry::new()` and register
-        // tools explicitly so the surface is auditable. See RFD 0027
-        // Open Question #1 for canonical guidance.
-        tools: ToolRegistry::with_extras(),
-        settings: Settings {
-            provider: std::env::var("PI_PROVIDER")
-                .unwrap_or_else(|_| "anthropic".into()),
-            model: std::env::var("PI_MODEL")
-                .unwrap_or_else(|_| "claude-haiku-4-5-20251001".into()),
-            ..Settings::default()
-        },
-        ..BuildConfig::default()
-    })
-    .with_sandbox_provider(Arc::new(LocalProcessProvider::with_defaults()));
+    // 2. Provide credentials for the one provider we'll use. The
+    //    AuthStorage starts empty (`in_memory()` per Hardening §4.5 #8).
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| anyhow::anyhow!("set ANTHROPIC_API_KEY before running"))?;
+    runtime.config().auth_storage.set(
+        "anthropic",
+        AuthMethod::ApiKey { value: api_key },
+    );
 
-    // 3. Open a session.
-    let runtime = AgentSessionRuntime::new(cfg);
+    // 3. Open a session and stream events.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let session = runtime.create_session(Some(tx))?;
 
-    // 4. Send a prompt. Stream events back.
     tokio::spawn(async move {
         let _ = session
-            .prompt("List files in the current directory and summarise.".into())
+            .prompt("List files in the current directory.".into())
             .await;
     });
 

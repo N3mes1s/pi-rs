@@ -1525,8 +1525,37 @@ pub enum RuntimeError {
     /// A custom `Tool::invoke` panicked. The runtime caught the panic
     /// and returns this variant instead of aborting the worker thread
     /// (Hardening §4.5 #1).
+    ///
+    /// **Variant identity, not error path.** The runtime's tool-call
+    /// path catches the panic and converts the result into a
+    /// `ToolResult { is_error: true, model_output: "ERROR: tool ..."`
+    /// so the model sees the failure as part of normal tool dispatch.
+    /// This variant exists so embedders implementing their own
+    /// `Tool::invoke` wrapper (e.g. for telemetry or alerting) can
+    /// pattern-match on the panic case via the
+    /// [`tool_panic_message`](Self::tool_panic_message) helper or
+    /// via direct construction in their own runtime layer.
     #[error("tool `{tool}` panicked: {message}")]
     ToolPanicked { tool: String, message: String },
+}
+
+impl RuntimeError {
+    /// Construct a [`ToolPanicked`](Self::ToolPanicked) variant from a
+    /// `std::panic::catch_unwind` payload. Useful for embedders
+    /// implementing their own `Tool::invoke` wrapper.
+    pub fn tool_panic_message(
+        tool: impl Into<String>,
+        payload: &Box<dyn std::any::Any + Send>,
+    ) -> Self {
+        let message = if let Some(s) = payload.downcast_ref::<&'static str>() {
+            (*s).to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "tool panicked (non-string payload)".to_string()
+        };
+        Self::ToolPanicked { tool: tool.into(), message }
+    }
 }
 
 /// Convenience wrapper matching `createAgentSession` in upstream pi.

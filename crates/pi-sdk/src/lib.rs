@@ -16,22 +16,23 @@
 //! RFD 0023 (microvm sandbox) + RFD 0026 (remote sandbox) + the hardening
 //! contract from RFD 0027 §4.5 landing in pi-rs itself.
 //!
-//! # Quick start
+//! # Quick start (safe by default)
 //!
 //! ```no_run
-//! use pi_sdk::{
-//!     build_runtime_config, AgentEventKind, AgentSessionRuntime, AuthStorage,
-//!     BuildConfig, Settings, ToolRegistry,
-//! };
+//! use pi_sdk::{quick_start, AgentEventKind, AuthMethod};
 //!
 //! # async fn run() -> anyhow::Result<()> {
-//! let cfg = build_runtime_config(BuildConfig {
-//!     auth: AuthStorage::from_env(),
-//!     tools: ToolRegistry::with_defaults(),
-//!     settings: Settings::default(),
-//!     ..BuildConfig::default()
-//! });
-//! let runtime = AgentSessionRuntime::new(cfg);
+//! // `quick_start` wires the SAFE defaults: AuthStorage::in_memory()
+//! // (no env scan), readonly tools only (read/grep/find/ls), no shell.
+//! let runtime = quick_start("anthropic", "claude-haiku-4-5-20251001")?;
+//!
+//! // Embedder MUST set credentials before the first prompt — `in_memory()`
+//! // means no env scan, so the SDK starts with zero secrets.
+//! runtime.config().auth_storage.set(
+//!     "anthropic",
+//!     AuthMethod::ApiKey { value: std::env::var("ANTHROPIC_API_KEY")? },
+//! );
+//!
 //! let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 //! let session = runtime.create_session(Some(tx))?;
 //! tokio::spawn(async move { let _ = session.prompt("Hello".into()).await; });
@@ -45,7 +46,12 @@
 //! # Ok(()) }
 //! ```
 //!
-//! See `examples/01_minimal.rs` for a runnable end-to-end version.
+//! For embedders that need shell or fs-mutation tools, construct the
+//! [`RuntimeConfig`] explicitly via [`RuntimeConfig::builder()`] and
+//! pick the tool set deliberately (`ToolRegistry::with_unsafe_extras()`
+//! is the safety-named alias of `with_extras()` that registers `bash`).
+//! See the README and `examples/01_minimal.rs` for a runnable
+//! end-to-end version.
 
 // ─── Provider / model ─────────────────────────────────────────────
 pub use pi_ai::{
