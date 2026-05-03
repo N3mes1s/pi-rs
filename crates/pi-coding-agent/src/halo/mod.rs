@@ -3,6 +3,7 @@
 
 pub mod backlog;
 pub mod compiled_agent;
+pub mod compiled_agent_dispatch;
 pub mod config;
 pub mod cycle;
 pub mod jsonl;

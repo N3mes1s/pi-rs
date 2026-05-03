@@ -3,12 +3,18 @@ use chrono::{DateTime, Utc};
 use serde_json::json;
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::flag as signal_flag;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use pi_sdk::cost::CostRegistry;
+
+use crate::halo::compiled_agent_dispatch::{
+    run_compiled_agent_dispatch, DispatchInputs, SpecRuntimeState,
+};
 use crate::halo::{config, cycle, state};
 
 pub fn halo_dir_for_repo(repo_root: &Path) -> Option<PathBuf> { cycle::halo_dir_for_repo(repo_root) }
@@ -30,6 +36,22 @@ pub fn run_supervisor(repo_root: &Path, config_path: Option<&Path>, max_cycles: 
     signal_flag::register(SIGINT, Arc::clone(&sig_any))?; signal_flag::register(SIGTERM, Arc::clone(&sig_any))?; signal_flag::register(SIGINT, Arc::clone(&sigint))?; signal_flag::register(SIGTERM, Arc::clone(&sigterm))?;
     let orchestrate_pid_shared = Arc::new(AtomicI32::new(0));
     startup_reconciliation(repo_root, &halo_dir)?; cycle::prune_old_cycle_branches(repo_root, cfg.cycle.keep_branches);
+
+    // Per RFD 0028 §D: when [[compiled_agent]] specs are declared,
+    // halo runs them AFTER each existing 8-step orchestrate cycle.
+    // Throttle state is per-spec, in-memory across ticks; reset on
+    // halo restart.
+    let mut compiled_agent_states: HashMap<String, SpecRuntimeState> = HashMap::new();
+    // Pricing registry for spend attribution. v1 uses pi-sdk's
+    // bundled best-effort table; future RFD can let operators
+    // override per-model rates in halo.toml.
+    let pricing = CostRegistry::with_bundled_defaults();
+    // halo.toml's parent directory — anchor for the spec's
+    // relative `binary` path resolution per RFD §D.2.
+    let halo_toml_parent = cfg_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let alerts_jsonl = halo_dir.join("alerts.jsonl");
+    let usage_jsonl = halo_dir.join("usage.jsonl");
+    let state_jsonl = halo_dir.join("state.jsonl");
     // v0.27 fix (canary bug #12): continue cycle numbering from
     // the highest CYCLE_DONE/CYCLE_ABORTED in state.jsonl. Prior
     // versions reset cycle_n=1 on every supervisor restart, making
@@ -83,6 +105,35 @@ pub fn run_supervisor(repo_root: &Path, config_path: Option<&Path>, max_cycles: 
         last_cycle_start = Some(std::time::Instant::now());
         let ctx = cycle::build_ctx(repo_root, &halo_dir, cycle_n, &cfg, sig_any.clone(), sigint.clone(), sigterm.clone(), orchestrate_pid_shared.clone());
         match cycle::run_cycle_with_ctx(repo_root, cycle_n, ctx) { Ok(_) | Err(_) => {} }
+
+        // Per RFD 0028 §D: after each orchestrate cycle, run the
+        // declared compiled-agent specs through the dispatch loop.
+        // Empty `compiled_agents` is a no-op (pre-Commit-D
+        // behavior — `cfg.compiled_agents` defaults to empty Vec).
+        if !cfg.compiled_agents.is_empty() {
+            let dispatch_inputs = DispatchInputs {
+                specs: &cfg.compiled_agents,
+                halo_toml_parent: &halo_toml_parent,
+                cwd: repo_root,
+                pricing: &pricing,
+                pid_shared: orchestrate_pid_shared.clone(),
+                signal_received: sig_any.clone(),
+                state_jsonl: &state_jsonl,
+                usage_jsonl: &usage_jsonl,
+                alerts_jsonl: &alerts_jsonl,
+                paused_path: &paused_path(&halo_dir),
+                cycle_n,
+            };
+            // The dispatch returns Err when a spec hits its
+            // throttle_streak_max — that ALSO writes the paused
+            // file. Propagate by breaking the supervisor loop;
+            // operator must `pi --halo-resume` after investigating.
+            if let Err(e) = run_compiled_agent_dispatch(&dispatch_inputs, &mut compiled_agent_states) {
+                eprintln!("halo: compiled-agent dispatch paused halo: {e}");
+                break;
+            }
+        }
+
         if pause_req_path(&halo_dir).exists() { let _ = fs::rename(pause_req_path(&halo_dir), paused_path(&halo_dir)); break; }
         if stop_req_path(&halo_dir).exists() { let _ = fs::remove_file(stop_req_path(&halo_dir)); let _ = fs::remove_file(lock_path(&halo_dir)); break; }
         cycle_n += 1;
