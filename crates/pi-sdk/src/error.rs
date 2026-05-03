@@ -154,4 +154,32 @@ mod tests {
         let s = format!("{e}");
         assert!(s.contains("100000") && s.contains("50000"));
     }
+
+    // Per code-review pass-1 finding #12: Display smoke tests for
+    // every future-additive variant. The RFD §3 contract is "variant
+    // *names* are stable; Display strings MAY change within a MINOR"
+    // — these tests don't lock the format string (no exact match),
+    // they just assert that field values reach the rendered output
+    // so a future rename of `cap` → `limit` would surface in CI.
+
+    #[test]
+    fn depth_exceeded_displays_depth_and_cap() {
+        let e = Error::DepthExceeded { depth: 12, cap: 8 };
+        let s = format!("{e}");
+        assert!(s.contains("12") && s.contains("8"), "got: {s}");
+    }
+
+    #[test]
+    fn invocation_cap_exceeded_displays_invoked_and_cap() {
+        let e = Error::InvocationCapExceeded { invoked: 65, cap: 64 };
+        let s = format!("{e}");
+        assert!(s.contains("65") && s.contains("64"), "got: {s}");
+    }
+
+    #[test]
+    fn interceptor_thrash_displays_aborts_and_cap() {
+        let e = Error::InterceptorThrash { aborts: 4, cap: 3 };
+        let s = format!("{e}");
+        assert!(s.contains('4') && s.contains('3'), "got: {s}");
+    }
 }

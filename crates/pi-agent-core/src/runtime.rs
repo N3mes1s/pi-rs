@@ -102,6 +102,57 @@ mod gate_context_tests {
     }
 }
 
+#[cfg(test)]
+mod config_builder_cwd_tests {
+    //! Per code-review pass-1 finding #9: ConfigBuilder.cwd() is no
+    //! longer mandatory; build() defaults to std::env::current_dir().
+    //! Most embedders just want "the current working directory" and
+    //! the explicit setter was forcing them to copy-paste a fallback.
+
+    use super::*;
+    use crate::session::SessionManager;
+    use crate::settings::Settings;
+    use pi_ai::{AuthStorage, ModelRegistry};
+    use pi_tools::ToolRegistry;
+
+    fn minimal_builder() -> ConfigBuilder {
+        let auth = AuthStorage::in_memory();
+        RuntimeConfig::builder()
+            .session_manager(SessionManager::in_memory())
+            .auth_storage(auth.clone())
+            .model_registry(ModelRegistry::new(auth))
+            .tools(ToolRegistry::new())
+            .settings(Settings::default())
+            .system_prompt("test")
+    }
+
+    #[test]
+    fn build_without_explicit_cwd_defaults_to_current_dir() {
+        let cfg = minimal_builder().build().expect("should build with default cwd");
+        let expected = std::env::current_dir().unwrap();
+        assert_eq!(cfg.cwd, expected);
+    }
+
+    #[test]
+    fn explicit_cwd_overrides_default() {
+        let custom = std::path::PathBuf::from("/tmp/explicit-cwd");
+        let cfg = minimal_builder()
+            .cwd(custom.clone())
+            .build()
+            .expect("explicit cwd should still work");
+        assert_eq!(cfg.cwd, custom);
+    }
+
+    #[test]
+    fn cwd_from_env_helper_matches_current_dir() {
+        let cfg = minimal_builder()
+            .cwd_from_env()
+            .build()
+            .expect("cwd_from_env should produce a valid cwd");
+        assert_eq!(cfg.cwd, std::env::current_dir().unwrap());
+    }
+}
+
 /// Approval gate consulted before each tool invocation. The runtime
 /// calls [`ToolGate::approve`] with the tool name + JSON-serialised
 /// input + a [`GateContext`] carrying session/turn scope; the gate
@@ -376,6 +427,15 @@ impl ConfigBuilder {
         self
     }
 
+    /// Set `cwd` to `std::env::current_dir()`. Per code-review pass-1
+    /// finding #9: every embedder ends up writing
+    /// `std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))`
+    /// — ship the helper. Falls back to `.` if `current_dir()` errors
+    /// (e.g. the cwd was unlinked).
+    pub fn cwd_from_env(self) -> Self {
+        self.cwd(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
     // ─── Optional plug-ins ─────────────────────────────────────
     pub fn with_context_files(mut self, c: Vec<ContextFile>) -> Self {
         self.context_files = c;
@@ -450,7 +510,15 @@ impl ConfigBuilder {
                 .system_prompt
                 .ok_or(ConfigError::Missing { field: "system_prompt" })?,
             context_files: self.context_files,
-            cwd: self.cwd.ok_or(ConfigError::Missing { field: "cwd" })?,
+            // Per code-review pass-1 finding #9: if `cwd` was not set
+            // explicitly, default to `std::env::current_dir()`. Almost
+            // every embedder wrote that fallback by hand. Embedders
+            // wanting an explicit cwd still call `.cwd(path)`; this is
+            // pure additive ergonomics.
+            cwd: self
+                .cwd
+                .or_else(|| std::env::current_dir().ok())
+                .ok_or(ConfigError::Missing { field: "cwd" })?,
             provider_factory: self.provider_factory,
             tool_gate: self.tool_gate,
             gate_ask_is_approve: self.gate_ask_is_approve,
