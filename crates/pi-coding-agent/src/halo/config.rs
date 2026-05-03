@@ -3,6 +3,7 @@
 //! `#[serde(deny_unknown_fields)]` on every struct (mirrors RFD 0021).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use anyhow::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +26,19 @@ pub struct Config {
     pub cycle: Cycle,
     #[serde(default, rename = "orchestrate")]
     pub orchestrate: Orchestrate,
+    /// Per RFD 0028 §D.2: array of compiled-agent cycle declarations.
+    /// Empty or absent → halo runs only the existing orchestrate
+    /// cycle shape (pre-RFD-0028 behavior, unchanged). Non-empty →
+    /// halo runs each declared compiled agent as a sibling cycle
+    /// shape; the cycle-driver dispatch wiring lands in a follow-up
+    /// commit (Phase 2 of Commit D).
+    ///
+    /// Note: spec v0.10 originally proposed `[[cycle]]` for this
+    /// array, but `[cycle]` already exists as a singular table —
+    /// TOML disallows the same key being both. v0.14 renamed to
+    /// `[[compiled_agent]]`.
+    #[serde(default, rename = "compiled_agent")]
+    pub compiled_agents: Vec<CompiledAgentSpec>,
 }
 
 fn default_target_branch() -> String { "halo/auto-merge".into() }
@@ -205,6 +219,81 @@ impl Default for Orchestrate {
     }
 }
 
+/// Per RFD 0028 §D.2 — one compiled-agent cycle declaration in
+/// halo.toml. The cycle-driver runs each as a separate cycle
+/// shape (alongside the existing orchestrate cycle).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledAgentSpec {
+    /// Display name for the cycle log + alerts. Must be unique
+    /// across all `[[compiled_agent]]` blocks in this halo.toml.
+    pub name: String,
+
+    /// Path to the compiled agent binary. Resolution per §D.2:
+    /// - starts with "/" → absolute path used verbatim.
+    /// - contains "/"    → relative to halo.toml's parent dir.
+    /// - no "/"          → resolved via `$PATH`.
+    pub binary: String,
+
+    /// Args appended after the binary. v1 ALWAYS forces `--jsonl`
+    /// for spend attribution, regardless of whether the operator
+    /// listed it here (Commit B's arg parser is `any(|a| a ==
+    /// "--jsonl")` so duplicates are harmless).
+    #[serde(default)]
+    pub args: Vec<String>,
+
+    /// Piped to the binary's stdin. Compiled agents read this via
+    /// `read_prompt_from_args_or_stdin` per RFD 0028 §B.11.
+    pub prompt: String,
+
+    /// Exit-code → policy table per §D.6. Required: a row for 0.
+    /// Unspecified codes default to `Alert` at runtime. The optional
+    /// `"*"` wildcard catches any unspecified code; without it,
+    /// "alert" is the safe-by-default choice.
+    pub on_exit: BTreeMap<String, ExitPolicy>,
+
+    /// Wall-clock cap for the cycle. Default 3600 (1 hour) — matches
+    /// halo's safety-by-default ethos elsewhere. `0` = explicit
+    /// no-cap (not recommended).
+    #[serde(default = "d_timeout_secs")]
+    pub timeout_secs: u64,
+
+    /// Additional env vars to set on the child process beyond what
+    /// halo inherits from its OWN env. NOT the secrets channel —
+    /// halo's env IS that. This is for cycle-specific tags
+    /// (e.g., `CYCLE_NAME = "fix-flaky-tests"`).
+    #[serde(default)]
+    pub env_extra: BTreeMap<String, String>,
+
+    /// Per §D.6 throttle math: `min(2^streak * base_delay_secs,
+    /// cap_secs)`. After `streak_max` consecutive throttle
+    /// outcomes, halo pauses entirely.
+    #[serde(default = "d_throttle_streak_max")]
+    pub throttle_streak_max: u32,
+    #[serde(default = "d_throttle_base_delay_secs")]
+    pub throttle_base_delay_secs: u64,
+    #[serde(default = "d_throttle_cap_secs")]
+    pub throttle_cap_secs: u64,
+}
+
+fn d_timeout_secs() -> u64 { 3600 }
+fn d_throttle_streak_max() -> u32 { 5 }
+fn d_throttle_base_delay_secs() -> u64 { 60 }
+fn d_throttle_cap_secs() -> u64 { 3600 }
+
+/// Per RFD 0028 §D.6 exit-code → behavior mapping. The serde
+/// `rename_all = "snake_case"` gives the operator the
+/// "continue"/"alert"/"throttle" string spelling on the wire.
+/// Future variants (Pause, Restart, ...) land additively at v2
+/// without a string-parsing migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitPolicy {
+    Continue,
+    Alert,
+    Throttle,
+}
+
 /// Parse a TOML string into a [`Config`].
 pub fn parse(toml_str: &str) -> Result<Config> {
     toml::from_str(toml_str).map_err(|e| anyhow::anyhow!("halo.toml parse error: {}", e))
@@ -255,5 +344,223 @@ pub fn validate(cfg: &Config, allow_main: bool) -> Vec<String> {
         Some(_) => {}
     }
 
+    // Compiled-agent specs (RFD 0028 §D.2):
+    //   - name unique across all blocks
+    //   - non-empty name + binary + prompt
+    //   - on_exit has a row for "0" (Required per §D.6)
+    //   - on_exit keys are either "*" or parseable as i32
+    let mut seen_names = std::collections::HashSet::new();
+    for spec in &cfg.compiled_agents {
+        if spec.name.trim().is_empty() {
+            errs.push("[[compiled_agent]] name is empty".into());
+        } else if !seen_names.insert(spec.name.clone()) {
+            errs.push(format!(
+                "[[compiled_agent]] name {:?} declared more than once",
+                spec.name
+            ));
+        }
+        if spec.binary.trim().is_empty() {
+            errs.push(format!(
+                "[[compiled_agent]] {:?}: binary is empty",
+                spec.name
+            ));
+        }
+        if spec.prompt.trim().is_empty() {
+            errs.push(format!(
+                "[[compiled_agent]] {:?}: prompt is empty",
+                spec.name
+            ));
+        }
+        if !spec.on_exit.contains_key("0") {
+            errs.push(format!(
+                "[[compiled_agent]] {:?}: on_exit MUST declare a policy for exit code 0",
+                spec.name
+            ));
+        }
+        for key in spec.on_exit.keys() {
+            if key == "*" {
+                continue;
+            }
+            if key.parse::<i32>().is_err() {
+                errs.push(format!(
+                    "[[compiled_agent]] {:?}: on_exit key {:?} is not a valid exit code (use a number or \"*\")",
+                    spec.name, key
+                ));
+            }
+        }
+    }
+
     errs
+}
+
+#[cfg(test)]
+mod compiled_agent_tests {
+    //! Per RFD 0028 §D.2 schema tests. Phase 1 of Commit D ships
+    //! the parsing + validation; Phase 2 wires the cycle-driver
+    //! dispatch. Until then these specs are PARSED but not
+    //! EXECUTED — operators can pre-author halo.toml against
+    //! the schema today.
+
+    use super::*;
+
+    fn base_cfg() -> &'static str {
+        r#"name = "halo-test"
+target_branch = "halo/auto-merge"
+[clone]
+expected_root = "/work/halo-clone"
+"#
+    }
+
+    #[test]
+    fn no_compiled_agents_parses_clean() {
+        let cfg = parse(base_cfg()).expect("base parses");
+        assert!(cfg.compiled_agents.is_empty());
+    }
+
+    #[test]
+    fn one_compiled_agent_with_defaults_parses_and_validates() {
+        let toml = format!(
+            "{base}\n[[compiled_agent]]\nname = \"fix-flaky\"\nbinary = \"./bin/agent\"\nprompt = \"audit failures\"\non_exit = {{ \"0\" = \"continue\", \"1\" = \"alert\", \"3\" = \"throttle\" }}\n",
+            base = base_cfg()
+        );
+        let cfg = parse(&toml).expect("parses");
+        assert_eq!(cfg.compiled_agents.len(), 1);
+        let spec = &cfg.compiled_agents[0];
+        assert_eq!(spec.name, "fix-flaky");
+        assert_eq!(spec.binary, "./bin/agent");
+        assert_eq!(spec.timeout_secs, 3600);
+        assert_eq!(spec.throttle_streak_max, 5);
+        assert_eq!(spec.throttle_base_delay_secs, 60);
+        assert_eq!(spec.throttle_cap_secs, 3600);
+        assert!(spec.args.is_empty());
+        assert!(spec.env_extra.is_empty());
+        assert_eq!(spec.on_exit.get("0"), Some(&ExitPolicy::Continue));
+        assert_eq!(spec.on_exit.get("1"), Some(&ExitPolicy::Alert));
+        assert_eq!(spec.on_exit.get("3"), Some(&ExitPolicy::Throttle));
+        let errs = validate(&cfg, false);
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn env_extra_and_args_round_trip() {
+        let toml = format!(
+            r#"{base}
+[[compiled_agent]]
+name    = "with-env"
+binary  = "./bin/agent"
+args    = ["--jsonl", "--debug"]
+prompt  = "..."
+on_exit = {{ "0" = "continue" }}
+[compiled_agent.env_extra]
+CYCLE_NAME = "with-env"
+GIT_PAGER  = "cat"
+"#,
+            base = base_cfg()
+        );
+        let cfg = parse(&toml).expect("parses");
+        let spec = &cfg.compiled_agents[0];
+        assert_eq!(spec.args, vec!["--jsonl".to_string(), "--debug".into()]);
+        assert_eq!(spec.env_extra.get("CYCLE_NAME"), Some(&"with-env".to_string()));
+        assert_eq!(spec.env_extra.get("GIT_PAGER"), Some(&"cat".to_string()));
+    }
+
+    #[test]
+    fn duplicate_name_caught_at_validate() {
+        let toml = format!(
+            r#"{base}
+[[compiled_agent]]
+name    = "dupe"
+binary  = "/x"
+prompt  = "p"
+on_exit = {{ "0" = "continue" }}
+
+[[compiled_agent]]
+name    = "dupe"
+binary  = "/y"
+prompt  = "q"
+on_exit = {{ "0" = "continue" }}
+"#,
+            base = base_cfg()
+        );
+        let cfg = parse(&toml).expect("parses");
+        let errs = validate(&cfg, false);
+        assert!(
+            errs.iter().any(|e| e.contains("declared more than once")),
+            "{errs:?}",
+        );
+    }
+
+    #[test]
+    fn missing_zero_row_caught() {
+        let toml = format!(
+            r#"{base}
+[[compiled_agent]]
+name    = "no-zero"
+binary  = "/x"
+prompt  = "p"
+on_exit = {{ "1" = "alert" }}
+"#,
+            base = base_cfg()
+        );
+        let cfg = parse(&toml).expect("parses");
+        let errs = validate(&cfg, false);
+        assert!(
+            errs.iter().any(|e| e.contains("MUST declare a policy for exit code 0")),
+            "{errs:?}",
+        );
+    }
+
+    #[test]
+    fn wildcard_key_accepted() {
+        let toml = format!(
+            r#"{base}
+[[compiled_agent]]
+name    = "wild"
+binary  = "/x"
+prompt  = "p"
+on_exit = {{ "0" = "continue", "*" = "alert" }}
+"#,
+            base = base_cfg()
+        );
+        let cfg = parse(&toml).expect("parses");
+        let errs = validate(&cfg, false);
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn non_numeric_non_wildcard_key_caught() {
+        let toml = format!(
+            r#"{base}
+[[compiled_agent]]
+name    = "bad-key"
+binary  = "/x"
+prompt  = "p"
+on_exit = {{ "0" = "continue", "abc" = "alert" }}
+"#,
+            base = base_cfg()
+        );
+        let cfg = parse(&toml).expect("parses");
+        let errs = validate(&cfg, false);
+        assert!(
+            errs.iter().any(|e| e.contains("not a valid exit code")),
+            "{errs:?}",
+        );
+    }
+
+    #[test]
+    fn unknown_exit_policy_string_rejected_at_serde() {
+        let toml = format!(
+            r#"{base}
+[[compiled_agent]]
+name    = "x"
+binary  = "/x"
+prompt  = "p"
+on_exit = {{ "0" = "yolo" }}
+"#,
+            base = base_cfg()
+        );
+        let err = parse(&toml).expect_err("yolo is not a valid ExitPolicy");
+        let msg = format!("{err}");
+        assert!(msg.contains("yolo") || msg.contains("variant"), "{msg}");
+    }
 }

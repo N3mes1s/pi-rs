@@ -148,6 +148,7 @@ pub fn default_config() -> crate::halo::config::Config {
         proposer: Default::default(),
         cycle: Default::default(),
         orchestrate: Default::default(),
+        compiled_agents: Vec::new(),
     }
 }
 

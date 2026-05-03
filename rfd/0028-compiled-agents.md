@@ -1,6 +1,6 @@
 # RFD 0028 — Compiled agents from TOML manifest (meta + split into A/B/C/D)
 
-- **Status:** Discussion (v0.13 — ALL SECTIONS READY: meta v0.4, Commit A v0.5, Commit B v0.8, Commit C v0.9, Commit D v0.12).
+- **Status:** Discussion (v0.14 — ALL SECTIONS READY through v0.13; v0.14 is a schema-name fix surfaced during Commit D Phase 2 implementation).
 - **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1, v0.2, v0.3, Commit A v1, Commit A v0.5, Commit B v1, Commit B v0.7 passes)
 - **Created:** 2026-05-03
 - **Implemented:** *(pending sub-commits Commit A–Commit D)*
@@ -1443,7 +1443,7 @@ non-zero exits, throttles on budget breach.
 
 Today's `halo.toml` (RFD 0025 §Config: `<repo>/.pi/halo.toml`,
 line 530 onward) has a single implicit cycle shape: orchestrate.
-Commit D adds the `[[cycle]]` array-of-tables for the operator
+Commit D adds the `[[compiled_agent]]` array-of-tables for the operator
 to declare one or more compiled-agent cycles:
 
 ```toml
@@ -1456,7 +1456,7 @@ to declare one or more compiled-agent cycles:
 # absent, halo's behavior is unchanged from today (pre-Commit-D).
 # If non-empty, halo runs the listed cycles in declaration
 # order, one per supervisor tick, then loops.
-[[cycle]]
+[[compiled_agent]]
 name    = "fix-flaky-tests"        # display name for cycle log + alerts.
 binary  = "./bin/fix-flaky-tests"  # path resolution rules:
                                    #   - starts with "/" → absolute path.
@@ -1504,12 +1504,12 @@ throttle_cap_secs       = 3600     # Maximum backoff (1 hour).
 # any other TOML key (matches GitHub Actions, docker-compose,
 # systemd `Environment=` — flat KEY=VALUE shape was rejected
 # pre-publish for being unidiomatic).
-[cycle.env_extra]
+[compiled_agent.env_extra]
 CYCLE_NAME    = "fix-flaky-tests"
 GIT_PAGER     = "cat"
 ```
 
-Halo's existing `[[cycle]] kind = "orchestrate"` (implicit
+Halo's existing `[[compiled_agent]] kind = "orchestrate"` (implicit
 today) becomes one of two shapes; orchestrate cycles continue
 to work without any operator-side change. The new shape is
 distinguished by the presence of `binary`.
@@ -1671,7 +1671,7 @@ own Usage events).
 
 ##### D.6 — Exit-code policy mapping
 
-The `on_exit` table in `halo.toml` `[[cycle]]` declares one of
+The `on_exit` table in `halo.toml` `[[compiled_agent]]` declares one of
 three policies per exit code:
 
 | Policy | Halo behavior |
@@ -1697,7 +1697,7 @@ the three current variants continues to deserialize cleanly.
 
 - **Cycle-kind plug-in dispatch trait.** Halo currently has no
   dynamic cycle-kind registry; Commit D piggybacks on the
-  static "if `[[cycle]]` has `binary`, spawn that path"
+  static "if `[[compiled_agent]]` has `binary`, spawn that path"
   conditional. A real plug-in trait (so third-party crates
   could register custom cycle kinds) is a halo refactor RFD,
   not Commit D.
@@ -1722,7 +1722,7 @@ the three current variants continues to deserialize cleanly.
 ##### D.8 — Test plan
 
 - **End-to-end with MockProvider:** halo.toml with one
-  compiled-agent `[[cycle]]` pointing at a binary built from
+  compiled-agent `[[compiled_agent]]` pointing at a binary built from
   the dice-oracle.toml fixture (Commit A) compiled with
   `--features mocks` (Commit B's manifest can opt into
   features via Cargo.toml — but for v1, this just means
@@ -1770,7 +1770,7 @@ the three current variants continues to deserialize cleanly.
 - `crates/pi-coding-agent/src/halo/jsonl.rs` — NEW;
   AgentEvent JSONL parser + `cycle_spend` (D.5). ~140 LoC.
 - `crates/pi-coding-agent/src/halo/config.rs` — extend
-  the existing config with `[[cycle]]` schema (D.2): name,
+  the existing config with `[[compiled_agent]]` schema (D.2): name,
   binary, args, prompt, on_exit (typed `ExitPolicy` enum),
   timeout_secs, env_extra, throttle_*. ~120 LoC.
 - `crates/pi-coding-agent/src/halo/cycle.rs` — refactor
@@ -1781,7 +1781,7 @@ the three current variants continues to deserialize cleanly.
   `CycleSubprocessOutcome` shape.
 - `crates/pi-coding-agent/src/halo/run.rs` — extend the
   cycle-driver loop to dispatch by cycle shape (the new
-  `[[cycle]] binary = ...` rows take the new path). ~80 LoC
+  `[[compiled_agent]] binary = ...` rows take the new path). ~80 LoC
   delta.
 - Tests: `crates/pi-coding-agent/tests/halo_compiled_agent.rs`
   (D.8 fixtures + assertions, including the 3 binary-path
@@ -1908,6 +1908,21 @@ verify the *split* itself works:
 
 ## Revision history
 
+- **v0.14 (2026-05-03):** Implementation surfaced a TOML schema
+  conflict during Commit D Phase 2: pi-coding-agent's existing
+  `halo.toml` already declares `[cycle]` as a singular TABLE
+  (`crates/pi-coding-agent/src/halo/config.rs:24` —
+  `Cycle { steps, keep_branches }`). TOML disallows the same
+  key being both a table AND an array-of-tables, so the v0.10-
+  through-v0.13 spec's `[[cycle]]` array-of-tables cannot
+  coexist with the existing `[cycle]` table. v0.14 renames the
+  new compiled-agent declaration block from `[[cycle]]` →
+  `[[compiled_agent]]` (and the nested `[cycle.env_extra]` →
+  `[compiled_agent.env_extra]`). No operator impact — no
+  halo.toml exists today with `[[cycle]]` blocks since the
+  feature hasn't shipped. Cleaner semantics too — operators
+  reading "compiled_agent" know exactly what the block declares.
+
 - **v0.13 (2026-05-03):** Commit D v0.12 critic returned
   `Verdict: READY`. With this, **all 5 sections of RFD 0028
   are critic-approved**:
@@ -1952,7 +1967,7 @@ verify the *split* itself works:
     `["FOO=bar"]`; critic flagged as unidiomatic vs.
     GitHub Actions / docker-compose / systemd `Environment=`
     conventions which are all `KEY=VALUE` outliers.
-    v0.12 switches to a TOML-table form `[cycle.env_extra]
+    v0.12 switches to a TOML-table form `[compiled_agent.env_extra]
     KEY = "value"` matching every other TOML key the operator
     writes. Rust type changes from `&[(String, String)]` to
     `&BTreeMap<String, String>` (BTreeMap for deterministic
@@ -2030,10 +2045,10 @@ verify the *split* itself works:
   Commit D sub-sections added:
   - D.1 — background framing (halo today spawns
     `pi --orchestrate`; Commit D generalises to "any binary
-    in halo.toml [[cycle]]"; killer use case is
+    in halo.toml [[compiled_agent]]"; killer use case is
     operator-authored fix-flaky-tests-style agents running
     forever under halo's outer loop).
-  - D.2 — `halo.toml` `[[cycle]]` schema additions
+  - D.2 — `halo.toml` `[[compiled_agent]]` schema additions
     (`name`, `binary`, `args`, `prompt`, `on_exit` table,
     `timeout_secs`); halo ALWAYS forces `--jsonl` for spend
     attribution (D.5).
