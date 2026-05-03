@@ -1,6 +1,6 @@
 # RFD 0028 — Compiled agents from TOML manifest (meta + split into A/B/C/D)
 
-- **Status:** Draft (v0.11; meta READY in v0.4, Commit A READY in v0.5, Commit B READY in v0.8, Commit C READY in v0.9, Commit D v0.10 spec pending critic)
+- **Status:** Draft (v0.12; meta READY in v0.4, Commit A READY in v0.5, Commit B READY in v0.8, Commit C READY in v0.9, Commit D v0.11 spec pending critic)
 - **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1, v0.2, v0.3, Commit A v1, Commit A v0.5, Commit B v1, Commit B v0.7 passes)
 - **Created:** 2026-05-03
 - **Implemented:** *(pending sub-commits Commit A–Commit D)*
@@ -1490,20 +1490,23 @@ timeout_secs = 1800                # Wall-clock cap. Halo SIGTERMs the child
                                    # `timeout_secs = 0` for explicit no-cap
                                    # (not recommended).
 
-env_extra = ["FOO=bar"]            # OPTIONAL. Additional env vars to set on
-                                   # the child beyond what halo inherits from
-                                   # its own process env (D.3). Halo
-                                   # inherits its own env by default — so
-                                   # ANTHROPIC_API_KEY etc. propagate without
-                                   # any per-cycle config. `env_extra` is
-                                   # for cycle-specific extras (e.g.,
-                                   # CYCLE_NAME=fix-flaky-tests).
-
 throttle_streak_max     = 5        # Pause halo entirely after N consecutive
                                    # throttle outcomes. v1 default 5.
 throttle_base_delay_secs = 60      # Initial backoff delay; halo waits
                                    # 2^streak * base_delay before next cycle.
 throttle_cap_secs       = 3600     # Maximum backoff (1 hour).
+
+# OPTIONAL nested table for additional env vars to set on the
+# child beyond what halo inherits from its own process env (D.3).
+# Halo inherits its own env by default — so ANTHROPIC_API_KEY etc.
+# propagate without any per-cycle config. `env_extra` is for
+# cycle-specific extras. TOML-table shape so each var reads like
+# any other TOML key (matches GitHub Actions, docker-compose,
+# systemd `Environment=` — flat KEY=VALUE shape was rejected
+# pre-publish for being unidiomatic).
+[cycle.env_extra]
+CYCLE_NAME    = "fix-flaky-tests"
+GIT_PAGER     = "cat"
 ```
 
 Halo's existing `[[cycle]] kind = "orchestrate"` (implicit
@@ -1542,8 +1545,10 @@ pub struct CycleSubprocessCommand<'a> {
     pub args:    &'a [String],
     pub prompt:  &'a str,             // piped to stdin
     pub cwd:     &'a Path,            // halo-owned clone (RFD 0025 §259)
-    pub env_extra: &'a [(String, String)], // ADDITIONAL vars beyond
-                                           // halo's inherited env (D.3 below)
+    pub env_extra: &'a BTreeMap<String, String>, // ADDITIONAL vars beyond
+                                                 // halo's inherited env (D.3 below).
+                                                 // BTreeMap for deterministic
+                                                 // iteration order in cycle log.
     pub timeout: Option<Duration>,
     pub pid_shared: Arc<AtomicI32>,   // SIGINT propagation; same
                                       // contract as the existing
@@ -1648,8 +1653,9 @@ fn cycle_spend(events: &[AgentEvent], pricing: &CostRegistry)
 }
 ```
 
-`pi_sdk::cost::estimate_cost_usd` (RFD 0027 §4 Cost & budget
-helpers) is the canonical price-table lookup. The
+`pi_sdk::cost::estimate_cost_usd` (RFD 0027 §1 lib.rs surface;
+implementation in Track 1 Commit E — pi-sdk::cost module) is
+the canonical price-table lookup. The
 `SessionStarted`-first ordering is a Commit B invariant (the
 event pump can't emit `Usage` before the session opens — pi-sdk
 emits `SessionStarted` synchronously during `create_agent_session`).
@@ -1750,7 +1756,7 @@ the three current variants continues to deserialize cleanly.
   - `binary = "agent"` (no `/`) — resolved via `$PATH`.
   Test all three.
 - **stderr tail capture:** harness emits 100 KiB to stderr;
-  halo retains the last 16 KiB only in `CycleOutcome.stderr_tail`.
+  halo retains the last 16 KiB only in `CycleSubprocessOutcome.stderr_tail`.
 
 ##### D.9 — Deliverable
 
@@ -1901,6 +1907,29 @@ verify the *split* itself works:
   significantly).
 
 ## Revision history
+
+- **v0.12 (2026-05-03):** Commit D v0.11 critic returned
+  `NEEDS_REVISION` with 1 critical (citation regression) +
+  2 small fixes. v0.12 closes:
+  - **Citation regression:** v0.11 swapped "RFD 0027 Commit E"
+    for "RFD 0027 §4 Cost & budget helpers" — but §4 is "The
+    `RuntimeConfig` field-growth problem", not the cost
+    module. Cost helpers are in RFD 0027 §1 lib.rs surface
+    + Track 1 Commit E. v0.12 cites both correctly:
+    "RFD 0027 §1 lib.rs surface; implementation in Track 1
+    Commit E — pi-sdk::cost module."
+  - **Orphan rename miss:** D.8 line 1753 still said
+    `CycleOutcome.stderr_tail` after the v0.11 type rename;
+    fixed to `CycleSubprocessOutcome.stderr_tail`.
+  - **`env_extra` TOML form:** v0.11 used flat string-list
+    `["FOO=bar"]`; critic flagged as unidiomatic vs.
+    GitHub Actions / docker-compose / systemd `Environment=`
+    conventions which are all `KEY=VALUE` outliers.
+    v0.12 switches to a TOML-table form `[cycle.env_extra]
+    KEY = "value"` matching every other TOML key the operator
+    writes. Rust type changes from `&[(String, String)]` to
+    `&BTreeMap<String, String>` (BTreeMap for deterministic
+    cycle-log iteration order).
 
 - **v0.11 (2026-05-03):** Commit D v0.10 critic returned
   `NEEDS_REVISION` with 3 critical + 5 underspec + 2 citation
