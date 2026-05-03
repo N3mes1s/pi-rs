@@ -1,6 +1,6 @@
 # RFD 0028 — Compiled agents from TOML manifest (meta + split into A/B/C/D)
 
-- **Status:** Draft (v0.12; meta READY in v0.4, Commit A READY in v0.5, Commit B READY in v0.8, Commit C READY in v0.9, Commit D v0.11 spec pending critic)
+- **Status:** Discussion (v0.13 — ALL SECTIONS READY: meta v0.4, Commit A v0.5, Commit B v0.8, Commit C v0.9, Commit D v0.12).
 - **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1, v0.2, v0.3, Commit A v1, Commit A v0.5, Commit B v1, Commit B v0.7 passes)
 - **Created:** 2026-05-03
 - **Implemented:** *(pending sub-commits Commit A–Commit D)*
@@ -1907,6 +1907,33 @@ verify the *split* itself works:
   significantly).
 
 ## Revision history
+
+- **v0.13 (2026-05-03):** Commit D v0.12 critic returned
+  `Verdict: READY`. With this, **all 5 sections of RFD 0028
+  are critic-approved**:
+  - Meta-decision (split + cross-cutting choices) — READY in v0.4 (4 passes).
+  - Commit A (manifest schema) — READY in v0.5 (2 passes).
+  - Commit B (codegen + runtime) — READY in v0.8 (3 passes).
+  - Commit C (distribution) — READY in v0.9 (1 pass + 5 sub-blocker deltas).
+  - Commit D (halo integration) — READY in v0.12 (3 passes).
+  
+  13 critic passes total across this design session. Real
+  bugs caught + closed: codegen using nonexistent pi_sdk
+  symbols (v0.1); sandbox bypassing manifest allowlist via
+  with_defaults (v0.1); `from_env_explicit([])` failing
+  type inference (v0.7); `create_agent_session` returning
+  a tuple, not single value (v0.2); halo spawn-site cite
+  rotted (v0.10); `CycleOutcome` type-name collision with
+  existing enum (v0.10); env-passthrough silently broken
+  (v0.10); missing `tokio::sync` feature would break every
+  generated agent's compile (v0.6); wrong `max_recursion`
+  default (Commit A v1); `usize` vs `u32` type mismatch
+  with pi-sdk (Commit A v1); two RFD 0027 citation
+  rots (Commit A v1, Commit D v0.11). Plus ~10 underspec'd
+  items spanning all four sub-commits.
+  
+  Status bumped to **Discussion** — design phase complete,
+  next is implementation against the spec.
 
 - **v0.12 (2026-05-03):** Commit D v0.11 critic returned
   `NEEDS_REVISION` with 1 critical (citation regression) +
