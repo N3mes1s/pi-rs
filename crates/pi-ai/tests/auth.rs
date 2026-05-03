@@ -92,7 +92,7 @@ fn from_env_picks_up_known_keys() {
 
     // Per polish-12: from_env() removed; explicit ENV_KEYS scan is
     // the equivalent shape (binary's own-machine trust model).
-    let storage = AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS).unwrap();
+    let storage = AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS.iter().copied()).unwrap();
     match storage.get("anthropic") {
         Some(AuthMethod::ApiKey { value }) => assert_eq!(value, "test-anthropic-key"),
         other => panic!("expected ApiKey for anthropic, got {:?}", other),

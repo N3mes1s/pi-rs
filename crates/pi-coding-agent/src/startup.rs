@@ -104,7 +104,7 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     // the user's own-machine trust model — the binary IS the embedder
     // here). Pass `ENV_KEYS` explicitly so the trust model is auditable
     // in code-review.
-    let env = AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS)
+    let env = AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS.iter().copied())
         .unwrap_or_else(|_| AuthStorage::in_memory());
     for (p, _) in AuthStorage::ENV_KEYS {
         if let Some(m) = env.get(p) {

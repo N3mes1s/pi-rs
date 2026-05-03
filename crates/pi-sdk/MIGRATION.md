@@ -30,10 +30,13 @@ below:
   struct literal today (`Settings { provider: "x".into(),
   ..Settings::default() }`) can switch to `Settings::builder().
   provider("x").build()` now to avoid the migration churn at 1.0.
-- **`AuthStorage::from_env_explicit_iter` (polish-2)** — additive.
-  IntoIterator-shaped variant of `from_env_explicit`. Embedders
-  building allowlists dynamically (`Vec<(String, String)>`) call
-  this; the original slice-based form continues to work.
+- **`AuthStorage::from_env_explicit` (polish-13 consolidation)** —
+  one method, one signature: `IntoIterator<Item = (impl Into<String>,
+  impl AsRef<str>)>`. Bare-array literals work directly
+  (`[("a","b")]`); the static `AuthStorage::ENV_KEYS` slice works
+  via `.iter().copied()`; `Vec<(String, String)>` works directly.
+  The earlier two-method split (slice form + `_iter` variant) was
+  collapsed pre-publish.
 - **`ConfigBuilder::cwd_from_env()` + `build()`-time default to
   `current_dir()` (polish)** — additive ergonomics. `.cwd(path)`
   call sites still work; if omitted, defaults to current_dir.

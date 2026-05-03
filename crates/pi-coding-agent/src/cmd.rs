@@ -86,7 +86,7 @@ pub async fn run_internal_evolve_tick() -> anyhow::Result<()> {
     // embedder here). SDK embedders use `from_env_explicit` with a
     // narrower allowlist.
     let auth = AuthStorage::open(auth_path()).unwrap_or_else(|_| AuthStorage::in_memory());
-    let env = AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS)
+    let env = AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS.iter().copied())
         .unwrap_or_else(|_| AuthStorage::in_memory());
     for (p, _) in AuthStorage::ENV_KEYS {
         if let Some(m) = env.get(p) {
@@ -501,7 +501,7 @@ pub async fn run_refresh_models() -> anyhow::Result<()> {
     // Load creds: file first, env second (env wins). Per RFD 0027 §4.5 #8:
     // binary uses ENV_KEYS-explicit env scan (own-machine trust model).
     let auth = AuthStorage::open(auth_path()).unwrap_or_else(|_| AuthStorage::in_memory());
-    let env = AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS)
+    let env = AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS.iter().copied())
         .unwrap_or_else(|_| AuthStorage::in_memory());
     for (p, _) in AuthStorage::ENV_KEYS {
         if let Some(m) = env.get(p) {

@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Explicit auth — no env scan in production. Embedder names the
     //    keys it trusts. (Pre-Commit-H5 readers note: from_env_explicit
     //    is the H5 deliverable; this example is post-H5.)
-    let auth = AuthStorage::from_env_explicit(&[("anthropic", "MY_CI_ANTHROPIC_KEY")])?;
+    let auth = AuthStorage::from_env_explicit([("anthropic", "MY_CI_ANTHROPIC_KEY")])?;
 
     // 2. Build the runtime config explicitly. Use the safe-by-default
     //    readonly tool set + LocalProcessProvider for this CI inspector.

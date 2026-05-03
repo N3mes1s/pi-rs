@@ -39,7 +39,7 @@ versioning follows [SemVer](https://semver.org/) per RFD 0027 §3.
 - Workspace-deps `version = "0.1.0"` on every path-dep; `license/repository/authors.workspace = true` on the 9 publishable crates + `publish = false` on the 5 binary-side crates (Commit J-prep + pass-6 #3).
 - `ROOTFS_VERSION` const inlined into `pi-sandbox/src/microvm/types.rs` (was `pi_sandbox_rootfs::ROOTFS_VERSION`); the rootfs scaffolding crate stays `publish = false` so `pi-sandbox` is a publishable leaf (pass-6 #1).
 - `ConfigBuilder::cwd_from_env()` helper + `build()` defaults `cwd` to `current_dir()` (polish, pass-1 #9).
-- `AuthStorage::from_env_explicit_iter` for IntoIterator-shaped allowlists (polish-2, pass-3 #6).
+- `AuthStorage::from_env_explicit_iter` for IntoIterator-shaped allowlists (polish-2, pass-3 #6). **Removed in polish-13** — collapsed into `from_env_explicit` which now accepts the same IntoIterator shape.
 - Display smoke tests for the four future-additive `Error` variants (polish, pass-1 #12).
 - Extension-collision panic message names BOTH colliding extensions, not just the tool (polish-2, pass-3 #5).
 - `MIGRATION.md` scaffold + sandbox network-omission doc on `LocalProcessProvider::with_readonly_defaults` (polish-3, pass-1 #11).
@@ -58,6 +58,7 @@ versioning follows [SemVer](https://semver.org/) per RFD 0027 §3.
 - `ToolRegistry::with_extras()` (polish-12). Was a name carrying no safety signal — replaced by `with_unsafe_extras()` per RFD §4.5 #12. The post-H7 alias was kept only for migration during 0.1; pre-publish there are no embedders to migrate, so the alias was dropped. Internal pi-rs binary callers (startup.rs, sandbox-worker dispatch) updated to `with_unsafe_extras()`.
 - `BuildConfig::default()` no longer scans env vars (polish-12). Returns `AuthStorage::in_memory()`; embedders wanting auto-discovery name the providers they trust via `AuthStorage::from_env_explicit(...)` and pass the result on `BuildConfig.auth` explicitly.
 - `#[allow(deprecated)]` annotations across pi-coding-agent (startup, cmd, halo) and pi-ai tests — no longer needed once the deprecated symbol is gone.
+- `AuthStorage::from_env_explicit_iter` (polish-13). Consolidated into `from_env_explicit` which now accepts any `IntoIterator<Item = (impl Into<String>, impl AsRef<str>)>`. Slice callers migrate via bare-array literal (`[("a","b")]`) or `.iter().copied()` for the static `ENV_KEYS` slice.
 
 ### Notes
 - This is the pre-0.1.0 working tree. Once Commit J publishes 0.1.0

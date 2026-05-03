@@ -100,59 +100,31 @@ impl AuthStorage {
     /// Embedder explicitly names the provider → env-var pairs that
     /// should be looked up. Missing or empty env vars are silently
     /// skipped (no error); duplicate `provider` entries are
-    /// last-write-wins.
+    /// last-write-wins. Non-UTF8 env vars surface as
+    /// `Err(VarError::NotUnicode(_))` so the caller decides how to
+    /// handle them.
     ///
     /// Returns an `AuthStorage` ready for use; never persists to disk
-    /// (path = None). To persist, follow with `.with_path(path)` once
-    /// that helper is added — for SDK 0.1 the in-memory path is the
-    /// only blessed option.
+    /// (path = None). Returns `Ok` even if no env vars matched —
+    /// embedders may want to start empty and `set` later.
     ///
-    /// Returns `Ok` even if no env vars matched — embedders may want
-    /// to start empty and `set` later.
+    /// **Single signature** (per polish-13): accepts any
+    /// `IntoIterator<Item = (impl Into<String>, impl AsRef<str>)>`.
+    /// Common call shapes:
     ///
-    /// **Asymmetry note vs. deprecated `from_env()`:** non-UTF8 env
-    /// vars surface here as `Err(VarError::NotUnicode(_))` — the
-    /// caller decides how to handle. The deprecated `from_env()`
-    /// silently skips non-UTF8 vars (uses `if let Ok(...)`). Embedders
-    /// migrating from `from_env()` may discover non-UTF8 env vars on
-    /// hosts where they previously went unnoticed.
-    pub fn from_env_explicit(
-        allowlist: &[(&str, &str)],
-    ) -> Result<Self, std::env::VarError> {
-        // Slice signature kept for the canonical literal-allowlist
-        // call site `&[("anthropic", "ANTHROPIC_API_KEY"), ...]`.
-        // Embedders building the allowlist dynamically (e.g.
-        // `Vec<(String, String)>`) use [`from_env_explicit_iter`].
-        let mut data = AuthData::default();
-        for (provider, env) in allowlist {
-            match std::env::var(env) {
-                Ok(val) if !val.is_empty() => {
-                    data.providers.insert(
-                        (*provider).to_string(),
-                        AuthMethod::ApiKey { value: val },
-                    );
-                }
-                Ok(_) | Err(std::env::VarError::NotPresent) => {}
-                Err(e @ std::env::VarError::NotUnicode(_)) => return Err(e),
-            }
-        }
-        Ok(Self {
-            inner: Arc::new(Mutex::new(data)),
-            path: None,
-            scope: None,
-            sealed: false,
-        })
-    }
-
-    /// Per code-review pass-3 finding #6: parity with [`scoped`]'s
-    /// `IntoIterator` ergonomics. Embedders building the allowlist
-    /// dynamically — `Vec<(String, String)>`, `BTreeMap` iteration,
-    /// etc. — call this variant. Same semantics as
-    /// [`from_env_explicit`](Self::from_env_explicit); only the input
-    /// shape differs.
+    /// ```ignore
+    /// // Bare-array literal:
+    /// AuthStorage::from_env_explicit([("anthropic", "ANTHROPIC_API_KEY")])?;
     ///
-    /// [`scoped`]: Self::scoped
-    pub fn from_env_explicit_iter<I, P, E>(allowlist: I) -> Result<Self, std::env::VarError>
+    /// // The static binary-side ENV_KEYS slice (iterates as &(&str, &str), so
+    /// // .iter().copied() flattens to the (P, E) shape):
+    /// AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS.iter().copied())?;
+    ///
+    /// // Dynamic Vec from a config file:
+    /// let allowlist: Vec<(String, String)> = load_config();
+    /// AuthStorage::from_env_explicit(allowlist)?;
+    /// ```
+    pub fn from_env_explicit<I, P, E>(allowlist: I) -> Result<Self, std::env::VarError>
     where
         I: IntoIterator<Item = (P, E)>,
         P: Into<String>,
@@ -163,10 +135,8 @@ impl AuthStorage {
             let env_name = env.as_ref();
             match std::env::var(env_name) {
                 Ok(val) if !val.is_empty() => {
-                    data.providers.insert(
-                        provider.into(),
-                        AuthMethod::ApiKey { value: val },
-                    );
+                    data.providers
+                        .insert(provider.into(), AuthMethod::ApiKey { value: val });
                 }
                 Ok(_) | Err(std::env::VarError::NotPresent) => {}
                 Err(e @ std::env::VarError::NotUnicode(_)) => return Err(e),
@@ -394,22 +364,22 @@ mod h5_tests {
     #[test]
     fn from_env_explicit_with_no_matches_returns_empty_storage() {
         // Use a name unlikely to exist in CI environments.
-        let s = AuthStorage::from_env_explicit(&[("anthropic", "ZZZ_DEFINITELY_NOT_SET_ABC123")])
+        let s = AuthStorage::from_env_explicit([("anthropic", "ZZZ_DEFINITELY_NOT_SET_ABC123")])
             .expect("missing env should not error");
         assert!(s.provider_names().is_empty());
     }
 
     #[test]
     fn from_env_explicit_accepts_owned_string_pairs() {
-        // Per code-review pass-3 finding #6: the IntoIterator-based
-        // signature must accept Vec<(String, String)>, not just
-        // &[(&str, &str)]. Embedders building allowlists at runtime
-        // construct the former.
+        // Per polish-13: from_env_explicit + from_env_explicit_iter
+        // were consolidated into a single IntoIterator signature.
+        // Vec<(String, String)> works directly; bare-array literals
+        // also work; `&[(&str, &str)]` slices work via .iter().copied().
         let allowlist: Vec<(String, String)> = vec![
             ("anthropic".to_string(), "ZZZ_PASS3_TEST_VAR_1".to_string()),
             ("openai".to_string(), "ZZZ_PASS3_TEST_VAR_2".to_string()),
         ];
-        let s = AuthStorage::from_env_explicit_iter(allowlist)
+        let s = AuthStorage::from_env_explicit(allowlist)
             .expect("Vec<(String, String)> should compile and execute");
         // Vars don't exist; storage stays empty — but no panic, no
         // compile error.
@@ -422,7 +392,7 @@ mod h5_tests {
         // Safety: this test mutates process env, but on a name no
         // other test is supposed to touch.
         std::env::set_var(env_name, "stub-value");
-        let s = AuthStorage::from_env_explicit(&[("anthropic", env_name)])
+        let s = AuthStorage::from_env_explicit([("anthropic", env_name)])
             .expect("present env should not error");
         std::env::remove_var(env_name);
         let m = s.get("anthropic").expect("anthropic creds present");
