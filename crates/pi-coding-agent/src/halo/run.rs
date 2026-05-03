@@ -97,7 +97,7 @@ pub fn run_supervisor(repo_root: &Path, config_path: Option<&Path>, max_cycles: 
                 }
             }
         }
-        maybe_wait_guardrails(repo_root, &halo_dir, &cfg, &mut cycle_n)?;
+        maybe_wait_guardrails(&halo_dir, &cfg)?;
         if sig_any.load(Ordering::SeqCst) { std::process::exit(130); }
         if paused_path(&halo_dir).exists() { break; }
         if pause_req_path(&halo_dir).exists() { let _ = fs::rename(pause_req_path(&halo_dir), paused_path(&halo_dir)); break; }
@@ -156,7 +156,7 @@ pub fn run_supervisor(repo_root: &Path, config_path: Option<&Path>, max_cycles: 
     Ok(())
 }
 
-fn maybe_wait_guardrails(repo_root: &Path, halo_dir: &Path, cfg: &config::Config, cycle_n: &mut u64) -> Result<()> {
+fn maybe_wait_guardrails(halo_dir: &Path, cfg: &config::Config) -> Result<()> {
     if in_quiet_hours(&cfg.guardrails.quiet_hours_utc)?
         || cycles_today(halo_dir)? >= cfg.guardrails.cycles_per_day_max && cfg.guardrails.cycles_per_day_max != 0
     {
