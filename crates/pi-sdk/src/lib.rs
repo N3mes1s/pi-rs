@@ -1,3 +1,7 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
 //! `pi-sdk` — the public Rust API for embedding pi-rs in another application.
 //!
 //! Pi-sdk is a thin façade over a small set of pi-rs workspace crates
