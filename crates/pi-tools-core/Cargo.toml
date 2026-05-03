@@ -3,6 +3,9 @@ name = "pi-tools-core"
 version.workspace = true
 edition.workspace = true
 description = "File + process tools for pi-rs (no network deps; guest-side compile-safe)"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

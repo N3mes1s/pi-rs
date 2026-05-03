@@ -3,6 +3,9 @@ name = "pi-agent-core"
 version.workspace = true
 edition.workspace = true
 description = "Agent loop orchestration, session management, and event streaming for pi-rs"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

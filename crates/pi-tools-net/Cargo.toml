@@ -3,6 +3,9 @@ name = "pi-tools-net"
 version.workspace = true
 edition.workspace = true
 description = "Network-using tools for pi-rs (web_search via reqwest)"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

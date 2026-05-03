@@ -3,6 +3,9 @@ name = "pi-sandbox-protocol"
 version.workspace = true
 edition.workspace = true
 description = "Wire protocol for pi-rs microVM sandbox (host ↔ guest)"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "io-util"] }

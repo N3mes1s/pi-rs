@@ -3,6 +3,9 @@ name = "pi-tools"
 version.workspace = true
 edition.workspace = true
 description = "Built-in tools for the pi-rs coding agent"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -3,6 +3,9 @@ name = "pi-sandbox"
 version.workspace = true
 edition.workspace = true
 description = "Sandbox abstraction for tool execution isolation in pi-rs"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
 serde.workspace = true

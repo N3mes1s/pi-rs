@@ -3,6 +3,9 @@ name = "pi-ai"
 version.workspace = true
 edition.workspace = true
 description = "Unified multi-provider LLM API for pi-rs"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
 pi-tool-types.workspace = true

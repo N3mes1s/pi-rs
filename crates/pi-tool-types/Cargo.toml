@@ -3,6 +3,9 @@ name = "pi-tool-types"
 version.workspace = true
 edition.workspace = true
 description = "Shared POD types for pi-rs tool layer (ToolSpec, ToolResult, ToolError)"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
 serde.workspace = true
