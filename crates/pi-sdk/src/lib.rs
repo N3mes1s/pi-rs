@@ -108,6 +108,18 @@ pub use error::{Error, Result};
 pub mod cost;
 pub use cost::{estimate_cost_usd, sum_session_cost_usd, CostRegistry, Pricing};
 
+// ─── Mock provider + sandbox (Commit D, gated on `mocks` feature) ─
+//
+// Embedder tests should not need to hit a real LLM endpoint or spin
+// up a microvm. `mocks::MockProvider` + `mocks::MockSandboxProvider`
+// give them stub implementations they can install via the standard
+// `RuntimeConfig::builder()` plug-in points. Gated to keep production
+// builds free of test-only code.
+#[cfg(feature = "mocks")]
+pub mod mocks;
+#[cfg(feature = "mocks")]
+pub use mocks::{MockProvider, MockProviderFactory, MockSandboxProvider, MockSandboxCall};
+
 // ─── Deferred (specified in RFD 0027 §1, ship in later commits) ───
 //
 // The following surface is part of the SDK contract but lands in
