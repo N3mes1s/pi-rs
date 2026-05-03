@@ -16,17 +16,22 @@
 //! investigating.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use chrono::Utc;
+use serde_json::json;
 
 use pi_sdk::cost::CostRegistry;
 
 use crate::halo::compiled_agent::{run_compiled_agent_cycle, CycleInputs};
 use crate::halo::config::{CompiledAgentSpec, ExitPolicy};
+use crate::halo::state;
 
 /// Per-spec runtime state. Lives across ticks for a single
 /// halo supervisor process; reset on halo restart.
@@ -144,15 +149,40 @@ pub fn run_compiled_agent_dispatch(
         let outcome = match run_compiled_agent_cycle(&cycle_inputs) {
             Ok(o) => o,
             Err(e) => {
+                let msg = format!("{e}");
                 tracing::error!(
                     spec = %spec.name,
-                    error = %e,
+                    error = %msg,
                     "compiled-agent cycle spawn failed; treating as Alert"
                 );
-                // Spawn failures are treated like Alert — log,
-                // continue. The next tick will retry; if the
-                // binary is genuinely broken the operator will
-                // see the alert log + stop halo.
+                // Spawn failures are operator-visible Alerts:
+                // write BOTH the state.jsonl row (so cycle telemetry
+                // shows the spawn failure) AND the alerts.jsonl row
+                // (so monitoring tools see it). The Phase 2c critic
+                // caught that the prior "log via tracing" path
+                // produced ZERO operator-visible artifacts in the
+                // halo dir — fixed.
+                let _ = state::append_step(
+                    inputs.state_jsonl,
+                    inputs.cycle_n,
+                    "compiled_agent",
+                    "STEP_COMPILED_AGENT_SPAWN_FAILED",
+                    json!({
+                        "spec_name": spec.name,
+                        "error": msg,
+                        "policy": "alert",
+                    }),
+                );
+                let _ = append_spawn_alert_row(
+                    inputs.alerts_jsonl,
+                    inputs.cycle_n,
+                    &spec.name,
+                    &msg,
+                );
+                // Reset streak: spawn errors are NOT throttle-class
+                // events (operator misconfig, not agent degradation).
+                // The Alert row above gives the operator visibility;
+                // they decide whether to stop halo.
                 state.total_runs = state.total_runs.saturating_add(1);
                 state.consecutive_throttles = 0;
                 state.next_eligible_at = None;
@@ -219,6 +249,29 @@ fn write_pause_file(
          Investigate alerts.jsonl, then `pi --halo-resume` to continue.\n"
     );
     std::fs::write(paused_path, body)?;
+    Ok(())
+}
+
+fn append_spawn_alert_row(
+    alerts_jsonl: &Path,
+    cycle_n: u64,
+    spec_name: &str,
+    error_msg: &str,
+) -> Result<()> {
+    let line = json!({
+        "ts": Utc::now().to_rfc3339(),
+        "cycle": cycle_n,
+        "kind": "compiled_agent_spawn_failure",
+        "spec_name": spec_name,
+        "error": error_msg,
+    });
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(alerts_jsonl)?;
+    let mut s = serde_json::to_string(&line)?;
+    s.push('\n');
+    f.write_all(s.as_bytes())?;
     Ok(())
 }
 
@@ -533,6 +586,87 @@ exit 3
         // Signal pre-tripped → no run, no state inserted.
         assert!(states.is_empty());
         assert!(!state_p.exists());
+    }
+
+    #[test]
+    fn spawn_failure_writes_alerts_and_state_rows() {
+        // Per Phase 2c reviewer fix: a missing/broken binary
+        // must produce operator-visible artifacts in the halo
+        // dir, not just stderr/journald log lines.
+        let tmp = tempfile::tempdir_in("/home/nemesis/code").unwrap();
+        let spec = fixture_spec(
+            "broken",
+            "/no/such/binary/anywhere",
+            ExitPolicy::Continue,
+        );
+        let signal = Arc::new(AtomicBool::new(false));
+        let state_p = tmp.path().join("state.jsonl");
+        let usage_p = tmp.path().join("usage.jsonl");
+        let alerts_p = tmp.path().join("alerts.jsonl");
+        let paused_p = tmp.path().join("paused");
+        let pricing = CostRegistry::empty();
+        let inputs = dispatch_inputs(
+            std::slice::from_ref(&spec),
+            tmp.path(),
+            &pricing,
+            signal,
+            &state_p,
+            &usage_p,
+            &alerts_p,
+            &paused_p,
+        );
+        let mut states = HashMap::new();
+        run_compiled_agent_dispatch(&inputs, &mut states).expect("noop ok");
+        // alerts.jsonl row has the spawn-failure shape.
+        let alerts = std::fs::read_to_string(&alerts_p).expect("alerts written");
+        assert!(alerts.contains("\"kind\":\"compiled_agent_spawn_failure\""));
+        assert!(alerts.contains("broken"));
+        // state.jsonl row carries STEP_COMPILED_AGENT_SPAWN_FAILED.
+        let state = std::fs::read_to_string(&state_p).expect("state written");
+        assert!(state.contains("STEP_COMPILED_AGENT_SPAWN_FAILED"));
+        // Streak NOT incremented on spawn errors (operator-misconfig
+        // visibility vs throttle semantics).
+        assert_eq!(states["broken"].consecutive_throttles, 0);
+        // Total runs incremented (it's still telemetry).
+        assert_eq!(states["broken"].total_runs, 1);
+    }
+
+    #[test]
+    fn spawn_failure_does_not_block_subsequent_spec() {
+        // Per Phase 2c reviewer suggestion: specs=[broken, ok].
+        // The broken one writes alerts but does NOT abort the
+        // rotation; the ok spec still runs.
+        let tmp = tempfile::tempdir_in("/home/nemesis/code").unwrap();
+        let bin = write_script(tmp.path(), "ok-agent", agent_continue_script());
+        let specs = vec![
+            fixture_spec("broken", "/no/such/binary", ExitPolicy::Continue),
+            fixture_spec("ok", &bin.display().to_string(), ExitPolicy::Continue),
+        ];
+        let signal = Arc::new(AtomicBool::new(false));
+        let state_p = tmp.path().join("state.jsonl");
+        let usage_p = tmp.path().join("usage.jsonl");
+        let alerts_p = tmp.path().join("alerts.jsonl");
+        let paused_p = tmp.path().join("paused");
+        let pricing = CostRegistry::empty();
+        let inputs = dispatch_inputs(
+            &specs,
+            tmp.path(),
+            &pricing,
+            signal,
+            &state_p,
+            &usage_p,
+            &alerts_p,
+            &paused_p,
+        );
+        let mut states = HashMap::new();
+        run_compiled_agent_dispatch(&inputs, &mut states).expect("noop ok");
+        assert_eq!(states.len(), 2);
+        assert_eq!(states["broken"].total_runs, 1);
+        assert_eq!(states["ok"].total_runs, 1);
+        // ok spec wrote its STEP_COMPILED_AGENT_DONE row.
+        let state = std::fs::read_to_string(&state_p).unwrap();
+        assert!(state.contains("STEP_COMPILED_AGENT_SPAWN_FAILED"));
+        assert!(state.contains("STEP_COMPILED_AGENT_DONE"));
     }
 
     #[test]

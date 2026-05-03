@@ -111,10 +111,25 @@ pub fn run_supervisor(repo_root: &Path, config_path: Option<&Path>, max_cycles: 
         // Empty `compiled_agents` is a no-op (pre-Commit-D
         // behavior — `cfg.compiled_agents` defaults to empty Vec).
         if !cfg.compiled_agents.is_empty() {
+            // cwd: prefer the halo-owned clone path per RFD 0025
+            // §259 (compiled agents that mutate the working tree
+            // should NOT run in the operator's interactive
+            // checkout). Fall back to repo_root only when
+            // clone.expected_root is unset or empty (covered by
+            // validate() which currently requires it set, but
+            // belt-and-suspenders).
+            let cycle_cwd = cfg
+                .clone_config
+                .expected_root
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| repo_root.to_path_buf());
             let dispatch_inputs = DispatchInputs {
                 specs: &cfg.compiled_agents,
                 halo_toml_parent: &halo_toml_parent,
-                cwd: repo_root,
+                cwd: &cycle_cwd,
                 pricing: &pricing,
                 pid_shared: orchestrate_pid_shared.clone(),
                 signal_received: sig_any.clone(),
@@ -129,7 +144,7 @@ pub fn run_supervisor(repo_root: &Path, config_path: Option<&Path>, max_cycles: 
             // file. Propagate by breaking the supervisor loop;
             // operator must `pi --halo-resume` after investigating.
             if let Err(e) = run_compiled_agent_dispatch(&dispatch_inputs, &mut compiled_agent_states) {
-                eprintln!("halo: compiled-agent dispatch paused halo: {e}");
+                tracing::error!(error = %e, "compiled-agent dispatch paused halo");
                 break;
             }
         }

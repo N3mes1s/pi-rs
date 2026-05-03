@@ -433,6 +433,37 @@ pub fn validate(cfg: &Config, allow_main: bool) -> Vec<String> {
                 ));
             }
         }
+
+        // Throttle-field range checks (post-Phase-2c reviewer):
+        // - streak_max = 0 would pause halo on the FIRST throttle
+        //   (since streak_max=0 trips the `new_streak >= max` check
+        //   on the very first throttle event). Operators almost
+        //   certainly mean "never pause" with 0; reject + ask them
+        //   to set a real number.
+        // - base_delay_secs = 0 produces a 0-duration backoff —
+        //   no rate-limit between throttle events. Reject.
+        // - cap_secs < base_delay_secs makes the math nonsensical
+        //   (cap can't be tighter than the very first delay).
+        if spec.throttle_streak_max == 0 {
+            errs.push(format!(
+                "[[compiled_agent]] {:?}: throttle_streak_max must be > 0; \
+                 a value of 0 would pause halo on the first throttle event",
+                spec.name
+            ));
+        }
+        if spec.throttle_base_delay_secs == 0 {
+            errs.push(format!(
+                "[[compiled_agent]] {:?}: throttle_base_delay_secs must be > 0 \
+                 (otherwise throttle backoff has no effect)",
+                spec.name
+            ));
+        }
+        if spec.throttle_cap_secs < spec.throttle_base_delay_secs {
+            errs.push(format!(
+                "[[compiled_agent]] {:?}: throttle_cap_secs ({}) must be >= throttle_base_delay_secs ({})",
+                spec.name, spec.throttle_cap_secs, spec.throttle_base_delay_secs
+            ));
+        }
     }
 
     errs
@@ -682,6 +713,90 @@ on_exit = {{ "0" = "continue", "abc" = "alert" }}
         assert_eq!(spec.timeout(), Some(Duration::from_secs(1800)));
         spec.timeout_secs = 1;
         assert_eq!(spec.timeout(), Some(Duration::from_secs(1)));
+    }
+
+    // ── Throttle-field range checks (post-Phase-2c reviewer) ─────
+
+    #[test]
+    fn throttle_streak_max_zero_rejected_at_validate() {
+        let toml = format!(
+            r#"{base}
+[[compiled_agent]]
+name    = "x"
+binary  = "/x"
+prompt  = "p"
+on_exit = {{ "0" = "continue" }}
+throttle_streak_max = 0
+"#,
+            base = base_cfg()
+        );
+        let cfg = parse(&toml).expect("parses");
+        let errs = validate(&cfg, false);
+        assert!(
+            errs.iter().any(|e| e.contains("throttle_streak_max must be > 0")),
+            "{errs:?}",
+        );
+    }
+
+    #[test]
+    fn throttle_base_delay_zero_rejected_at_validate() {
+        let toml = format!(
+            r#"{base}
+[[compiled_agent]]
+name    = "x"
+binary  = "/x"
+prompt  = "p"
+on_exit = {{ "0" = "continue" }}
+throttle_base_delay_secs = 0
+"#,
+            base = base_cfg()
+        );
+        let cfg = parse(&toml).expect("parses");
+        let errs = validate(&cfg, false);
+        assert!(
+            errs.iter().any(|e| e.contains("throttle_base_delay_secs must be > 0")),
+            "{errs:?}",
+        );
+    }
+
+    #[test]
+    fn throttle_cap_below_base_rejected_at_validate() {
+        let toml = format!(
+            r#"{base}
+[[compiled_agent]]
+name    = "x"
+binary  = "/x"
+prompt  = "p"
+on_exit = {{ "0" = "continue" }}
+throttle_base_delay_secs = 60
+throttle_cap_secs        = 30
+"#,
+            base = base_cfg()
+        );
+        let cfg = parse(&toml).expect("parses");
+        let errs = validate(&cfg, false);
+        assert!(
+            errs.iter().any(|e| e.contains("throttle_cap_secs")),
+            "{errs:?}",
+        );
+    }
+
+    #[test]
+    fn throttle_defaults_pass_validate() {
+        // Defaults: streak_max=5, base=60, cap=3600 — all sane.
+        let toml = format!(
+            r#"{base}
+[[compiled_agent]]
+name    = "default-throttle"
+binary  = "/x"
+prompt  = "p"
+on_exit = {{ "0" = "continue" }}
+"#,
+            base = base_cfg()
+        );
+        let cfg = parse(&toml).expect("parses");
+        let errs = validate(&cfg, false);
+        assert!(errs.is_empty(), "default throttle config should validate cleanly: {errs:?}");
     }
 
     #[test]
