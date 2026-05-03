@@ -272,23 +272,25 @@ the same agent shape; ambient `AGENTS.md` defeats that.
 If an embedder wants AGENTS.md-style overlay, they bake the
 content into `[runtime] system_prompt` at manifest-author time.
 
-### Sketch — sub-commit scopes
+### Sub-commits
 
 #### Commit A — Manifest schema
 
-A complete `agent.toml` for v1 looks like:
+##### A.1 — Surface example
+
+A complete `agent.toml` for v1, exercising every field:
 
 ```toml
 # agent.toml — compiled-agent manifest, v1.
-schema_version = 1                # MUST. Bumped on breaking changes.
+schema_version = 1                # REQUIRED. Bumped on breaking changes.
 
 [agent]
-name        = "fix-flaky-tests"   # snake-case-or-hyphen, used as binary name.
+name        = "fix-flaky-tests"   # snake-or-hyphen [a-z0-9-_]+, also the binary name.
 description = "Auto-bisects flaky test runs."
-version     = "0.1.0"             # SemVer; baked into the binary.
+version     = "0.1.0"             # SemVer; baked into the binary's `--version`.
 
 [provider]
-name     = "anthropic"
+name     = "anthropic"            # one of: anthropic | openai | openai-compat | google | bedrock | azure-openai
 model    = "claude-haiku-4-5-20251001"
 thinking = "medium"               # off | low | medium | high | xhigh
 
@@ -296,24 +298,308 @@ thinking = "medium"               # off | low | medium | high | xhigh
 required = ["ANTHROPIC_API_KEY"]  # env vars to allowlist in AuthStorage
 
 [tools]
-allowlist = ["read", "grep", "find", "ls", "bash"]
-disallow_unsafe = false           # if true, refuse to register `bash`/`write`/`edit`
-# v1 has NO per-tool config blocks. pi-tools-core today reads tool
-# parameters (e.g., bash timeout_ms) from per-invocation tool input
-# JSON, not from registration-time config; there's no plumbing for
-# manifest-time per-tool overrides. Reserved for v2.
+allowlist        = ["read", "grep", "find", "ls", "bash"]
+disallow_unsafe  = false          # if true, REJECTS the manifest at parse time if
+                                  # allowlist contains `bash`/`write`/`edit`.
 
 [runtime]
 system_prompt = """
 You are a flaky-test bisector. Identify the seed line.
 """
-max_session_tokens          = 200_000   # H2 caps; reasonable defaults applied if absent.
-max_tool_invocations_per_turn = 50
-max_recursion               = 4
+max_session_tokens             = 200_000  # default 10_000_000 (pi-sdk H2 default).
+max_tool_invocations_per_turn  = 50       # default 64 (pi-sdk H2 default).
+max_recursion                  = 4        # default 3 (pi-sdk H2 default).
 ```
 
-Commit A's deliverable: this schema + a `pi-build validate
-agent.toml` verb + serde types + round-trip test. ~600 LoC.
+##### A.2 — Crate layout
+
+A new workspace member `crates/pi-build/` containing:
+
+```
+crates/pi-build/
+├── Cargo.toml
+└── src/
+    ├── lib.rs               # public API (parse + validate); used by Commit B's codegen.
+    ├── manifest.rs          # serde structs (this section).
+    ├── error.rs             # ManifestError enum.
+    ├── parse.rs             # two-pass parser.
+    └── bin/
+        └── pi-build.rs      # CLI entry (`pi-build validate <toml>`, etc.).
+```
+
+Commit A delivers `manifest.rs` + `error.rs` + `parse.rs` + the
+`pi-build validate <toml>` verb. Codegen (Commit B) consumes
+`pi_build::manifest::Manifest` directly.
+
+##### A.3 — Serde types (canonical surface)
+
+```rust
+// crates/pi-build/src/manifest.rs
+
+use serde::{Deserialize, Serialize};
+
+/// Top-level manifest, v1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]   // v1 strict — see A.5 for the two-pass parse.
+pub struct Manifest {
+    pub schema_version: u32,    // MUST equal 1 for v1; checked in pass 2.
+    pub agent:    AgentMeta,
+    pub provider: ProviderConfig,
+    #[serde(default)]
+    pub secrets:  SecretsConfig,
+    #[serde(default)]
+    pub tools:    ToolsConfig,
+    pub runtime:  RuntimeConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentMeta {
+    pub name:        String,    // pattern: ^[a-z][a-z0-9_-]{0,63}$
+    pub description: String,    // 1-1024 chars; non-empty.
+    pub version:     String,    // SemVer; parsed via `semver::Version::parse`.
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderConfig {
+    pub name:  ProviderName,
+    pub model: String,          // 1-256 chars; provider-side validity not checked.
+    #[serde(default)]
+    pub thinking: ThinkingLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderName {
+    Anthropic, Openai, OpenaiCompat, Google, Bedrock, AzureOpenai,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingLevel {
+    #[default] Off, Low, Medium, High, Xhigh,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretsConfig {
+    #[serde(default)]
+    pub required: Vec<String>,  // each MUST match `^[A-Z][A-Z0-9_]*$`.
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolsConfig {
+    #[serde(default = "default_tool_allowlist")]
+    pub allowlist:       Vec<String>,
+    #[serde(default)]
+    pub disallow_unsafe: bool,
+}
+
+fn default_tool_allowlist() -> Vec<String> {
+    vec!["read".into(), "grep".into(), "find".into(), "ls".into()]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeConfig {
+    pub system_prompt: String,    // 1-65_536 chars; required.
+    #[serde(default = "default_max_session_tokens")]
+    pub max_session_tokens: u64,
+    #[serde(default = "default_max_tool_invocations_per_turn")]
+    pub max_tool_invocations_per_turn: u32,
+    #[serde(default = "default_max_recursion")]
+    pub max_recursion: u32,
+}
+
+fn default_max_session_tokens()             -> u64 { 10_000_000 }
+fn default_max_tool_invocations_per_turn()  -> u32 { 64 }
+fn default_max_recursion()                  -> u32 { 3 }
+```
+
+The defaults are pulled from pi-sdk's `RuntimeConfig::builder()`
+defaults (`pi-agent-core/src/runtime.rs` H2 invariants), so an
+omitted block produces the same caps as a hand-built embedder.
+
+##### A.4 — Validation rules (post-parse, semantic)
+
+After serde succeeds, `parse.rs` runs an `validate(&Manifest) ->
+Result<(), ManifestError>` pass:
+
+| Rule | Failure |
+|---|---|
+| `schema_version == 1` | `SchemaTooNew { found, supported: 1 }` if `> 1`; `SchemaTooOld { found }` if `< 1`. |
+| `agent.name` matches `^[a-z][a-z0-9_-]{0,63}$` | `InvalidAgentName(name)`. |
+| `agent.description.len()` in `1..=1024` | `InvalidDescription { len }`. |
+| `agent.version` parses as `semver::Version` | `InvalidVersion(name, e)`. |
+| `provider.model.len()` in `1..=256` | `InvalidModelLen { len }`. |
+| every `secrets.required[i]` matches `^[A-Z][A-Z0-9_]*$` | `InvalidEnvVarName(name)`. |
+| every `tools.allowlist[i]` ∈ `{read, write, edit, bash, grep, find, ls, web_search}` | `UnknownTool(name)`. |
+| if `tools.disallow_unsafe`, `allowlist ∩ {bash, write, edit} == ∅` | `UnsafeToolWithDisallow(name)`. |
+| `tools.allowlist` is non-empty after dedup | `EmptyAllowlist`. |
+| `runtime.system_prompt.len()` in `1..=65_536` | `InvalidSystemPromptLen { len }`. |
+| `runtime.max_session_tokens` ≥ 1_000 | `MaxSessionTokensTooLow { found }`. |
+| `runtime.max_tool_invocations_per_turn` ≥ 1 | `MaxInvocationsTooLow`. |
+| `runtime.max_recursion` ≥ 1 and ≤ 16 | `MaxRecursionOutOfRange { found }`. |
+
+Validation is total — every error variant carries the bad input
+so the CLI prints the offending value, not just the rule name.
+
+##### A.5 — Two-pass parser (per §Cross-cutting #1)
+
+`parse.rs` does NOT call `toml::from_str::<Manifest>` directly.
+Instead:
+
+```rust
+// crates/pi-build/src/parse.rs
+
+#[derive(Deserialize)]
+struct VersionShim {
+    schema_version: u32,
+    // No #[serde(deny_unknown_fields)] — accept any v2+ shape.
+}
+
+pub fn parse(raw: &str) -> Result<Manifest, ManifestError> {
+    // PASS 1: detect schema_version with a permissive shim. Ignores
+    // unknown keys so a v2 manifest fails with `SchemaTooNew`, not
+    // `unknown field 'foo'`.
+    let v: VersionShim = toml::from_str(raw)
+        .map_err(ManifestError::VersionDetect)?;
+    if v.schema_version != 1 {
+        return Err(ManifestError::SchemaTooNew {
+            found: v.schema_version, supported: 1,
+        });
+    }
+    // PASS 2: strict v1 parse with deny_unknown_fields.
+    let m: Manifest = toml::from_str(raw).map_err(ManifestError::Parse)?;
+    validate(&m)?;
+    Ok(m)
+}
+```
+
+Test (Commit A regression): a manifest with
+`schema_version = 2` + a v2-introduced key fails with
+`ManifestError::SchemaTooNew { found: 2, supported: 1 }` —
+NOT `ManifestError::Parse(unknown field 'foo')`.
+
+##### A.6 — Error type
+
+```rust
+// crates/pi-build/src/error.rs
+
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ManifestError {
+    #[error("manifest schema_version {found} is newer than this pi-build supports (max {supported}); upgrade pi-build")]
+    SchemaTooNew { found: u32, supported: u32 },
+
+    #[error("manifest schema_version {found} is older than v1 (no v0 schema exists)")]
+    SchemaTooOld { found: u32 },
+
+    #[error("could not detect schema_version: {0}")]
+    VersionDetect(toml::de::Error),
+
+    #[error("manifest parse error: {0}")]
+    Parse(toml::de::Error),
+
+    #[error("invalid agent.name {0:?}: must match ^[a-z][a-z0-9_-]{{0,63}}$")]
+    InvalidAgentName(String),
+
+    #[error("invalid agent.description length {len} (must be 1..=1024)")]
+    InvalidDescription { len: usize },
+
+    #[error("invalid agent.version {0:?}: {1}")]
+    InvalidVersion(String, semver::Error),
+
+    #[error("invalid provider.model length {len} (must be 1..=256)")]
+    InvalidModelLen { len: usize },
+
+    #[error("invalid env-var name {0:?} in secrets.required: must match ^[A-Z][A-Z0-9_]*$")]
+    InvalidEnvVarName(String),
+
+    #[error("unknown tool {0:?} in tools.allowlist (v1 supports: read, write, edit, bash, grep, find, ls, web_search)")]
+    UnknownTool(String),
+
+    #[error("tool {0:?} is unsafe but tools.disallow_unsafe = true")]
+    UnsafeToolWithDisallow(String),
+
+    #[error("tools.allowlist is empty after dedup")]
+    EmptyAllowlist,
+
+    #[error("invalid runtime.system_prompt length {len} (must be 1..=65_536)")]
+    InvalidSystemPromptLen { len: usize },
+
+    #[error("runtime.max_session_tokens {found} below floor 1_000")]
+    MaxSessionTokensTooLow { found: u64 },
+
+    #[error("runtime.max_tool_invocations_per_turn must be ≥ 1")]
+    MaxInvocationsTooLow,
+
+    #[error("runtime.max_recursion {found} out of range 1..=16")]
+    MaxRecursionOutOfRange { found: u32 },
+}
+```
+
+##### A.7 — `pi-build validate` CLI verb
+
+```text
+pi-build validate <path/to/agent.toml>
+
+  Reads the manifest, runs the two-pass parser + semantic
+  validation, and prints either:
+
+    OK: <name> <version> (<provider>/<model>) — <N> tools allowlisted
+
+  on success, or the ManifestError's Display on failure (one line,
+  with the offending value). Exit 0 on success, 65 (`EX_DATAERR`)
+  on validation failure.
+```
+
+This verb is the unit-test surface for the whole manifest layer.
+CI runs `pi-build validate examples/*.toml` over a fixture set
+covering every valid + every error variant.
+
+##### A.8 — Test plan
+
+- **Round-trip:** `toml::to_string(&Manifest)` then `parse` returns
+  an equal `Manifest` (PartialEq derive on every type).
+- **Schema-version-too-new:** `schema_version = 2 \n agent.name =
+  "x"` (with all v1 keys present) fails with `SchemaTooNew`,
+  not `Parse(unknown field)`.
+- **Defaults applied:** a manifest omitting `[secrets]`, `[tools]`,
+  and `runtime.max_*` fields parses cleanly with defaults
+  (`required = []`, `allowlist = ["read","grep","find","ls"]`,
+  `max_session_tokens = 10_000_000`, etc.).
+- **disallow_unsafe rejects bash:** `tools.allowlist = ["bash"]
+  + tools.disallow_unsafe = true` fails with
+  `UnsafeToolWithDisallow("bash")`.
+- **Per-error fixture file:** one `.toml` per `ManifestError`
+  variant under `crates/pi-build/tests/fixtures/invalid/`; the
+  test sweeps and asserts the exact variant.
+
+##### A.9 — Out of scope (explicitly noted for future commits)
+
+- **Per-tool config blocks** (e.g., `[tools.bash] timeout_ms = 30_000`)
+  — pi-tools-core today reads tool params from per-invocation
+  JSON, not from registration time; manifest-time overrides need
+  pi-tools API changes. Reserved syntax: `[tools.<name>]` table
+  rejected in v1 with `Parse(unknown field 'tools.bash')` for now.
+- **Custom Rust tools** (`[[tool]] kind = "rust" path = "..."`)
+  — v2.
+- **Sandbox provider selection** (`[runtime] sandbox = "microvm"`)
+  — gated on RFD 0023 Commit G + the not-yet-RFD'd contextfs
+  fs-mount library API.
+- **MCP server adapters** (`[[mcp]] command = "..."`) — pi-sdk
+  doesn't ship MCP yet; future RFD.
+- **Multi-agent manifests** (`[[agent]] [[agent]]`) — v2.
+
+Commit A's deliverable: `crates/pi-build/{Cargo.toml, src/lib.rs,
+src/manifest.rs, src/error.rs, src/parse.rs, src/bin/pi-build.rs}`
++ `tests/fixtures/{valid,invalid}/*.toml` + the regression tests
+listed in A.8. ~600 LoC total (manifest 180 + error 80 + parse 100
++ CLI 80 + tests 160).
 
 #### Commit B — Codegen + runtime
 
