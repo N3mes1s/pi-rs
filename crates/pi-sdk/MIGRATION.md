@@ -151,7 +151,7 @@ The `-unstable`-suffixed features stay as deprecated aliases for
 | `ToolRegistry::register(tool)` returns `()` | returns `Result<(), DuplicateName>`              | 0.1.0 (breaking; pre-1.0 ok per §3)   |
 | `pi_sandbox_rootfs::ROOTFS_VERSION`        | `pi_sandbox::microvm::ROOTFS_VERSION`            | 0.1.0    |
 | `Settings { ..Settings::default() }` literal | `Settings::builder().<...>.build()`            | 1.0 (builder ships in 0.x as additive prerequisite, polish-8) |
-| `AuthStorage::from_env_explicit(&[...])` slice form | unchanged; or `from_env_explicit_iter(iter)` for dynamic allowlists | 0.1.0 (polish-2) |
+| `AuthStorage::from_env_explicit(&[...])` slice form | bare-array `[("a","b")]` or `slice.iter().copied()` (single IntoIterator signature) | polish-13 (collapse) |
 | `RuntimeConfig::builder().build()?` then mutate `cfg.max_session_tokens = N` | `.build()?.with_max_session_tokens(N)` (post-build setter, polish-6) | 0.1.0 |
 
 ## See also

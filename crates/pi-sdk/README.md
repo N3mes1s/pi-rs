@@ -118,7 +118,7 @@ The README tells you the safe path; this checklist tells you what to verify befo
 
 ### Authentication & secrets
 
-- [ ] **Do NOT call `AuthStorage::from_env()` in production.** Use `AuthStorage::from_env_explicit(&[("anthropic", "MY_TENANT_ANTHROPIC_KEY"), ...])` so the env-var allowlist is auditable. (`from_env()` is `#[deprecated]` and slurps 17 env vars unconditionally — CWE-526 risk.)
+- [ ] **Use `AuthStorage::from_env_explicit([("anthropic", "MY_TENANT_ANTHROPIC_KEY"), ...])` to scan env vars in production** so the allowlist is auditable in code-review. (The unsafe `from_env()` slurp-all-17-vars shape was removed pre-publish per polish-12; only the explicit allowlist form survives.)
 - [ ] If running multi-tenant, use `AuthStorage::scoped(provider_filter)` to deny cross-tenant credential bleed.
 - [ ] If credentials should not change after init, `AuthStorage::sealed()`.
 - [ ] On-disk auth files are written with `0o600` + atomic rename; verify your filesystem honors POSIX modes (NFS sometimes doesn't).
@@ -212,7 +212,7 @@ Per RFD 0027 §3:
 - Bash cwd escape via `..` traversal (canonicalize-and-jail).
 - ANSI / bidi / C1 escape sequences in JSONL (`WireSerializer`).
 - Auth file world-readable on multi-user hosts (0o600 + atomic rename).
-- Env-var slurp risk (deprecated `from_env()`, opt-in `from_env_explicit`).
+- Env-var slurp risk (only opt-in `from_env_explicit(allowlist)` exists; the unsafe `from_env()` slurp was removed pre-publish).
 - Pathological tool-call loops in a single turn (per-turn invocation cap, default 64).
 - Adversarial provider that emits `Finish::ToolUse` with zero tool calls (rejected as `ToolUseFinishWithoutCalls`).
 - Per-session token budget overruns (`max_session_tokens` cap, default 10M; `0` = disabled).

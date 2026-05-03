@@ -337,11 +337,12 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         // for the wrapper that fires `format_on_write` and
         // `diagnostics_on_write` after every successful write. The
         // wrapper registers under the same name so the registry's
-        // BTreeMap insert overrides the entry left by `with_extras()`.
+        // BTreeMap insert overrides the entry left by
+        // `with_unsafe_extras()`.
         if lsp_cfg.enabled {
             // Per RFD 0027 §4.5 #5 (Hardening H3): explicit override —
             // LspWriteTool intentionally takes the `write` slot from
-            // with_extras() so format_on_write / diagnostics_on_write
+            // with_unsafe_extras() so format_on_write / diagnostics_on_write
             // fire after every write.
             tools.register_or_replace(Arc::new(crate::native::lsp::LspWriteTool::new(lsp_cfg)));
         }
