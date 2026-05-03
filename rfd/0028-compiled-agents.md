@@ -1,7 +1,7 @@
 # RFD 0028 — Compiled agents from TOML manifest (meta + split into A/B/C/D)
 
-- **Status:** Draft (v0.6; meta READY in v0.4, Commit A READY in v0.5, Commit B v1 spec pending critic)
-- **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1, v0.2, v0.3, Commit A v1, Commit A v0.5 passes)
+- **Status:** Draft (v0.7; meta READY in v0.4, Commit A READY in v0.5, Commit B v1 spec pending critic)
+- **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1, v0.2, v0.3, Commit A v1, Commit A v0.5, Commit B v1 passes)
 - **Created:** 2026-05-03
 - **Implemented:** *(pending sub-commits Commit A–Commit D)*
 
@@ -747,6 +747,16 @@ byte-identical output. No randomness, no timestamps, no
 environment leakage. This is the determinism invariant Commit C
 v2 (`pi-build verify`) will hash-compare.
 
+**Across pi-build versions:** the comment header carries the
+`pi_build_version` literal, so upgrading from `pi-build 0.1.1`
+to `0.1.2` may produce different bytes for the same manifest
+(comment changes; the substantive code may also change if the
+template was edited). Operators who need cross-version
+reproducibility either pin pi-build at the same version or use
+`pi-build verify` (Commit C v2) which hashes only the
+post-comment region OR records the producing version explicitly
+in `pi-build.lock`.
+
 ##### B.3 — Byte-exact `main.rs` template
 
 The codegen substitutes manifest fields into a fixed template.
@@ -866,7 +876,7 @@ edition = "2021"
 
 [dependencies]
 pi-sdk      = "{{pi_sdk_caret_pin}}"     # e.g., "0.1" — caret-pin per RFD 0027 §6
-tokio       = { version = "1", features = ["macros", "rt", "io-util", "io-std"] }
+tokio       = { version = "1", features = ["macros", "rt", "sync"] }   # `sync` for mpsc::unbounded_channel
 serde_json  = "1"
 
 [profile.release]
@@ -892,9 +902,19 @@ tools.keep_only(&[
 ]);
 ```
 
-Sort order is the dedup-canonical order Commit A returns
-(insertion order of first occurrence). Test: same input
-manifest → byte-identical `keep_only` arg list.
+Sort order is the dedup-canonical order Commit A returns:
+**insertion order of first occurrence**. Commit A's
+`validate(&mut Manifest)` lowers via this std-only primitive
+(no `itertools` dep):
+
+```rust
+let mut seen = std::collections::BTreeSet::<String>::new();
+m.tools.allowlist.retain(|x| seen.insert(x.clone()));
+```
+
+Test: same input manifest → byte-identical `keep_only` arg
+list across runs and across hosts (BTreeSet's deterministic
+ordering means even the temporary `seen` set is stable).
 
 If `tools.allowlist == ["read", "write", "edit", "bash", "grep",
 "find", "ls", "web_search"]` (the full set), the codegen still
@@ -903,8 +923,27 @@ explicit list is the audit surface, even when redundant.
 
 ##### B.6 — Auth allowlist lowering
 
-`secrets.required` lowers via the `ProviderName` <-> env-var
-mapping. v1 hardcodes the same table pi-sdk's `ENV_KEYS`
+**Lowering rule:** each `secrets.required[i]` pairs with
+`provider.name`'s kebab string. Pseudocode:
+
+```rust
+auth_pairs = secrets.required.iter()
+    .map(|env| (provider.name.as_kebab(), env.clone()))
+    .collect();
+```
+
+The table below is the **canonical pairing reference** operators
+use to author the manifest (it tells you WHICH env var to put
+in `secrets.required` for a given provider). It is NOT the
+codegen lowering map — codegen pairs whatever the operator
+listed with whatever the operator chose for `provider.name`.
+That's why a manifest with mismatched pairs (`provider.name =
+"anthropic"` but `secrets.required = ["FOO"]`) emits a stderr
+warning rather than a hard error: `from_env_explicit` accepts
+arbitrary keys; only the operator knows whether the pairing is
+intentional.
+
+v1's canonical pairing table — the same one pi-sdk's `ENV_KEYS`
 constant uses (`pi-ai/src/auth.rs:79-97`):
 
 ```text
@@ -1008,10 +1047,17 @@ fn read_prompt_from_args_or_stdin() -> String {
 Stdout discipline: the usage banner goes to **stderr** per
 §Cross-cutting #8. Stdout is reserved for agent output.
 
+**`--` arg handling (v1):** every arg matching `^--` is dropped
+unconditionally — including the literal POSIX `--`
+end-of-options separator. A prompt that starts with `--` MUST
+be passed via stdin: `echo '--my-prompt' | agent`. Honoring the
+POSIX `--` separator (so that `agent -- --my-prompt` would
+treat `--my-prompt` as the prompt) is reserved for v2.
+
 ##### B.12 — `map_runtime_error_to_exit` helper
 
-The full enum match against `pi_sdk::RuntimeError` (v0.1 has
-~10 variants per `pi-agent-core/src/runtime.rs:50-115`):
+The full enum match against `pi_sdk::RuntimeError` (per
+`pi-agent-core/src/runtime.rs:1856-1912`):
 
 ```rust
 fn map_runtime_error_to_exit(e: pi_sdk::RuntimeError) -> u8 {
@@ -1054,15 +1100,27 @@ Auth errors don't reach this helper — they're caught at
 5. **Codegen determinism.** Same manifest hash + same pi-build
    version → byte-identical `(Cargo.toml, src/main.rs)`. Test
    runs codegen twice and `assert_eq!` the bytes.
-6. **No secrets in generated source.** Grep the rendered
-   `main.rs` for `[A-Z_]+_KEY|[A-Z_]+_TOKEN`; matches MUST be
-   inside `from_env_explicit([...])` literals only — never as
-   string values, never in a `system_prompt`. Codegen test
-   asserts.
+6. **No secrets in generated source.** Parse the rendered
+   `main.rs` via `syn::parse_file` and walk the AST: every
+   string literal containing `_API_KEY|_TOKEN` MUST be a child
+   of a `from_env_explicit([...])` call expression. (Pure
+   regex is insufficient — a `system_prompt` mentioning
+   "ANTHROPIC_API_KEY" by name in operator-authored prose
+   would false-positive.) Test asserts via syn walk; pi-build
+   takes a dev-dep on `syn` for tests only.
 7. **Stdout vs stderr separation.** Integration test runs
    the generated binary with `--jsonl` against a MockProvider
    that emits known events; asserts stdout contains only valid
    JSONL and stderr contains zero JSONL-shaped lines.
+8. **No-secret manifest produces no env reads.** A manifest
+   with `secrets.required = []` codegens
+   `AuthStorage::from_env_explicit([])` — the literal empty
+   slice. Snapshot test asserts the exact rendered substring
+   `from_env_explicit([])` appears in `main.rs` and that NO
+   `_API_KEY|_TOKEN` literal appears anywhere outside string
+   literals in `system_prompt`. Catches the "operator forgot
+   to allowlist anything but the agent still magically
+   authenticates" failure mode.
 
 ##### B.14 — Test plan
 
@@ -1291,6 +1349,46 @@ verify the *split* itself works:
   significantly).
 
 ## Revision history
+
+- **v0.7 (2026-05-03):** Commit B v1 critic returned
+  `NEEDS_REVISION` with 2 critical + 6 underspec'd. v0.7 closes:
+  - **Critical: B.4 missing `tokio` `sync` feature.** Generated
+    `main.rs` calls `tokio::sync::mpsc::unbounded_channel()`
+    which requires the `sync` feature; without it every
+    generated agent fails to compile. Replaced
+    `["macros", "rt", "io-util", "io-std"]` with
+    `["macros", "rt", "sync"]` (dropped `io-util`/`io-std`
+    since the helper uses `std::io::stdin()`, not tokio I/O).
+  - **Critical: B.12 line citation rotted.** `RuntimeError` is
+    at `pi-agent-core/src/runtime.rs:1856-1912`, not
+    `:50-115` (those lines contain `GateContext` + tests).
+    Variant names are correct on substance.
+  - **Underspec'd: B.6 prose.** Split into "lowering rule"
+    (paired with `provider.name` regardless of canonical
+    mapping) vs "canonical pairing reference table"
+    (informational, for operator authoring).
+  - **Underspec'd: B.5 dedup primitive.** Pinned to a std-only
+    `BTreeSet`-based `Vec::retain` — preserves first-occurrence
+    insertion order with deterministic ordering, no
+    `itertools` dep.
+  - **Underspec'd: B.11 `--` separator handling.** Spec'd that
+    v1 drops every `^--` arg unconditionally (no POSIX
+    end-of-options); operators with prompts starting with
+    `--` use stdin. POSIX `--` reserved for v2.
+  - **Underspec'd: B.13 invariant gap.** Added invariant 8
+    (no-secret manifest produces no env reads) — catches
+    "operator forgot to allowlist anything but agent still
+    magically authenticates."
+  - **Underspec'd: B.13 #6 regex approach.** Pure regex would
+    false-positive on operator-authored `system_prompt` text
+    mentioning env-var names. Spec'd `syn::parse_file` AST
+    walk: string literals containing `_API_KEY|_TOKEN` MUST
+    be children of a `from_env_explicit([...])` call.
+  - **Underspec'd: B.2 cross-version determinism.** Added
+    explicit note that pi-build N.x → N.(x+1) may produce
+    different bytes (comment header carries version);
+    operators needing cross-version reproducibility pin
+    pi-build or use Commit C v2's `verify` verb.
 
 - **v0.6 (2026-05-03):** Commit B expanded from sketch to full
   spec. Sub-sections B.1-B.15 added covering: pi-build CLI shape
