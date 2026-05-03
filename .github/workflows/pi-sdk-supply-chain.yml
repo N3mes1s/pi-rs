@@ -39,6 +39,14 @@ on:
 permissions:
   contents: read
 
+# Per code-review pass-6 finding #5: cancel redundant runs of this
+# workflow on the same ref. cargo install of audit/deny/semver-checks
+# is expensive; queueing five PRs against the same branch shouldn't
+# spawn five concurrent runs.
+concurrency:
+  group: pi-sdk-supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   audit:
     name: cargo-audit

@@ -17,5 +17,5 @@ pub use firecracker::FirecrackerLauncher;
 pub use launcher::{MicroVmLauncher, VmHandle};
 pub use types::{
     CallLimits, NetworkPolicy, ProbeCheck, ProbeReport, RootfsVersion,
-    VmCeiling, VmExecution, VmSpec,
+    VmCeiling, VmExecution, VmSpec, ROOTFS_VERSION,
 };

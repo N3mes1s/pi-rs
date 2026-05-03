@@ -3,6 +3,11 @@ name = "pi-coding-agent"
 version.workspace = true
 edition.workspace = true
 description = "The `pi` binary: minimal terminal coding agent harness, Rust port"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Binary-side; embedders use `pi-sdk` instead.
+publish = false
 
 [lib]
 name = "pi_coding_agent"

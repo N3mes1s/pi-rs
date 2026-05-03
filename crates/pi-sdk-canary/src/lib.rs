@@ -23,6 +23,18 @@
 use async_trait::async_trait;
 use pi_sdk::{
     cost::{estimate_cost_usd, sum_session_cost_usd, CostRegistry, Pricing},
+    // Provider implementors:
+    AnthropicProvider, AzureOpenAiProvider, BedrockAnthropicProvider, EventStream,
+    GenerateRequest, GenerateResponse, GoogleProvider, ModelInfo, OpenAiCompatProvider,
+    OpenAiProvider, ProviderKind, Role, ThinkingLevel,
+    // Sandbox:
+    SandboxError, SandboxExecution,
+    // Runtime:
+    create_agent_session, default_system_prompt, AgentSession, BuildConfig, Compactor,
+    ContextFile, DefaultProviderFactory, EventSender, SessionMeta, SessionTree,
+    // Convenience:
+    build_runtime_config,
+    // Already-covered surface:
     AgentEvent, AgentEventKind, AgentSessionRuntime, AuthMethod, AuthStorage, ConfigBuilder,
     ConfigError, ContentBlock, Error, FinishReason, GateContext, LocalProcessProvider,
     Message, MockProvider, MockProviderFactory, MockSandboxCall, MockSandboxProvider,
@@ -37,37 +49,52 @@ use std::sync::Arc;
 /// symbol is removed/renamed in a future pi-sdk MINOR. The function
 /// is `_unused()` and never called; its body type-references each
 /// import to silence dead-code warnings.
+///
+/// Per code-review pass-6 finding #2: every name in the pi-sdk
+/// `pub use ...` blocks must be referenced here. If a future MINOR
+/// renames `AnthropicProvider` to `AnthropicLLMProvider`, the canary
+/// fails to compile and the rename is caught before publish.
 #[allow(dead_code)]
 fn _every_re_export_compiles(
+    // Error / Result family
     _e: &Error,
     _re: &RuntimeError,
     _ce: &ConfigError,
+    // Sandbox errors / executions
+    _sxe: &SandboxError,
+    _sxx: &SandboxExecution,
+    // Runtime hub
     _ar: &AgentSessionRuntime,
-    _ac: &AuthMethod,
-    _as: &AuthStorage,
+    _as_session: &AgentSession,
     _cb: &ConfigBuilder,
-    _cf: &ContentBlock,
-    _fr: &FinishReason,
+    _bc: &BuildConfig,
+    _rc: &RuntimeConfig,
+    _ev: EventSender,
+    _cf: &ContextFile,
+    _comp: &Compactor,
+    _dpf: &DefaultProviderFactory,
+    // Auth + provider
+    _ac: &AuthMethod,
+    _astorage: &AuthStorage,
     _gc: &GateContext,
-    _lpp: &LocalProcessProvider,
-    _m: &Message,
-    _mp: &MockProvider,
-    _mpf: &MockProviderFactory,
-    _msc: &MockSandboxCall,
-    _msp: &MockSandboxProvider,
-    _mr: &ModelRegistry,
+    _ap: &AnthropicProvider,
+    _aoap: &AzureOpenAiProvider,
+    _bap: &BedrockAnthropicProvider,
+    _gp: &GoogleProvider,
+    _ocp: &OpenAiCompatProvider,
+    _op: &OpenAiProvider,
+    _pk: &ProviderKind,
+    _r: &Role,
+    _tl: &ThinkingLevel,
+    // Provider trait machinery
+    _es: &mut EventStream,
+    _gr: &GenerateRequest,
+    _gres: &GenerateResponse,
+    _mi: &ModelInfo,
     _p: &dyn Provider,
     _pc: &ProviderConfig,
     _pf: &dyn ProviderFactory,
-    _rc: &RuntimeConfig,
-    _sp: &dyn SandboxProvider,
-    _se: &SessionEntry,
-    _sek: &SessionEntryKind,
-    _sm: &SessionManager,
-    _s: &Settings,
-    _sve: &StreamEvent,
-    _svk: &StreamEventKind,
-    _si: &dyn StreamInterceptor,
+    // Tool surface
     _t: &dyn Tool,
     _tc: &ToolCall,
     _tx: &ToolContext,
@@ -77,13 +104,47 @@ fn _every_re_export_compiles(
     _tr: &ToolRegistry,
     _trs: &ToolResult,
     _ts: &ToolSpec,
-    _u: &Usage,
+    // Sandbox provider
+    _lpp: &LocalProcessProvider,
+    _sp: &dyn SandboxProvider,
+    // Session telemetry
+    _se: &SessionEntry,
+    _sek: &SessionEntryKind,
+    _sm: &SessionManager,
+    _smeta: &SessionMeta,
+    _stree: &SessionTree,
     _ws: &WireSerializer,
+    // Settings + content
+    _s: &Settings,
+    _cfb: &ContentBlock,
+    _m: &Message,
+    _u: &Usage,
+    _fr: &FinishReason,
+    // Streaming
+    _sve: &StreamEvent,
+    _svk: &StreamEventKind,
+    _si: &dyn StreamInterceptor,
     _ae: &AgentEvent,
     _aek: &AgentEventKind,
+    // Mocks (gated on `mocks` feature)
+    _mp: &MockProvider,
+    _mpf: &MockProviderFactory,
+    _msc: &MockSandboxCall,
+    _msp: &MockSandboxProvider,
+    _mr: &ModelRegistry,
+    // Cost
     _cr: &CostRegistry,
     _pr: &Pricing,
 ) {
+    // Type-level reference to free-standing functions so symbol
+    // removals are caught at compile time too (not just types).
+    let _create_agent_session = create_agent_session;
+    let _default_system_prompt: fn() -> &'static str = default_system_prompt;
+    let _build_runtime_config = build_runtime_config;
+    let _estimate_cost_usd = estimate_cost_usd;
+    // sum_session_cost_usd is generic over `I: IntoIterator`; concretise
+    // with one type to satisfy type inference.
+    let _sum_session_cost_usd = sum_session_cost_usd::<std::iter::Empty<&Usage>>;
 }
 
 /// Build a runtime via the SAFE-by-default pattern + assert the shape.

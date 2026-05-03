@@ -3,6 +3,11 @@ name = "pi-orchestrate"
 version.workspace = true
 edition.workspace = true
 description = "Campaign schema parser, validator, and plan formatter for pi --orchestrate (RFD 0021)"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Binary-side; consumed by `pi --orchestrate`, not embedders.
+publish = false
 
 [lib]
 name = "pi_orchestrate"

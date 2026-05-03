@@ -3,6 +3,11 @@ name = "pi-sandbox-worker"
 version.workspace = true
 edition.workspace = true
 description = "Guest-side worker binary for pi-rs microVM sandbox"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Guest-side binary, distributed via the rootfs artifact, not crates.io.
+publish = false
 
 [[bin]]
 name = "pi-sandbox-worker"

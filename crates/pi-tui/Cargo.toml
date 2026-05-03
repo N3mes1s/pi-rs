@@ -3,6 +3,11 @@ name = "pi-tui"
 version.workspace = true
 edition.workspace = true
 description = "Terminal UI primitives with differential rendering for pi-rs"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Binary-side; the pi binary's TUI rendering layer.
+publish = false
 
 [dependencies]
 ratatui.workspace = true

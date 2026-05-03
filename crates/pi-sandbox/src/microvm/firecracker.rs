@@ -125,7 +125,7 @@ impl FirecrackerConfig {
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join(format!(
                 "pi/sandbox/rootfs/{}/rootfs.img",
-                pi_sandbox_rootfs::ROOTFS_VERSION
+                crate::microvm::ROOTFS_VERSION
             ))
     }
 

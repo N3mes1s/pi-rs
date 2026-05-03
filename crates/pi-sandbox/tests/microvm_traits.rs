@@ -21,9 +21,14 @@ fn call_limits_default_is_60s_256kib() {
 }
 
 #[test]
-fn rootfs_version_current_matches_rootfs_crate() {
+fn rootfs_version_current_matches_inlined_const() {
+    // Pre-pass-6 finding #1: the const lived in the `pi-sandbox-rootfs`
+    // workspace crate; pi-sandbox depended on it. That crate is
+    // `publish = false` (build-recipe scaffolding only), which would
+    // have made pi-sandbox unpublishable. Const moved into pi-sandbox
+    // itself; this test guards the rename.
     let v = RootfsVersion::current();
-    assert_eq!(v.0, pi_sandbox_rootfs::ROOTFS_VERSION);
+    assert_eq!(v.0, pi_sandbox::microvm::ROOTFS_VERSION);
 }
 
 #[test]

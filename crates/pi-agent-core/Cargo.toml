@@ -11,7 +11,9 @@ authors.workspace = true
 tempfile.workspace = true
 futures.workspace = true
 async-trait.workspace = true
-pi-sandbox.workspace = true
+# Per pass-6 finding #7: pi-sandbox is in [dependencies]; the
+# duplicate dev-dep entry was redundant (cargo accepted but it adds
+# confusion for readers). Removed.
 
 [dependencies]
 pi-ai.workspace = true

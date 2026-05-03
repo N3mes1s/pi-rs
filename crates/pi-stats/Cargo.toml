@@ -3,6 +3,12 @@ name = "pi-stats"
 version.workspace = true
 edition.workspace = true
 description = "Stats ingest, aggregation, and HTTP dashboard for pi-rs sessions"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Binary-side; embedders consume SessionEntry JSONL via pi-sdk's
+# re-exports and write their own ingest pipeline.
+publish = false
 
 [dependencies]
 pi-ai = { workspace = true }

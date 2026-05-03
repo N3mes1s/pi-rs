@@ -40,14 +40,20 @@ HEADER
 
 # Stream the TOML rows in order, emit one markdown row each.
 # Schema is fixed; we don't need a real TOML parser.
+#
+# Per code-review pass-6 finding #7: anchor each field regex with
+# `[ \t]*=` so a future field whose name starts with an existing
+# field's name (e.g. hypothetical `pi_sdk_canary` colliding with
+# `pi_sdk`, or `pi_tools_net` with `pi_tools_core`) doesn't get
+# silently overwritten by the wrong line.
 awk '
-  /^\[\[release\]\]/        { in_row = 1; sec = 0; next }
-  in_row && /^pi_sdk/       { gsub(/[ "]/, "", $3); pi_sdk        = $3 }
-  in_row && /^pi_tool_types/ { gsub(/[ "]/, "", $3); pi_tool_types = $3 }
-  in_row && /^pi_ai/        { gsub(/[ "]/, "", $3); pi_ai         = $3 }
-  in_row && /^pi_tools_core/ { gsub(/[ "]/, "", $3); pi_tools_core = $3 }
-  in_row && /^pi_sandbox/   { gsub(/[ "]/, "", $3); pi_sandbox    = $3 }
-  in_row && /^pi_agent_core/ { gsub(/[ "]/, "", $3); pi_agent_core = $3 }
+  /^\[\[release\]\]/                      { in_row = 1; sec = 0; next }
+  in_row && /^pi_sdk[ \t]*=/              { gsub(/[ "]/, "", $3); pi_sdk        = $3 }
+  in_row && /^pi_tool_types[ \t]*=/       { gsub(/[ "]/, "", $3); pi_tool_types = $3 }
+  in_row && /^pi_ai[ \t]*=/               { gsub(/[ "]/, "", $3); pi_ai         = $3 }
+  in_row && /^pi_tools_core[ \t]*=/       { gsub(/[ "]/, "", $3); pi_tools_core = $3 }
+  in_row && /^pi_sandbox[ \t]*=/          { gsub(/[ "]/, "", $3); pi_sandbox    = $3 }
+  in_row && /^pi_agent_core[ \t]*=/       { gsub(/[ "]/, "", $3); pi_agent_core = $3 }
   in_row && /^notes/        {
     sub(/^[^=]*= */, "")
     gsub(/(^"|"$)/, "")

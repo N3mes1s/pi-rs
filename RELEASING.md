@@ -56,19 +56,25 @@ found in registry."
 2.  pi-ai                  (depends on pi-tool-types)
 3.  pi-tools-core          (depends on pi-tool-types)
 4.  pi-tools-net           (depends on pi-tool-types, pi-tools-core)
-5.  pi-tools               (depends on pi-tools-core, pi-tools-net)
+5.  pi-tools               (depends on pi-tools-core, pi-tools-net, pi-ai)
 6.  pi-sandbox-protocol    (no workspace deps)
-7.  pi-sandbox-rootfs      (no workspace deps)
-8.  pi-sandbox             (depends on pi-tools, pi-tool-types, pi-sandbox-rootfs, pi-sandbox-protocol)
-9.  pi-agent-core          (depends on pi-ai, pi-tools, pi-sandbox)
-10. pi-sdk                 (depends on all of the above)
+7.  pi-sandbox             (depends on pi-tools, pi-tool-types, pi-sandbox-protocol)
+8.  pi-agent-core          (depends on pi-ai, pi-tools, pi-sandbox)
+9.  pi-sdk                 (depends on all of the above)
 ```
 
-NOT published: `pi-coding-agent` (the binary, not a library SDK
-consumer), `pi-tui` (binary-side), `pi-stats` (binary-side),
-`pi-orchestrate` (binary-side), `pi-sandbox-worker` (guest binary,
-distributed via the rootfs artifact), `pi-sdk-canary` (test crate,
-`publish = false`).
+NOT published (all marked `publish = false`):
+- `pi-coding-agent` — the `pi` binary; embedders use `pi-sdk`.
+- `pi-tui` — binary-side TUI rendering.
+- `pi-stats` — binary-side ingest + dashboard.
+- `pi-orchestrate` — binary-side campaign runner.
+- `pi-sandbox-worker` — guest-side binary, distributed via the
+  rootfs artifact, not crates.io.
+- `pi-sandbox-rootfs` — workspace-internal scaffolding for the
+  rootfs build recipe (`build.sh`); `ROOTFS_VERSION` was inlined
+  into `pi-sandbox/src/microvm/types.rs` so `pi-sandbox` is a
+  publishable leaf (per pass-6 finding #1).
+- `pi-sdk-canary` — test crate.
 
 ## Per-release checklist
 
@@ -93,8 +99,8 @@ Dry-run each crate (in the order above):
 
 ```bash
 for name in pi-tool-types pi-ai pi-tools-core pi-tools-net \
-            pi-tools pi-sandbox-protocol pi-sandbox-rootfs \
-            pi-sandbox pi-agent-core pi-sdk; do
+            pi-tools pi-sandbox-protocol pi-sandbox \
+            pi-agent-core pi-sdk; do
   echo "==> dry-run: ${name}"
   cargo publish --dry-run -p "${name}" || { echo "FAIL: ${name}"; exit 1; }
 done
@@ -109,8 +115,8 @@ Real publish:
 
 ```bash
 for name in pi-tool-types pi-ai pi-tools-core pi-tools-net \
-            pi-tools pi-sandbox-protocol pi-sandbox-rootfs \
-            pi-sandbox pi-agent-core pi-sdk; do
+            pi-tools pi-sandbox-protocol pi-sandbox \
+            pi-agent-core pi-sdk; do
   echo "==> publish: ${name}"
   cargo publish -p "${name}" || { echo "FAIL: ${name}"; exit 1; }
   # crates.io rate-limits — pause 30s between uploads.

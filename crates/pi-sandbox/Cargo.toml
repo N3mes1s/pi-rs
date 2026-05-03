@@ -17,7 +17,12 @@ chrono.workspace = true
 tracing.workspace = true
 pi-tools.workspace = true
 pi-tool-types.workspace = true
-pi-sandbox-rootfs.workspace = true
+# pi-sandbox-rootfs is a workspace-internal `publish = false` crate
+# (build-recipe scaffolding only). Pre-pass-6 finding #1: depending
+# on it would have made pi-sandbox unpublishable to crates.io.
+# `ROOTFS_VERSION` was inlined into pi-sandbox/src/microvm/types.rs
+# instead; the build.sh script in crates/pi-sandbox-rootfs has the
+# same constant on its `VERSION=` line and must be bumped in lockstep.
 pi-sandbox-protocol.workspace = true
 dirs.workspace = true
 reqwest = { workspace = true, features = ["stream"] }

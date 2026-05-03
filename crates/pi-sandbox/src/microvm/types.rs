@@ -78,15 +78,31 @@ impl Default for CallLimits {
     }
 }
 
-/// Pinned rootfs version that the launcher should boot. Matches
-/// what `pi-sandbox-rootfs::ROOTFS_VERSION` produces. Mismatch
+/// Pinned rootfs version that the launcher should boot. Mismatch
 /// → SandboxError::RootfsMismatch.
+///
+/// **Sync requirement:** [`ROOTFS_VERSION`] (below) MUST match the
+/// `VERSION` constant baked into `crates/pi-sandbox-rootfs/build.sh`
+/// (line ~28) — the build.sh script stamps this value into the
+/// rootfs artifact's `/etc/pi-sandbox-version` and the launcher
+/// rejects boots where the two disagree. Bump both in lockstep.
+///
+/// Pre-pass-6 finding #1, this constant lived in the
+/// `pi-sandbox-rootfs` crate (workspace dep). That crate is
+/// `publish = false` because it ships only a build recipe (no
+/// runtime artifact); a `pi-sandbox` published to crates.io that
+/// depended on it would have been unresolvable. Inlining the
+/// constant here keeps `pi-sandbox` publishable as a leaf crate,
+/// while `pi-sandbox-rootfs` stays a workspace-internal scaffold
+/// for the build recipe.
+pub const ROOTFS_VERSION: &str = "0.1.0";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootfsVersion(pub String);
 
 impl RootfsVersion {
     pub fn current() -> Self {
-        Self(pi_sandbox_rootfs::ROOTFS_VERSION.to_string())
+        Self(ROOTFS_VERSION.to_string())
     }
 }
 
