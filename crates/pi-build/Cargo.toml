@@ -21,5 +21,11 @@ serde.workspace = true
 toml.workspace = true
 semver.workspace = true
 thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "process", "io-util"] }
 
 [dev-dependencies]
+tempfile.workspace = true
+syn = { version = "2", features = ["full", "extra-traits", "visit"] }
+
