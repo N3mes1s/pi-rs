@@ -18,7 +18,7 @@
 //!    via plain inheritance.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write as _};
+use std::io::{Read, Write as _};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -104,6 +104,16 @@ pub enum SubprocessError {
 /// dropped (stderr_tail in CycleSubprocessOutcome holds the
 /// most recent slice).
 const STDERR_TAIL_BYTES: usize = 16 * 1024;
+/// Per-line cap for stdout JSONL. A misbehaving compiled agent
+/// emitting one giant line can no longer OOM halo: anything
+/// past this byte count is dropped + warn-logged. 1 MiB
+/// comfortably exceeds any legitimate AgentEvent (largest
+/// realistic variant is `MonitorEvent { lines: String }` and a
+/// 1 MiB monitor batch is already a misuse).
+const MAX_JSONL_LINE_BYTES: usize = 1024 * 1024;
+/// Stdout read chunk size — small enough that backpressure
+/// stays smooth, large enough to amortize syscall overhead.
+const STDOUT_CHUNK_BYTES: usize = 4 * 1024;
 /// Polling interval for the wait loop.
 const WAIT_POLL: Duration = Duration::from_millis(500);
 /// Grace period between SIGTERM and SIGKILL on timeout/signal.
@@ -142,15 +152,66 @@ pub fn spawn_cycle_subprocess(
         Ok(())
     });
 
-    // Stdout: line-by-line parse → events.
-    let stdout = child.stdout.take().expect("piped stdout");
+    // Stdout: byte-level chunked reader → assemble lines → parse.
+    //
+    // Adversarial-review fixes (post-Phase-1):
+    //  - `BufRead::lines()` returned `Err(InvalidData)` on any
+    //    non-UTF-8 byte and the previous `let Ok(line) = line
+    //    else { break };` silently dropped every subsequent line
+    //    (including the final Usage + TurnComplete events that
+    //    drive spend). Now we read raw bytes and `from_utf8_lossy`
+    //    each line — invalid bytes become U+FFFD, parse_event_line
+    //    rejects malformed JSON, the loop continues.
+    //  - `BufRead::lines()` would also allocate a single huge
+    //    `String` if the child emitted a 1 GiB line without a
+    //    newline, OOM'ing halo. The MAX_JSONL_LINE_BYTES cap
+    //    bounds in-flight memory; over-cap lines are dropped
+    //    with one warn-log per occurrence.
+    let mut stdout = child.stdout.take().expect("piped stdout");
     let events_buf = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
     let events_writer = events_buf.clone();
     let stdout_handle = thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
-            if let Some(evt) = parse_event_line(&line) {
+        let mut chunk = [0u8; STDOUT_CHUNK_BYTES];
+        let mut line_buf: Vec<u8> = Vec::with_capacity(STDOUT_CHUNK_BYTES);
+        let mut overflowed = false;
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    for &b in &chunk[..n] {
+                        if b == b'\n' {
+                            if !overflowed {
+                                let s = String::from_utf8_lossy(&line_buf);
+                                if let Some(evt) = parse_event_line(&s) {
+                                    let mut guard = events_writer
+                                        .lock()
+                                        .expect("events mutex poisoned");
+                                    guard.push(evt);
+                                }
+                            }
+                            line_buf.clear();
+                            overflowed = false;
+                            continue;
+                        }
+                        if line_buf.len() < MAX_JSONL_LINE_BYTES {
+                            line_buf.push(b);
+                        } else if !overflowed {
+                            tracing::warn!(
+                                cap = MAX_JSONL_LINE_BYTES,
+                                "compiled-agent JSONL line exceeded {} bytes; dropping until next newline",
+                                MAX_JSONL_LINE_BYTES
+                            );
+                            overflowed = true;
+                        }
+                    }
+                }
+                Err(_) => break, // Genuine I/O error (not EOF) — bail.
+            }
+        }
+        // Trailing partial line (no terminating \n) — try to parse.
+        if !overflowed && !line_buf.is_empty() {
+            let s = String::from_utf8_lossy(&line_buf);
+            if let Some(evt) = parse_event_line(&s) {
                 let mut guard = events_writer.lock().expect("events mutex poisoned");
                 guard.push(evt);
             }
@@ -240,9 +301,11 @@ fn build_command(cmd: &CycleSubprocessCommand<'_>) -> Command {
     // - absolute / relative-with-slash → used as-is.
     // - bare name (no `/`) → resolved via $PATH.
     // The operator-facing rule "relative-to-halo.toml-parent-dir"
-    // is the responsibility of the caller (config.rs's CycleSpec
-    // parser canonicalises paths against the config root before
-    // building this command).
+    // is applied by the CALLER via
+    // `CompiledAgentSpec::resolve_binary(halo_toml_parent)`.
+    // Phase 2b's wiring code calls that method before constructing
+    // the CycleSubprocessCommand. Direct callers (tests, future
+    // shapes) pass pre-resolved absolute paths.
     let mut c = Command::new(cmd.binary);
     c.args(cmd.args);
     c.current_dir(cmd.cwd);
@@ -569,5 +632,108 @@ exit 0
             bogus, cwd, &env, "", &args, signal, pid, None,
         ));
         assert!(matches!(result, Err(SubprocessError::Spawn { .. })));
+    }
+
+    // ── Adversarial-review-2 fixes ─────────────────────────────────
+
+    #[test]
+    fn spawn_tolerates_non_utf8_byte_mid_stream() {
+        // Per adversarial review #1: a single non-UTF-8 byte on
+        // stdout used to break the loop and silently drop every
+        // subsequent valid event (including final Usage +
+        // TurnComplete, breaking spend attribution). Now the
+        // reader is byte-level + lossy-decode; one bad byte
+        // converts to U+FFFD inside one bad line, parse_event_line
+        // rejects that line, and subsequent valid lines parse
+        // correctly.
+        let tmp = tempfile::tempdir_in("/home/nemesis/code").unwrap();
+        let bin = write_script(
+            tmp.path(),
+            "agent",
+            r#"#!/bin/sh
+printf '%s\n' '{"session_id":"s","entry_id":"e1","timestamp":0,"kind":{"type":"session_started","id":"s","cwd":"/x","model":"m","provider":"p"}}'
+printf '\xff\xfe garbage byte mid-line\n'
+printf '%s\n' '{"session_id":"s","entry_id":"e3","timestamp":0,"kind":{"type":"turn_complete"}}'
+exit 0
+"#,
+        );
+        let env = empty_env();
+        let signal = Arc::new(AtomicBool::new(false));
+        let pid = Arc::new(AtomicI32::new(0));
+        let args: Vec<String> = vec![];
+        let outcome = spawn_cycle_subprocess(&cmd_for(
+            &bin, tmp.path(), &env, "", &args, signal, pid, None,
+        ))
+        .expect("spawn ok");
+        // Two valid events parsed; the non-UTF-8 line is dropped
+        // by parse_event_line (lossy decode → "?? garbage" which
+        // isn't valid JSON).
+        assert_eq!(
+            outcome.events.len(),
+            2,
+            "non-UTF-8 byte must NOT silently drop subsequent valid lines"
+        );
+    }
+
+    #[test]
+    fn spawn_caps_jsonl_line_at_max_length() {
+        // Per adversarial review #2: a single huge line used to
+        // cause unbounded heap allocation. Now lines past 1 MiB
+        // are dropped + warn-logged once.
+        let tmp = tempfile::tempdir_in("/home/nemesis/code").unwrap();
+        // Emit one valid line, then a 2 MiB line of `x`, then
+        // one more valid line. The over-cap middle line should
+        // be dropped; the bookends should parse.
+        let bin = write_script(
+            tmp.path(),
+            "agent",
+            r#"#!/bin/sh
+printf '%s\n' '{"session_id":"s","entry_id":"e1","timestamp":0,"kind":{"type":"session_started","id":"s","cwd":"/x","model":"m","provider":"p"}}'
+yes "x" | head -c 2097152 | tr -d '\n'
+printf '\n'
+printf '%s\n' '{"session_id":"s","entry_id":"e3","timestamp":0,"kind":{"type":"turn_complete"}}'
+exit 0
+"#,
+        );
+        let env = empty_env();
+        let signal = Arc::new(AtomicBool::new(false));
+        let pid = Arc::new(AtomicI32::new(0));
+        let args: Vec<String> = vec![];
+        let outcome = spawn_cycle_subprocess(&cmd_for(
+            &bin, tmp.path(), &env, "", &args, signal, pid, None,
+        ))
+        .expect("spawn ok");
+        assert_eq!(outcome.exit_code, 0);
+        // The 2 MiB line is dropped; the two valid bookends parse.
+        assert_eq!(
+            outcome.events.len(),
+            2,
+            "2 MiB line should be dropped; bookend lines should still parse"
+        );
+    }
+
+    #[test]
+    fn spawn_handles_trailing_partial_line_without_newline() {
+        let tmp = tempfile::tempdir_in("/home/nemesis/code").unwrap();
+        // Last line has no terminating \n.
+        let bin = write_script(
+            tmp.path(),
+            "agent",
+            r#"#!/bin/sh
+printf '%s\n' '{"session_id":"s","entry_id":"e1","timestamp":0,"kind":{"type":"session_started","id":"s","cwd":"/x","model":"m","provider":"p"}}'
+printf '%s'   '{"session_id":"s","entry_id":"e2","timestamp":0,"kind":{"type":"turn_complete"}}'
+exit 0
+"#,
+        );
+        let env = empty_env();
+        let signal = Arc::new(AtomicBool::new(false));
+        let pid = Arc::new(AtomicI32::new(0));
+        let args: Vec<String> = vec![];
+        let outcome = spawn_cycle_subprocess(&cmd_for(
+            &bin, tmp.path(), &env, "", &args, signal, pid, None,
+        ))
+        .expect("spawn ok");
+        // Both lines parse — the trailing one is flushed at EOF.
+        assert_eq!(outcome.events.len(), 2);
     }
 }

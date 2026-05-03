@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use anyhow::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,6 +283,49 @@ fn d_throttle_streak_max() -> u32 { 5 }
 fn d_throttle_base_delay_secs() -> u64 { 60 }
 fn d_throttle_cap_secs() -> u64 { 3600 }
 
+impl CompiledAgentSpec {
+    /// Resolve `self.binary` against the halo.toml's parent directory
+    /// per RFD 0028 §D.2 path-resolution rules:
+    /// - absolute (`/usr/local/bin/agent`) → used verbatim.
+    /// - contains `/` (`./bin/agent`) → relative to `halo_toml_parent`.
+    /// - bare name (`agent`) → returned as-is for `Command::new` to
+    ///   resolve via `$PATH`.
+    ///
+    /// Phase 2b's wiring code (cycle-driver loop in `run.rs`) calls
+    /// this before constructing `CycleSubprocessCommand`. Per
+    /// rfd-critic post-Phase-1 review: subprocess.rs's spawn doc
+    /// claimed config.rs's parser canonicalised these paths, but
+    /// no code did — the comment described an intent, not behavior.
+    /// This method makes the intent real.
+    pub fn resolve_binary(&self, halo_toml_parent: &Path) -> PathBuf {
+        let p = Path::new(&self.binary);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else if self.binary.contains('/') {
+            halo_toml_parent.join(p)
+        } else {
+            // Bare name → `Command::new` does $PATH resolution.
+            p.to_path_buf()
+        }
+    }
+
+    /// Lower `timeout_secs` to the `Option<Duration>` shape
+    /// `spawn_cycle_subprocess` expects. `0` is the operator's
+    /// EXPLICIT no-cap (per RFD §D.2); any non-zero value
+    /// becomes `Some(Duration::from_secs(n))`.
+    ///
+    /// Without this helper, Phase 2b wiring could naively pass
+    /// `Some(Duration::from_secs(0))`, which would expire the
+    /// cycle immediately on the first poll.
+    pub fn timeout(&self) -> Option<Duration> {
+        if self.timeout_secs == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(self.timeout_secs))
+        }
+    }
+}
+
 /// Per RFD 0028 §D.6 exit-code → behavior mapping. The serde
 /// `rename_all = "snake_case"` gives the operator the
 /// "continue"/"alert"/"throttle" string spelling on the wire.
@@ -545,6 +590,98 @@ on_exit = {{ "0" = "continue", "abc" = "alert" }}
             errs.iter().any(|e| e.contains("not a valid exit code")),
             "{errs:?}",
         );
+    }
+
+    // ── Adversarial-review-2 helper methods ──────────────────────
+
+    #[test]
+    fn resolve_binary_absolute_path_used_verbatim() {
+        let spec = CompiledAgentSpec {
+            name: "x".into(),
+            binary: "/usr/local/bin/agent".into(),
+            args: vec![],
+            prompt: "p".into(),
+            on_exit: BTreeMap::new(),
+            timeout_secs: 0,
+            env_extra: BTreeMap::new(),
+            throttle_streak_max: 0,
+            throttle_base_delay_secs: 0,
+            throttle_cap_secs: 0,
+        };
+        let resolved = spec.resolve_binary(Path::new("/halo/parent"));
+        assert_eq!(resolved, PathBuf::from("/usr/local/bin/agent"));
+    }
+
+    #[test]
+    fn resolve_binary_relative_path_joins_halo_parent() {
+        let spec = CompiledAgentSpec {
+            name: "x".into(),
+            binary: "./bin/agent".into(),
+            args: vec![],
+            prompt: "p".into(),
+            on_exit: BTreeMap::new(),
+            timeout_secs: 0,
+            env_extra: BTreeMap::new(),
+            throttle_streak_max: 0,
+            throttle_base_delay_secs: 0,
+            throttle_cap_secs: 0,
+        };
+        let resolved = spec.resolve_binary(Path::new("/work/.pi"));
+        assert_eq!(resolved, PathBuf::from("/work/.pi/./bin/agent"));
+    }
+
+    #[test]
+    fn resolve_binary_bare_name_returned_as_is_for_path_lookup() {
+        let spec = CompiledAgentSpec {
+            name: "x".into(),
+            binary: "agent".into(),
+            args: vec![],
+            prompt: "p".into(),
+            on_exit: BTreeMap::new(),
+            timeout_secs: 0,
+            env_extra: BTreeMap::new(),
+            throttle_streak_max: 0,
+            throttle_base_delay_secs: 0,
+            throttle_cap_secs: 0,
+        };
+        // Bare name → returned unchanged; Command::new resolves via $PATH.
+        assert_eq!(spec.resolve_binary(Path::new("/anywhere")), PathBuf::from("agent"));
+    }
+
+    #[test]
+    fn timeout_zero_lowers_to_none_per_rfd_d2() {
+        let spec = CompiledAgentSpec {
+            name: "x".into(),
+            binary: "/x".into(),
+            args: vec![],
+            prompt: "p".into(),
+            on_exit: BTreeMap::new(),
+            timeout_secs: 0,
+            env_extra: BTreeMap::new(),
+            throttle_streak_max: 0,
+            throttle_base_delay_secs: 0,
+            throttle_cap_secs: 0,
+        };
+        assert_eq!(spec.timeout(), None);
+    }
+
+    #[test]
+    fn timeout_non_zero_lowers_to_some_duration() {
+        let mut spec = CompiledAgentSpec {
+            name: "x".into(),
+            binary: "/x".into(),
+            args: vec![],
+            prompt: "p".into(),
+            on_exit: BTreeMap::new(),
+            timeout_secs: 1800,
+            env_extra: BTreeMap::new(),
+            throttle_streak_max: 0,
+            throttle_base_delay_secs: 0,
+            throttle_cap_secs: 0,
+        };
+        assert_eq!(spec.timeout(), Some(Duration::from_secs(1800)));
+        spec.timeout_secs = 1;
+        assert_eq!(spec.timeout(), Some(Duration::from_secs(1)));
     }
 
     #[test]
