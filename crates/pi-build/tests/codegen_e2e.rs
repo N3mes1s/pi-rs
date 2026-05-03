@@ -27,6 +27,7 @@ fn dice_oracle_render_writes_three_files() {
         build: false,
         target: None,
         release: true,
+        cargo_path: None,
     };
     write_tree(&tree, &opts).expect("write");
 

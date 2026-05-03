@@ -16,6 +16,11 @@ pub struct BuildOptions {
     pub build: bool,
     pub target: Option<String>,
     pub release: bool,
+    /// Override the cargo binary path. `None` = "cargo" resolved
+    /// via `PATH`. Test fixtures inject a mock cargo here to avoid
+    /// process-wide `PATH` mutation races; production callers
+    /// leave it `None`.
+    pub cargo_path: Option<PathBuf>,
 }
 
 impl BuildOptions {
@@ -26,6 +31,7 @@ impl BuildOptions {
             build: false,
             target: None,
             release: true,
+            cargo_path: None,
         }
     }
 }
@@ -105,7 +111,8 @@ fn write_file(path: &Path, contents: &str) -> Result<(), BuildError> {
 /// requested flags. NO RUSTFLAGS, NO -C overrides.
 pub async fn cargo_build(opts: &BuildOptions) -> Result<BuildOutcome, BuildError> {
     let manifest_path = opts.out_dir.join("Cargo.toml");
-    let mut cmd = tokio::process::Command::new("cargo");
+    let cargo_bin: &Path = opts.cargo_path.as_deref().unwrap_or(Path::new("cargo"));
+    let mut cmd = tokio::process::Command::new(cargo_bin);
     cmd.arg("build");
     if opts.release {
         cmd.arg("--release");
@@ -163,16 +170,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn write_tree_creates_missing_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let opts = BuildOptions {
-            out_dir: tmp.path().join("nested/dir"),
+    fn opts_for(out_dir: PathBuf) -> BuildOptions {
+        BuildOptions {
+            out_dir,
             force: false,
             build: false,
             target: None,
             release: true,
-        };
+            cargo_path: None,
+        }
+    }
+
+    #[test]
+    fn write_tree_creates_missing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = opts_for(tmp.path().join("nested/dir"));
         write_tree(&fake_tree(), &opts).expect("create + write");
         assert!(opts.out_dir.join("Cargo.toml").is_file());
         assert!(opts.out_dir.join("src/main.rs").is_file());
@@ -182,14 +194,7 @@ mod tests {
     #[test]
     fn write_tree_empty_dir_succeeds() {
         let tmp = tempfile::tempdir().unwrap();
-        let opts = BuildOptions {
-            out_dir: tmp.path().to_path_buf(),
-            force: false,
-            build: false,
-            target: None,
-            release: true,
-        };
-        // tempdir() creates an empty dir; this should succeed.
+        let opts = opts_for(tmp.path().to_path_buf());
         write_tree(&fake_tree(), &opts).expect("write into empty existing dir");
     }
 
@@ -197,13 +202,7 @@ mod tests {
     fn write_tree_non_empty_no_force_errors() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("garbage"), "x").unwrap();
-        let opts = BuildOptions {
-            out_dir: tmp.path().to_path_buf(),
-            force: false,
-            build: false,
-            target: None,
-            release: true,
-        };
+        let opts = opts_for(tmp.path().to_path_buf());
         let err = write_tree(&fake_tree(), &opts).unwrap_err();
         assert!(matches!(err, BuildError::OutDirNotEmpty(_)), "{err:?}");
     }
@@ -212,13 +211,8 @@ mod tests {
     fn write_tree_non_empty_with_force_wipes_then_writes() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("stale-artifact"), "x").unwrap();
-        let opts = BuildOptions {
-            out_dir: tmp.path().to_path_buf(),
-            force: true,
-            build: false,
-            target: None,
-            release: true,
-        };
+        let mut opts = opts_for(tmp.path().to_path_buf());
+        opts.force = true;
         write_tree(&fake_tree(), &opts).expect("force should wipe + write");
         // Stale artifact is gone (proves wipe-then-write, not merge).
         assert!(!tmp.path().join("stale-artifact").exists());
@@ -228,27 +222,15 @@ mod tests {
 
     #[tokio::test]
     async fn cargo_build_with_missing_cargo_returns_cargo_not_found() {
-        // Override PATH to an empty dir so `cargo` is not findable.
+        // Inject a non-existent cargo path; no PATH manipulation
+        // (which would race with parallel tests).
         let tmp = tempfile::tempdir().unwrap();
-        let opts = BuildOptions {
-            out_dir: tmp.path().to_path_buf(),
-            force: false,
-            build: true,
-            target: None,
-            release: true,
-        };
-        // Need a Cargo.toml in out_dir or cargo would also fail; we're
-        // testing the spawn-time NotFound path, so put one in just to
-        // keep the test deterministic regardless of cargo's pre-checks.
+        let mut opts = opts_for(tmp.path().to_path_buf());
+        opts.build = true;
+        opts.cargo_path = Some(PathBuf::from("/no/such/cargo/binary/anywhere"));
         std::fs::write(opts.out_dir.join("Cargo.toml"), "").unwrap();
 
-        let saved_path = std::env::var_os("PATH");
-        // SAFETY: setting env in a single-threaded test scope.
-        std::env::set_var("PATH", "");
         let result = cargo_build(&opts).await;
-        if let Some(p) = saved_path {
-            std::env::set_var("PATH", p);
-        }
         assert!(matches!(result, Err(BuildError::CargoNotFound)), "{result:?}");
     }
 }
