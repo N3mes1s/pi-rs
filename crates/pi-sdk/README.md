@@ -125,7 +125,7 @@ The README tells you the safe path; this checklist tells you what to verify befo
 
 ### Tool surface
 
-- [ ] **Never use `ToolRegistry::with_unsafe_extras()` (or its alias `with_extras()`) in production.** It registers `bash`, a code-execution gateway. Use `ToolRegistry::new()` and register tools explicitly so the surface is auditable. The safe alternative for read-only inspection is `with_readonly_extras()`.
+- [ ] **Never use `ToolRegistry::with_unsafe_extras()` in production.** It registers `bash`, a code-execution gateway. Use `ToolRegistry::new()` and register tools explicitly so the surface is auditable. The safe alternative for read-only inspection is `with_readonly_extras()`.
 - [ ] If you need shell, register `bash` only with a `SandboxProvider` that actually isolates (microvm or remote — `LocalProcessProvider` runs in your process namespace).
 - [ ] Custom `Tool` impls must be panic-safe: the runtime catches panics (Hardening §4.5 #1) but a panicking tool returns `ToolError` on every call until you fix it.
 - [ ] Audit each custom tool's `invoke()` for input validation, output truncation respecting `ctx.max_output_bytes`, no unscoped fs access outside `ctx.cwd`.

@@ -11,7 +11,7 @@ description = "Public Rust SDK for embedding the pi-rs coding-agent harness in a
 name = "pi_sdk"
 path = "src/lib.rs"
 
-# Public surface: re-exports plus the BuildConfig convenience builder.
+# Public surface: re-exports plus the `quick_start` convenience.
 # See RFD 0027 (rfd/0027-pi-rs-sdk.md) for the design contract.
 
 [dependencies]
@@ -26,7 +26,7 @@ pi-tools-net.workspace = true
 pi-sandbox.workspace = true
 pi-agent-core.workspace = true
 
-# Cross-cutting deps used by the SDK glue (BuildConfig defaults).
+# Cross-cutting deps used by the SDK glue (quick_start, error type, cost).
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

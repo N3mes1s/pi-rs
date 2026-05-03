@@ -19,10 +19,12 @@ the in-flight working tree and the most recent published version
 
 ## [Unreleased]
 
-No breaking changes since 0.1.0 (not yet published). Several
-additive APIs are available for embedders to migrate to ahead of
-the eventual breaking changes documented in the "0.x → 1.0" section
-below:
+No breaking changes since 0.1.0 (not yet published — the working
+tree pre-publish dropped `BuildConfig` + `build_runtime_config` +
+`AuthStorage::from_env()` + `ToolRegistry::with_extras()` so these
+never appear in any published version). Several additive APIs are
+available for embedders to migrate to ahead of the eventual breaking
+changes documented in the "0.x → 1.0" section below:
 
 - **`Settings::builder()` (polish-8)** — additive. The breaking
   `#[non_exhaustive]` mark on `Settings` is deferred to 1.0; the
@@ -59,35 +61,7 @@ below:
 The 1.0 release will collapse 0.x's residual ergonomic warts. The
 expected migration shape:
 
-### 1. `BuildConfig` deprecated in favour of `RuntimeConfig::builder()`
-
-Pre-1.0 (current 0.x — both work):
-
-```rust
-let cfg = build_runtime_config(BuildConfig {
-    auth: AuthStorage::from_env_explicit(&[("anthropic", "MY_KEY")])?,
-    tools: ToolRegistry::with_readonly_extras(),
-    settings: Settings::default(),
-    ..BuildConfig::default()
-});
-```
-
-Post-1.0 (recommended):
-
-```rust
-let cfg = RuntimeConfig::builder()
-    .auth_storage(AuthStorage::from_env_explicit(&[("anthropic", "MY_KEY")])?)
-    .tools(ToolRegistry::with_readonly_extras())
-    .settings(Settings::default())
-    // ... other required setters
-    .build()?;
-```
-
-`BuildConfig` continues to compile under 1.x with a `#[deprecated]`
-warning until 1.0+4 MINOR releases (~6 months past 1.0) per RFD §3
-deprecation policy. Final removal in 2.0.
-
-### 2. `Settings { ..Settings::default() }` → `Settings::builder()`
+### 1. `Settings { ..Settings::default() }` → `Settings::builder()`
 
 `Settings` becomes `#[non_exhaustive]` at 1.0 per RFD §3 blanket
 policy. The struct-literal-with-spread pattern stops compiling
@@ -118,7 +92,7 @@ let s = Settings::builder()
 The builder ships in 0.x (polish-8) so embedders can migrate
 ahead of the 1.0 freeze.
 
-### 3. Sandbox launcher traits leave `*-unstable` features
+### 2. Sandbox launcher traits leave `*-unstable` features
 
 In 0.x (and 1.0 + 1.1) the microvm + remote sandbox launcher traits
 ship behind:
