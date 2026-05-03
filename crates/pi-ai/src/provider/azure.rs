@@ -140,7 +140,32 @@ impl Provider for AzureOpenAiProvider {
                 if done {
                     return None;
                 }
-                while let Some(item) = es.next().await {
+                loop {
+                    let idle = crate::http::streaming_idle_timeout();
+                    let polled = if idle.is_zero() {
+                        Ok(es.next().await)
+                    } else {
+                        tokio::time::timeout(idle, es.next()).await
+                    };
+                    let item = match polled {
+                        Ok(n) => n,
+                        Err(_) => {
+                            return Some((
+                                Ok(StreamEvent::new(StreamEventKind::Error {
+                                    message: format!(
+                                        "azure: SSE stream idle for {}s — \
+                                         provider stopped sending events",
+                                        idle.as_secs()
+                                    ),
+                                })),
+                                (es, acc, true),
+                            ));
+                        }
+                    };
+                    let item = match item {
+                        Some(v) => v,
+                        None => break,
+                    };
                     let ev = match item {
                         Ok(ev) => ev,
                         Err(e) => {
