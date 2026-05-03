@@ -48,6 +48,7 @@ notify.workspace = true
 unicode-segmentation.workspace = true
 ignore.workspace = true
 sha2.workspace = true
+libc = "0.2"   # halo/subprocess.rs: SIGTERM-the-PG on timeout/signal
 tempfile.workspace = true
 pi-stats.workspace = true
 pi-orchestrate.workspace = true

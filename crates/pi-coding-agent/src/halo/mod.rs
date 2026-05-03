@@ -4,11 +4,13 @@
 pub mod backlog;
 pub mod config;
 pub mod cycle;
+pub mod jsonl;
 pub mod proposer;
 pub mod run;
 pub mod spend;
 pub mod state;
 pub mod streak;
+pub mod subprocess;
 
 use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
