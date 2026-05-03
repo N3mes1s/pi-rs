@@ -91,8 +91,9 @@ impl WebSearchProvider {
 }
 
 /// Per-call configuration. The CLI / settings layer constructs one of
-/// these and either feeds it to [`WebSearchTool::new`] (overrides
-/// everywhere) or lets the tool resolve from env on each call (default).
+/// these and either feeds it to [`WebSearchTool::with_config`]
+/// (overrides everywhere) or lets the tool resolve from env on each
+/// call (default).
 #[derive(Debug, Clone)]
 pub struct WebSearchConfig {
     pub provider: WebSearchProvider,

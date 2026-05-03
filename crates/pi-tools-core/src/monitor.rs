@@ -4,7 +4,7 @@
 //! agent as one notification per line (with 200 ms batching).
 //!
 //! `op = "start"` forks a `tokio::process::Command`, attaches a reader
-//! task, and stores a [`MonitorHandle`] for later `stop`. Each line
+//! task, and stores an internal handle for later `stop`. Each line
 //! batch is emitted as a [`MonitorNotification::Lines`] on the
 //! channel handed to the tool at construction time. When the child
 //! exits (or `stop` cancels it, or the volume guard trips) the tool
@@ -26,7 +26,8 @@ use crate::{resolve_path, Tool, ToolContext, ToolError};
 /// Notification emitted by a [`MonitorTool`]. The tool itself doesn't
 /// know about `pi_agent_core::AgentEventKind`; the host (typically
 /// `pi-coding-agent`) bridges these notifications onto the event
-/// channel and into the [`MonitorPump`].
+/// channel and into its own monitor-pump (a binary-side aggregator
+/// that buffers notifications between agent turns).
 #[derive(Debug, Clone)]
 pub enum MonitorNotification {
     Lines {
