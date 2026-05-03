@@ -249,9 +249,20 @@ pub struct Cli {
 
     /// Run a campaign TOML: walk milestones in topo order, emit
     /// transitions to `<state-root>/<campaign>/state.jsonl`.
-    /// v0 stub-dispatches each milestone (no real implementer/reviewer
-    /// pi spawned yet — that's v1). Exit 0 on success, 2 on
-    /// validation/IO errors.
+    ///
+    /// For each milestone the runner (1) checks out the milestone
+    /// branch, (2) dispatches an implementer subagent (subprocess;
+    /// agent definition at `<repo>/.pi/agents/<name>.md` supplies
+    /// model + prompt), (3) captures a review snapshot, then
+    /// (4) dispatches a reviewer subagent. On `READY_TO_MERGE` the
+    /// snapshotted commit is cherry-picked onto the target branch
+    /// (or blocked if the target moved). On `NEEDS_FIX` the
+    /// implementer is re-dispatched with the reviewer's feedback
+    /// appended (up to `fix_loop_max` iterations; exhaustion →
+    /// `FAILED`). On `DO_NOT_MERGE` the milestone is marked
+    /// `FAILED` immediately.
+    ///
+    /// Exit 0 on success, 2 on validation/IO errors.
     #[arg(long = "orchestrate", value_name = "PATH")]
     pub orchestrate: Option<PathBuf>,
 
