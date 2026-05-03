@@ -215,27 +215,31 @@ pub fn prune_stale_worktrees(repo_root: &Path, branch: &str) -> Vec<String> {
 /// this is the defensive fix for the race where a reviewer subprocess
 /// leaves a worktree behind on the very branch we're about to check
 /// out (observed on 2026-05-04 in `sdk-bedrock-azure-streaming-timeout`).
-/// Non-fatal prune warnings are discarded here; callers that need them
-/// can call `prune_stale_worktrees` directly.
-pub fn git_checkout(repo_root: &Path, branch: &str) -> std::io::Result<()> {
+///
+/// Returns `(warnings, result)` where `warnings` is the (possibly empty)
+/// list of non-fatal messages from the prune step and `result` is `Ok(())`
+/// on success or an `Err` if the checkout itself failed. Callers are
+/// expected to surface any warnings in their state.jsonl detail so the
+/// operator can see partial-cleanup failures.
+pub fn git_checkout(repo_root: &Path, branch: &str) -> (Vec<String>, std::io::Result<()>) {
     // Defensively clean up stale worktrees before we attempt the checkout.
-    // Warnings are non-fatal; if the cleanup fails the subsequent checkout
-    // will surface a clear error.
-    let _warnings = prune_stale_worktrees(repo_root, branch);
+    let warnings = prune_stale_worktrees(repo_root, branch);
 
-    let out = Command::new("git")
-        .args(["checkout", "-q", branch])
-        .current_dir(repo_root)
-        .output()?;
-    if !out.status.success() {
-        return Err(std::io::Error::other(
-            format!(
+    let result = (|| {
+        let out = Command::new("git")
+            .args(["checkout", "-q", branch])
+            .current_dir(repo_root)
+            .output()?;
+        if !out.status.success() {
+            return Err(std::io::Error::other(format!(
                 "git checkout {branch} failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
-            ),
-        ));
-    }
-    Ok(())
+            )));
+        }
+        Ok(())
+    })();
+
+    (warnings, result)
 }
 
 /// Resolve `git rev-parse <ref>` in the given repo.

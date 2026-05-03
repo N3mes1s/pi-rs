@@ -189,13 +189,27 @@ pub fn run_with(
             // the previous milestone's cherry-pick), so the
             // implementer reads the wrong files and the reviewer
             // diffs the wrong refs.
-            if let Err(e) = git_checkout(repo_root, &m.branch) {
+            let (prune_warnings, checkout_result) = git_checkout(repo_root, &m.branch);
+            if let Err(e) = checkout_result {
+                // Build a detail string that includes any non-fatal
+                // prune warnings alongside the checkout error, so the
+                // operator can diagnose partial-cleanup failures from
+                // state.jsonl without having to grep runner logs.
+                let detail = if prune_warnings.is_empty() {
+                    format!("git checkout {} failed: {e}", m.branch)
+                } else {
+                    format!(
+                        "git checkout {} failed: {e}; prune warnings: {}",
+                        m.branch,
+                        prune_warnings.join("; ")
+                    )
+                };
                 emit_event(
                     &mut log,
                     &m.id,
                     if iter == 1 { "PENDING" } else { "REVIEWED" },
                     "FAILED",
-                    &format!("git checkout {} failed: {e}", m.branch),
+                    &detail,
                     &mut events_for,
                 )?;
                 break FinalState::Failed;

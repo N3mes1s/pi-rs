@@ -105,7 +105,8 @@ fn prune_removes_stale_worktree_and_checkout_succeeds() {
 
     // The stale worktree directory's git metadata should be cleaned up.
     // Now checkout should succeed.
-    git_checkout(repo, "feat").expect("git_checkout must succeed after prune");
+    let (_warnings, result) = git_checkout(repo, "feat");
+    result.expect("git_checkout must succeed after prune");
     assert_eq!(current_branch(repo), "feat");
 }
 
@@ -133,7 +134,13 @@ fn git_checkout_succeeds_when_stale_worktree_exists() {
 
     // git_checkout should transparently clean up the worktree and
     // succeed, rather than returning an error.
-    git_checkout(repo, "feat").expect("git_checkout should clean up stale worktree and succeed");
+    let (warnings, result) =
+        git_checkout(repo, "feat");
+    result.expect("git_checkout should clean up stale worktree and succeed");
+    assert!(
+        warnings.is_empty(),
+        "Expected no prune warnings, got: {warnings:?}"
+    );
     assert_eq!(current_branch(repo), "feat", "HEAD must be on feat after checkout");
 
     // The stale worktree path still exists on disk (we hold a TempDir for it)
