@@ -10,8 +10,8 @@ follows to publish a `pi-sdk` MINOR to crates.io.
    RFD's fallback is `pirs-sdk` or `pi-rs-sdk` (Open Question #8).
    ```bash
    for name in pi-tool-types pi-ai pi-tools-core pi-tools-net \
-               pi-tools pi-sandbox-protocol pi-sandbox-rootfs \
-               pi-sandbox pi-agent-core pi-sdk; do
+               pi-tools pi-sandbox-protocol pi-sandbox \
+               pi-agent-core pi-sdk; do
      if cargo search "${name}" --limit 1 2>/dev/null | grep -q "^${name} = "; then
        echo "TAKEN: ${name}"
      else

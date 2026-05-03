@@ -178,8 +178,22 @@ mod tests {
 
     #[test]
     fn interceptor_thrash_displays_aborts_and_cap() {
-        let e = Error::InterceptorThrash { aborts: 4, cap: 3 };
+        // Per code-review pass-7 NIT #3: pre-fix used 4/3 — both
+        // single digits; a field-swap regression would still pass
+        // since both digits appear in the rendered string regardless
+        // of order. Use 71/23 (no shared digits, both two-digit) so
+        // a swap actually fails the test.
+        let e = Error::InterceptorThrash { aborts: 71, cap: 23 };
         let s = format!("{e}");
-        assert!(s.contains('4') && s.contains('3'), "got: {s}");
+        assert!(s.contains("71") && s.contains("23"), "got: {s}");
+        // Order check: aborts should appear before cap in the canonical
+        // Display rendering (pinned by the format string in the variant
+        // attribute). A field-swap regression would put 23 first.
+        let pos_aborts = s.find("71").unwrap();
+        let pos_cap = s.find("23").unwrap();
+        assert!(
+            pos_aborts < pos_cap,
+            "aborts (71) should render before cap (23); got: {s}"
+        );
     }
 }
