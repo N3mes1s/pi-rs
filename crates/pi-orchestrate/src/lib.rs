@@ -12,7 +12,7 @@ pub mod validate;
 pub mod verdict;
 
 pub use dispatch::{Dispatch, DispatchOutcome, DispatchRole, RealDispatch};
-pub use merge::{cherry_pick_to_target, rev_parse, MergeOutcome};
+pub use merge::{cherry_pick_to_target, git_checkout, prune_stale_worktrees, rev_parse, MergeOutcome};
 pub use plan::{format_plan, topological_order};
 pub use runner::{replay, run, run_with, state_path_for, MilestoneOutcome, RunSummary, StateEvent};
 pub use schema::{Campaign, Defaults, Milestone, OverrideRule};

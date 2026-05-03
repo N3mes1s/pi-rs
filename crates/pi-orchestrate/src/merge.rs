@@ -46,12 +46,183 @@ pub enum MergeOutcome {
     GitError(String),
 }
 
+/// Remove stale worktrees that are checked out on `branch` before we
+/// attempt `git checkout <branch>` in the main working tree.
+///
+/// The sequence is:
+///   1. `git worktree prune` — removes registry entries for worktree
+///      paths that no longer exist on disk (cheap, idempotent).
+///   2. `git worktree list --porcelain` — parse the output to find
+///      worktrees that have `branch refs/heads/<branch>` and whose
+///      path is NOT the main repo root.
+///   3. `git worktree remove --force <path>` — for each match.
+///
+/// Failures in step 3 are non-fatal: we log a warning via
+/// `tracing::warn!` and continue; the subsequent `git checkout` will
+/// fail with a descriptive error if the cleanup was truly incomplete.
+///
+/// Returns a `Vec<String>` of any non-fatal warning messages so
+/// callers can surface them in state.jsonl detail fields if desired.
+pub fn prune_stale_worktrees(repo_root: &Path, branch: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    // Step 1: prune dangling registry entries.
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_root)
+        .output();
+
+    // Step 2: list worktrees.
+    let list_out = match Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_root)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            warnings.push(format!("git worktree list failed to spawn: {e}"));
+            return warnings;
+        }
+    };
+    if !list_out.status.success() {
+        warnings.push(format!(
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&list_out.stderr).trim()
+        ));
+        return warnings;
+    }
+
+    // Parse the porcelain output. Each worktree block looks like:
+    //
+    //   worktree /absolute/path
+    //   HEAD <sha>
+    //   branch refs/heads/<name>
+    //   <blank line>
+    //
+    // The main worktree comes first. We normalise repo_root to a
+    // canonical path once (resolving symlinks) so the comparison is
+    // reliable even when tempdir returns a symlinked path.
+    let main_path = repo_root.canonicalize().unwrap_or_else(|_| repo_root.to_path_buf());
+
+    let stdout = String::from_utf8_lossy(&list_out.stdout);
+    let target_ref = format!("refs/heads/{branch}");
+
+    // Walk the blocks split by blank lines.
+    let mut current_wt_path: Option<String> = None;
+    let mut current_branch: Option<String> = None;
+
+    for raw_line in stdout.lines() {
+        let line = raw_line.trim_end();
+
+        if line.is_empty() {
+            // End of block — evaluate.
+            if let (Some(wt_path), Some(ref wt_branch)) =
+                (current_wt_path.take(), current_branch.take())
+            {
+                if wt_branch == &target_ref {
+                    let wt = std::path::Path::new(&wt_path);
+                    let wt_canonical =
+                        wt.canonicalize().unwrap_or_else(|_| wt.to_path_buf());
+                    if wt_canonical != main_path {
+                        // This worktree has our branch checked out —
+                        // remove it.
+                        let rm = Command::new("git")
+                            .args(["worktree", "remove", "--force", &wt_path])
+                            .current_dir(repo_root)
+                            .output();
+                        match rm {
+                            Ok(r) if r.status.success() => {
+                                // removed successfully
+                                let _ = &wt_path; // suppress unused warning
+                            }
+                            Ok(r) => {
+                                let msg = format!(
+                                    "git worktree remove --force {wt_path} failed: {}",
+                                    String::from_utf8_lossy(&r.stderr).trim()
+                                );
+                                eprintln!("pi-orchestrate: worktree prune warning: {msg}");
+                                warnings.push(msg);
+                            }
+                            Err(e) => {
+                                let msg = format!(
+                                    "git worktree remove --force {wt_path} spawn failed: {e}"
+                                );
+                                eprintln!("pi-orchestrate: worktree prune warning: {msg}");
+                                warnings.push(msg);
+                            }
+                        }
+                    }
+                }
+            }
+            current_branch = None;
+            continue;
+        }
+
+        if let Some(path) = line.strip_prefix("worktree ") {
+            current_wt_path = Some(path.to_string());
+            current_branch = None;
+        } else if let Some(b) = line.strip_prefix("branch ") {
+            current_branch = Some(b.to_string());
+        }
+    }
+
+    // Handle a trailing block with no final blank line.
+    if let (Some(wt_path), Some(ref wt_branch)) = (current_wt_path, current_branch) {
+        if wt_branch == &target_ref {
+            let wt = std::path::Path::new(&wt_path);
+            let wt_canonical = wt.canonicalize().unwrap_or_else(|_| wt.to_path_buf());
+            if wt_canonical != main_path {
+                let rm = Command::new("git")
+                    .args(["worktree", "remove", "--force", &wt_path])
+                    .current_dir(repo_root)
+                    .output();
+                match rm {
+                    Ok(r) if r.status.success() => {
+                        // removed successfully
+                        let _ = &wt_path;
+                    }
+                    Ok(r) => {
+                        let msg = format!(
+                            "git worktree remove --force {wt_path} failed: {}",
+                            String::from_utf8_lossy(&r.stderr).trim()
+                        );
+                        eprintln!("pi-orchestrate: worktree prune warning: {msg}");
+                        warnings.push(msg);
+                    }
+                    Err(e) => {
+                        let msg = format!(
+                            "git worktree remove --force {wt_path} spawn failed: {e}"
+                        );
+                        eprintln!("pi-orchestrate: worktree prune warning: {msg}");
+                        warnings.push(msg);
+                    }
+                }
+            }
+        }
+    }
+
+    warnings
+}
+
 /// `git checkout <branch>` in the given repo. Used by the runner to
 /// switch between milestone branches and the campaign target branch.
 /// Bug B2 in the v1 review: the runner never checked out
 /// `m.branch` before dispatch, so post-merge milestones executed on
 /// `target_branch`.
+///
+/// Before performing the checkout, calls [`prune_stale_worktrees`] to
+/// remove any registered worktrees that have `branch` checked out —
+/// this is the defensive fix for the race where a reviewer subprocess
+/// leaves a worktree behind on the very branch we're about to check
+/// out (observed on 2026-05-04 in `sdk-bedrock-azure-streaming-timeout`).
+/// Non-fatal prune warnings are discarded here; callers that need them
+/// can call `prune_stale_worktrees` directly.
 pub fn git_checkout(repo_root: &Path, branch: &str) -> std::io::Result<()> {
+    // Defensively clean up stale worktrees before we attempt the checkout.
+    // Warnings are non-fatal; if the cleanup fails the subsequent checkout
+    // will surface a clear error.
+    let _warnings = prune_stale_worktrees(repo_root, branch);
+
     let out = Command::new("git")
         .args(["checkout", "-q", branch])
         .current_dir(repo_root)
