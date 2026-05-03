@@ -1,0 +1,118 @@
+# Supply-chain CI gates for pi-sdk per RFD 0027 §6 + Commit I.
+#
+# Runs on every PR + every push to main. Required-to-merge for any
+# change touching the pi-sdk public surface.
+#
+# Three jobs:
+#   - audit:           cargo-audit against the resolved lockfile.
+#   - deny:            cargo-deny check (bans + licenses + sources).
+#   - semver-checks:   cargo-semver-checks against the previous
+#                      published version on crates.io.
+#
+# `semver-checks` is the API-stability gate. After 0.1.0 ships to
+# crates.io, every PR is checked for backwards-incompatible changes
+# in pi-sdk's public surface. The job soft-fails on 0.x → 0.x+1
+# (allowed per the §3 pre-1.0 contract); hard-fails on PATCH or
+# MINOR breaks once 1.0 ships.
+
+name: pi-sdk supply chain
+
+on:
+  pull_request:
+    paths:
+      - 'crates/pi-sdk/**'
+      - 'crates/pi-sdk-canary/**'
+      - 'crates/pi-tool-types/**'
+      - 'crates/pi-ai/**'
+      - 'crates/pi-tools-core/**'
+      - 'crates/pi-tools-net/**'
+      - 'crates/pi-tools/**'
+      - 'crates/pi-sandbox/**'
+      - 'crates/pi-agent-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'deny.toml'
+      - '.github/workflows/pi-sdk-supply-chain.yml'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit
+        run: cargo audit --deny warnings
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: Check bans + licenses + sources + advisories
+        run: cargo deny check
+
+  semver-checks:
+    name: cargo-semver-checks (pi-sdk)
+    runs-on: ubuntu-latest
+    # Skip until 0.1.0 is published to crates.io — there's nothing
+    # to compare against. Re-enable in Commit J's PR.
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-semver-checks
+        run: cargo install cargo-semver-checks --locked
+      - name: Check pi-sdk
+        run: cargo semver-checks check-release --package pi-sdk
+
+  canary:
+    name: pi-sdk-canary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build + test canary
+        run: cargo test -p pi-sdk-canary
+
+  examples:
+    name: pi-sdk examples build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build all examples
+        run: cargo build --examples -p pi-sdk --features mocks
+
+  doctests:
+    name: pi-sdk doctests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Doc-tests
+        run: cargo test -p pi-sdk --doc --features mocks
+
+  matrix-up-to-date:
+    name: COMPATIBILITY.md matches compatibility.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Re-generate matrix and diff
+        run: |
+          bash scripts/gen-compatibility-matrix.sh
+          if ! git diff --exit-code crates/pi-sdk/COMPATIBILITY.md; then
+            echo "ERROR: COMPATIBILITY.md is out of date with compatibility.toml" >&2
+            echo "Run: bash scripts/gen-compatibility-matrix.sh" >&2
+            exit 1
+          fi
