@@ -180,7 +180,10 @@ fn build_child_tools(parent_tools: &ToolRegistry, agent: &AgentDefinition) -> To
     }
     if agent.spawns.is_some() {
         // Re-register `task` so this subagent can fan out further.
-        tools.register(Arc::new(super::tool::TaskTool::new()));
+        // Per RFD 0027 §4.5 #5 (Hardening H3): explicit override —
+        // the parent registry already had `task` if the parent could
+        // spawn, so this is a known re-registration not an accident.
+        tools.register_or_replace(Arc::new(super::tool::TaskTool::new()));
     } else {
         tools.unregister("task");
     }

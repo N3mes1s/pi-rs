@@ -224,7 +224,7 @@ async fn runtime_tool_call_round_trip() {
     ];
     let provider = MockProvider::new(vec![turn1, turn2]);
     let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(EchoTool));
+    tools.register(Arc::new(EchoTool)).expect("unique");
     let cfg = build_config(provider, tools);
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

@@ -164,7 +164,7 @@ fn build_cfg(
     settings.provider = "anthropic".into();
     settings.model = "sonnet".into();
     let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(PoisonTool));
+    tools.register(Arc::new(PoisonTool)).expect("unique");
     let mut builder = RuntimeConfig::builder()
         .session_manager(SessionManager::in_memory())
         .auth_storage(auth.clone())

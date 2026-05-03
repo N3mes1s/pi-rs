@@ -60,6 +60,17 @@ pub struct ToolRegistry {
     inner: BTreeMap<String, Arc<dyn Tool>>,
 }
 
+/// Returned by [`ToolRegistry::register`] when an entry with the
+/// same name is already in the registry. Per RFD 0027 §4.5 #5
+/// (Hardening H3): pre-H3 the inner `BTreeMap::insert` was silent
+/// last-write-wins, so a malicious dependency that called
+/// `register(BashTool::clone())` would shadow the real bash tool
+/// invisibly. Now the caller MUST decide: reject (`register` errors)
+/// or explicit override ([`ToolRegistry::register_or_replace`]).
+#[derive(Debug, thiserror::Error)]
+#[error("tool with name `{0}` is already registered")]
+pub struct DuplicateName(pub String);
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self::default()
@@ -67,18 +78,18 @@ impl ToolRegistry {
 
     pub fn with_defaults() -> Self {
         let mut r = Self::default();
-        r.register(Arc::new(read::ReadTool));
-        r.register(Arc::new(write::WriteTool));
-        r.register(Arc::new(edit::EditTool));
-        r.register(Arc::new(bash::BashTool));
+        r.register_unwrap(Arc::new(read::ReadTool));
+        r.register_unwrap(Arc::new(write::WriteTool));
+        r.register_unwrap(Arc::new(edit::EditTool));
+        r.register_unwrap(Arc::new(bash::BashTool));
         r
     }
 
     pub fn with_extras() -> Self {
         let mut r = Self::with_defaults();
-        r.register(Arc::new(grep::GrepTool));
-        r.register(Arc::new(find::FindTool));
-        r.register(Arc::new(ls::LsTool));
+        r.register_unwrap(Arc::new(grep::GrepTool));
+        r.register_unwrap(Arc::new(find::FindTool));
+        r.register_unwrap(Arc::new(ls::LsTool));
         r
     }
 
@@ -87,10 +98,10 @@ impl ToolRegistry {
     /// H7): the safe-by-default tool set for embedders.
     pub fn with_readonly_extras() -> Self {
         let mut r = Self::default();
-        r.register(Arc::new(read::ReadTool));
-        r.register(Arc::new(grep::GrepTool));
-        r.register(Arc::new(find::FindTool));
-        r.register(Arc::new(ls::LsTool));
+        r.register_unwrap(Arc::new(read::ReadTool));
+        r.register_unwrap(Arc::new(grep::GrepTool));
+        r.register_unwrap(Arc::new(find::FindTool));
+        r.register_unwrap(Arc::new(ls::LsTool));
         r
     }
 
@@ -110,8 +121,44 @@ impl ToolRegistry {
         Self::with_extras()
     }
 
-    pub fn register(&mut self, tool: Arc<dyn Tool>) {
+    /// Register a tool. Per RFD 0027 §4.5 #5 (Hardening H3), this
+    /// rejects collisions with `Err(DuplicateName)` so a malicious
+    /// crate cannot transparently shadow `bash` (or any other tool)
+    /// with an exfiltrating impl. Use
+    /// [`register_or_replace`](Self::register_or_replace) for the
+    /// explicit override case.
+    pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), DuplicateName> {
+        let name = tool.spec().name;
+        if self.inner.contains_key(&name) {
+            return Err(DuplicateName(name));
+        }
+        self.inner.insert(name, tool);
+        Ok(())
+    }
+
+    /// Register a tool, replacing any existing entry with the same
+    /// name. Use this when the override is intentional (testing,
+    /// runtime patching, etc.). Production embedders should use
+    /// [`register`](Self::register) and handle the
+    /// `Err(DuplicateName)` explicitly.
+    pub fn register_or_replace(&mut self, tool: Arc<dyn Tool>) {
         self.inner.insert(tool.spec().name, tool);
+    }
+
+    /// Internal convenience for the built-in `with_*` constructors,
+    /// where each tool is statically known to be unique. Panics on
+    /// collision (programmer error).
+    pub(crate) fn register_unwrap(&mut self, tool: Arc<dyn Tool>) {
+        let name = tool.spec().name.clone();
+        self.register(tool).unwrap_or_else(|_| {
+            panic!("internal collision in built-in registry for `{name}`")
+        });
+    }
+
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn _len(&self) -> usize {
+        self.inner.len()
     }
 
     pub fn unregister(&mut self, name: &str) {
@@ -133,6 +180,69 @@ impl ToolRegistry {
 
     pub fn specs(&self) -> Vec<ToolSpec> {
         self.inner.values().map(|t| t.spec()).collect()
+    }
+}
+
+#[cfg(test)]
+mod h3_register_tests {
+    //! Per RFD 0027 §4.5 #5 (Hardening H3): `register` must reject
+    //! collisions; `register_or_replace` must accept them.
+
+    use super::*;
+    use async_trait::async_trait;
+    use pi_tool_types::ToolResult;
+    use serde_json::Value;
+
+    struct StubTool {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl Tool for StubTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.name.into(),
+                description: "stub".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }
+        }
+        fn read_only(&self) -> bool {
+            true
+        }
+        async fn invoke(
+            &self,
+            _ctx: &ToolContext,
+            _id: &str,
+            _input: Value,
+        ) -> Result<ToolResult, ToolError> {
+            unreachable!("stub never invoked in unit test")
+        }
+    }
+
+    #[test]
+    fn register_rejects_duplicate_name() {
+        let mut r = ToolRegistry::new();
+        r.register(Arc::new(StubTool { name: "x" }))
+            .expect("first register should succeed");
+        let err = r
+            .register(Arc::new(StubTool { name: "x" }))
+            .expect_err("second register should fail with DuplicateName");
+        assert_eq!(err.0, "x");
+        assert_eq!(r._len(), 1, "rejected register must not insert");
+    }
+
+    #[test]
+    fn register_or_replace_silently_overrides() {
+        let mut r = ToolRegistry::new();
+        r.register(Arc::new(StubTool { name: "x" })).expect("first");
+        r.register_or_replace(Arc::new(StubTool { name: "x" }));
+        assert_eq!(r._len(), 1, "override must keep the count at 1");
+    }
+
+    #[test]
+    fn duplicate_name_error_displays_tool_name() {
+        let err = DuplicateName("bash".into());
+        assert!(format!("{err}").contains("bash"));
     }
 }
 

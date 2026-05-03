@@ -77,9 +77,9 @@ pub use pi_sandbox::{
 pub use pi_agent_core::{
     create_agent_session, default_system_prompt, AgentEvent, AgentEventKind,
     AgentSession, AgentSessionRuntime, Compactor, ConfigBuilder, ConfigError,
-    ContextFile, DefaultProviderFactory, EventSender, ProviderFactory,
-    RuntimeConfig, SessionEntry, SessionEntryKind, SessionManager, SessionMeta,
-    SessionTree, Settings, StreamInterceptor, ToolGate, ToolGateOutcome,
+    ContextFile, DefaultProviderFactory, EventSender, GateContext, ProviderFactory,
+    RuntimeConfig, RuntimeError, SessionEntry, SessionEntryKind, SessionManager,
+    SessionMeta, SessionTree, Settings, StreamInterceptor, ToolGate, ToolGateOutcome,
 };
 
 // ─── Convenience builder ──────────────────────────────────────────

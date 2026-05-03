@@ -85,9 +85,11 @@ fn apply_replacements_swaps_builtin_bash_for_extension_tool() {
         reg.names()
     );
 
-    // Now register the extension tools.
+    // Now register the extension tools. Per RFD 0027 §4.5 #5: extension
+    // tools intentionally override matching builtins, so use the
+    // explicit override path.
     for t in extension_tools(&exts) {
-        reg.register(t);
+        reg.register_or_replace(t);
     }
 
     // The extension tool must now be registered.

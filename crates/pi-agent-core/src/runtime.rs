@@ -33,17 +33,66 @@ pub trait ProviderFactory: Send + Sync {
     ) -> Result<Box<dyn Provider>, RuntimeError>;
 }
 
+/// Per-call context handed to [`ToolGate::approve`]. Per RFD 0027
+/// §4.5 #4 (Hardening H3): the gate must be able to scope its
+/// approvals (e.g. "I approved this tool for session A; reject if a
+/// subagent in session B tries the same"). Pre-H3 the gate had no
+/// way to distinguish, so a "remember-the-answer" gate was
+/// trivially bypassable cross-session.
+///
+/// `#[non_exhaustive]` per RFD §3 — additive fields are MINOR.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct GateContext {
+    /// Session id of the call site. Stable for the lifetime of the
+    /// session. Same value as `AgentSession::id()`.
+    pub session_id: String,
+    /// Zero-based count of completed turns in this session. Helps
+    /// gates implement "approve once per turn" policies.
+    pub turn_index: u32,
+    /// If this session was spawned as a child of another (via
+    /// pi-coding-agent's `task` tool, RFD 0005), the parent's
+    /// session id. `None` for top-level sessions.
+    pub parent_session: Option<String>,
+    /// Re-entry depth — bumped each time `Tool::invoke` recursively
+    /// calls back into `AgentSession::send`. `0` for the top-level
+    /// turn. Future Hardening §4.5 #3 (Commit H2) wires the cap on
+    /// this; for now it is informational.
+    pub recursion_depth: usize,
+}
+
+impl GateContext {
+    /// Construct a top-level (depth 0, no parent) gate context for a
+    /// given session_id and turn.
+    pub fn top_level(session_id: impl Into<String>, turn_index: u32) -> Self {
+        Self {
+            session_id: session_id.into(),
+            turn_index,
+            parent_session: None,
+            recursion_depth: 0,
+        }
+    }
+}
+
 /// Approval gate consulted before each tool invocation. The runtime
 /// calls [`ToolGate::approve`] with the tool name + JSON-serialised
-/// input; the gate may approve, reject (with a reason fed back to the
-/// model), or signal that the host UI should prompt the user. The
-/// runtime treats `AskUser` as `Reject` in headless modes.
+/// input + a [`GateContext`] carrying session/turn scope; the gate
+/// may approve, reject (with a reason fed back to the model), or
+/// signal that the host UI should prompt the user. The runtime treats
+/// `AskUser` as `Reject` in headless modes (per RFD 0027 §4.5 #4
+/// `gate_ask_is_approve = true` is TUI-only — see
+/// `RuntimeConfig::with_tool_gate` doc).
 ///
 /// Default: no gate (every call runs). pi-coding-agent's
 /// `auto_approve::AutoApproveGate` plugs in here.
 #[async_trait::async_trait]
 pub trait ToolGate: Send + Sync {
-    async fn approve(&self, tool_name: &str, input: &serde_json::Value) -> ToolGateOutcome;
+    async fn approve(
+        &self,
+        ctx: &GateContext,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> ToolGateOutcome;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -865,6 +914,10 @@ impl AgentSession {
 
     async fn run_loop(&self) -> Result<Message, RuntimeError> {
         let mut last_assistant: Option<Message>;
+        // Per RFD 0027 §4.5 #4 (Hardening H3): zero-based turn
+        // counter handed to the ToolGate via GateContext so policies
+        // can scope on `turn_index`.
+        let mut turn_index_for_gate: u32 = 0;
         loop {
             if self.inner.lock().await.aborted {
                 self.emit(AgentEventKind::Aborted).await;
@@ -1119,6 +1172,12 @@ impl AgentSession {
             })
             .await;
             last_assistant = Some(assistant_msg);
+            // Bump turn counter for any subsequent ToolGate calls
+            // within this same body. (We bump *before* the gate
+            // checks so the first turn handed to a gate is `1`, not
+            // `0`; `0` is reserved for "before any assistant message
+            // emitted" which never reaches the gate code path.)
+            turn_index_for_gate = turn_index_for_gate.saturating_add(1);
 
             if tool_calls.is_empty() {
                 // drain queued steering messages — convert into next user turn
@@ -1192,7 +1251,18 @@ impl AgentSession {
                 // ToolResult and skip the actual invoke; AskUser → fail
                 // closed unless gate_ask_is_approve is set.
                 if let Some(gate) = &self.cfg.tool_gate {
-                    let outcome = gate.approve(&call.name, &call.input).await;
+                    // Per RFD 0027 §4.5 #4 (Hardening H3): hand the
+                    // gate a GateContext so session-scoped policies
+                    // can't be bypassed cross-session. recursion_depth
+                    // is informational at H3 (the cap lives in H2);
+                    // turn_index counts AssistantMessage emissions.
+                    let gate_ctx = GateContext {
+                        session_id: self.id.clone(),
+                        turn_index: turn_index_for_gate,
+                        parent_session: None,
+                        recursion_depth: 0,
+                    };
+                    let outcome = gate.approve(&gate_ctx, &call.name, &call.input).await;
                     let blocked = match outcome {
                         ToolGateOutcome::Approve => None,
                         ToolGateOutcome::Reject(reason) => Some(reason),

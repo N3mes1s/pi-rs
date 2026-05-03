@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_agent_core::{ToolGate, ToolGateOutcome};
+use pi_agent_core::{GateContext, ToolGate, ToolGateOutcome};
 
 use super::{gate, Judge, Mode, Outcome, Policy};
 
@@ -39,7 +39,16 @@ impl AutoApproveGate {
 
 #[async_trait]
 impl ToolGate for AutoApproveGate {
-    async fn approve(&self, tool_name: &str, input: &serde_json::Value) -> ToolGateOutcome {
+    async fn approve(
+        &self,
+        _ctx: &GateContext,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> ToolGateOutcome {
+        // AutoApproveGate's policy file format pre-dates RFD 0027 H3
+        // and does not key on session_id / turn_index / parent_session.
+        // The context is accepted for trait-conformance; embedders
+        // shipping their own ToolGate that needs scoping use ctx.
         let out = gate(
             self.inner.mode,
             &self.inner.policy,

@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 pub use pi_tools_core::{
-    bash, edit, find, grep, ls, monitor, read, resolve_path, write,
+    bash, edit, find, grep, ls, monitor, read, resolve_path, write, DuplicateName,
     Tool, ToolContext, ToolError, ToolResult, ToolSpec,
 };
 pub use pi_tools_net::web_search;
@@ -43,7 +43,8 @@ impl ToolRegistry {
     /// Matches the pre-split behaviour of the original `pi-tools` crate.
     pub fn with_extras() -> Self {
         let mut r = Self(pi_tools_core::ToolRegistry::with_extras());
-        r.register(Arc::new(WebSearchTool::default()));
+        r.register(Arc::new(WebSearchTool::default()))
+            .expect("with_extras: web_search collides with built-in (impossible)");
         r
     }
 
@@ -65,8 +66,19 @@ impl ToolRegistry {
         Self::with_extras()
     }
 
-    pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        self.0.register(tool);
+    /// Register a tool. Per RFD 0027 §4.5 #5 (Hardening H3): rejects
+    /// collisions with `Err(DuplicateName)`. Use [`register_or_replace`]
+    /// for explicit overrides.
+    ///
+    /// [`register_or_replace`]: Self::register_or_replace
+    pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), DuplicateName> {
+        self.0.register(tool)
+    }
+
+    /// Register a tool, replacing any existing entry with the same
+    /// name. Use when override is intentional.
+    pub fn register_or_replace(&mut self, tool: Arc<dyn Tool>) {
+        self.0.register_or_replace(tool);
     }
 
     pub fn unregister(&mut self, name: &str) {

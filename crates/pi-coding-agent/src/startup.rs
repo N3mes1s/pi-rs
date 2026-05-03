@@ -148,10 +148,12 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
             default_timeout: std::time::Duration::from_millis(settings.monitor.default_timeout_ms),
             max_timeout: std::time::Duration::from_millis(settings.monitor.max_timeout_ms),
         };
-        tools.register(Arc::new(pi_tools::monitor::MonitorTool::new(
-            monitor_tx.clone(),
-            mcfg,
-        )));
+        tools
+            .register(Arc::new(pi_tools::monitor::MonitorTool::new(
+                monitor_tx.clone(),
+                mcfg,
+            )))
+            .expect("startup: monitor tool name unique");
         // Drain notifications into the pump (host-mode AgentEvent
         // forwarding is optional and lives in the per-mode glue).
         crate::native::monitor::spawn_event_bridge(
@@ -280,18 +282,28 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
     // Register autoresearch tools (init_experiment, run_experiment, log_experiment).
     if !settings.no_tools {
         use std::sync::Arc;
-        tools.register(Arc::new(crate::autoresearch::tools::InitExperimentTool));
-        tools.register(Arc::new(crate::autoresearch::tools::RunExperimentTool));
-        tools.register(Arc::new(crate::autoresearch::tools::LogExperimentTool));
+        tools
+            .register(Arc::new(crate::autoresearch::tools::InitExperimentTool))
+            .expect("startup: init_experiment tool name unique");
+        tools
+            .register(Arc::new(crate::autoresearch::tools::RunExperimentTool))
+            .expect("startup: run_experiment tool name unique");
+        tools
+            .register(Arc::new(crate::autoresearch::tools::LogExperimentTool))
+            .expect("startup: log_experiment tool name unique");
         // Native todo tool (B2). Persists to <cwd>/.pi/todo.json.
-        tools.register(Arc::new(crate::native::todo::TodoTool));
+        tools
+            .register(Arc::new(crate::native::todo::TodoTool))
+            .expect("startup: todo tool name unique");
         // Native ask tool (B3). Only register in interactive mode — in
         // print/json/rpc the tool can't pop a picker and would always
         // return `is_error: true` ("ASK requires interactive mode"),
         // wasting the agent's tokens on an unrecoverable call. Mirrors
         // how `approve` / `judge` are wired by mode (validate bug #4).
         if cli.effective_mode() == crate::cli::Mode::Interactive {
-            tools.register(Arc::new(crate::native::ask::AskTool));
+            tools
+                .register(Arc::new(crate::native::ask::AskTool))
+                .expect("startup: ask tool name unique");
         }
         // RFD 0005: subagents + `task` tool. Always registered when
         // tools are enabled — discovery (project / user / bundled)
@@ -300,21 +312,29 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         // `crate::native::task::tool::with_runtime(handle, …)` for
         // the tool to find a parent handle; otherwise the call returns
         // a clean `is_error: true` result.
-        tools.register(Arc::new(crate::native::task::TaskTool::new()));
+        tools
+            .register(Arc::new(crate::native::task::TaskTool::new()))
+            .expect("startup: task tool name unique");
         // Native lsp tool (D1 + H5). Wired through `Settings::lsp` so
         // users opt in via the `lsp` block in settings.json. Defaults
         // keep the master switch off; the tool stays registered so the
         // agent can call the `status` op and see "no servers running"
         // when LSP is disabled.
         let lsp_cfg = crate::native::lsp::LspConfig::from(&settings.lsp);
-        tools.register(Arc::new(crate::native::lsp::LspTool::new(lsp_cfg.clone())));
+        tools
+            .register(Arc::new(crate::native::lsp::LspTool::new(lsp_cfg.clone())))
+            .expect("startup: lsp tool name unique");
         // RFD 0001: when LSP is enabled, swap the bare `write` tool
         // for the wrapper that fires `format_on_write` and
         // `diagnostics_on_write` after every successful write. The
         // wrapper registers under the same name so the registry's
         // BTreeMap insert overrides the entry left by `with_extras()`.
         if lsp_cfg.enabled {
-            tools.register(Arc::new(crate::native::lsp::LspWriteTool::new(lsp_cfg)));
+            // Per RFD 0027 §4.5 #5 (Hardening H3): explicit override —
+            // LspWriteTool intentionally takes the `write` slot from
+            // with_extras() so format_on_write / diagnostics_on_write
+            // fire after every write.
+            tools.register_or_replace(Arc::new(crate::native::lsp::LspWriteTool::new(lsp_cfg)));
         }
     }
 
@@ -324,7 +344,11 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         // registering the extension tools so there are no duplicates.
         extensions::apply_replacements(&mut tools, &loaded_exts);
         for t in extensions::extension_tools(&loaded_exts) {
-            tools.register(t);
+            // Per RFD 0027 §4.5 #5 (Hardening H3): extensions
+            // intentionally override builtins they replaced via
+            // `apply_replacements` above. Use the explicit override
+            // so the override is auditable in code-review.
+            tools.register_or_replace(t);
         }
         // Fire-and-forget startup hooks (errors are only warned, never fatal).
         extensions::run_startup_hooks(&loaded_exts).await;

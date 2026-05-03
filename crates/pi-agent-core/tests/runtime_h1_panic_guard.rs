@@ -135,7 +135,7 @@ async fn panicking_tool_does_not_crash_runtime() {
     settings.model = "sonnet".into();
 
     let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(PanickingTool));
+    tools.register(Arc::new(PanickingTool)).expect("unique");
 
     let cfg = RuntimeConfig::builder()
         .session_manager(SessionManager::in_memory())

@@ -523,7 +523,8 @@ async fn registry_register_replaces_same_named_tool() {
     }
 
     let mut r = ToolRegistry::with_defaults();
-    r.register(Arc::new(Stub));
+    // The Stub's spec().name == "bash" — intentional override.
+    r.register_or_replace(Arc::new(Stub));
     let bash = r.get("bash").unwrap();
     assert!(bash.read_only(), "stub should now be in place of real bash");
 }

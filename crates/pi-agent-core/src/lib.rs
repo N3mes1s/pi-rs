@@ -21,8 +21,8 @@ pub use router::{
 };
 pub use runtime::{
     create_agent_session, AgentSession, AgentSessionRuntime, ConfigBuilder, ConfigError,
-    DefaultProviderFactory, InterceptAction, ProviderFactory, RuntimeConfig, RuntimeError,
-    StreamInterceptor, ToolGate, ToolGateOutcome,
+    DefaultProviderFactory, GateContext, InterceptAction, ProviderFactory, RuntimeConfig,
+    RuntimeError, StreamInterceptor, ToolGate, ToolGateOutcome,
 };
 pub use session::{
     OutcomeSource, SessionEntry, SessionEntryKind, SessionManager, SessionMeta, SessionTree,

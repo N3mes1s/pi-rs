@@ -147,7 +147,7 @@ fn base_config(provider: MockProvider) -> RuntimeConfig {
     settings.provider = "anthropic".into();
     settings.model = "sonnet".into();
     let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(EchoTool));
+    tools.register(Arc::new(EchoTool)).expect("unique");
     RuntimeConfig::builder()
         .session_manager(SessionManager::in_memory())
         .auth_storage(auth.clone())
