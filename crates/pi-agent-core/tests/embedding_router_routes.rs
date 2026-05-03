@@ -58,11 +58,24 @@ fn embedding_router_routes() {
         ("formalize why this proof obligation holds", "hard"),
         ("counterexample for borrow checker assumption", "hard"),
     ];
-    for (prompt, expected) in cases {
+    let mut mismatches = Vec::new();
+    for (prompt, expected) in &cases {
         let decision = router
             .route(prompt, &[], &[], &ctx(&registry))
             .expect(prompt);
-        assert_eq!(decision.route_id, expected, "prompt: {prompt}");
+        if decision.route_id != *expected {
+            mismatches.push(format!(
+                "  {prompt:?}: got {:?}, expected {expected:?}",
+                decision.route_id
+            ));
+        }
     }
+    assert!(
+        mismatches.is_empty(),
+        "{} of {} prompts misclassified:\n{}",
+        mismatches.len(),
+        cases.len(),
+        mismatches.join("\n")
+    );
     assert_eq!(RouteMode::parse("auto"), Some(RouteMode::Auto));
 }

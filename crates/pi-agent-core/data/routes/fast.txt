@@ -40,6 +40,7 @@ add a doc comment to the impl block describing the purpose
 put a one-line summary doc above this type alias
 add a short rustdoc explaining the return value
 annotate this public field with a brief doc comment
+add docs for this trait
 
 # Seed 4: describe what a diff or file does
 just describe the diff
@@ -78,6 +79,7 @@ correct "retreive" to "retrieve" in the function name
 update the comment spelling from "thier" to "their"
 
 # Seed 7: single-line mechanical edit (bump version, change a literal)
+small mechanical edit only
 bump the version in Cargo.toml from 0.1.0 to 0.2.0
 update the default timeout constant from 30 to 60
 change the hard-coded port number from 8080 to 3000

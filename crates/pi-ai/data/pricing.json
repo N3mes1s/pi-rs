@@ -188,8 +188,9 @@
       "cache_read_cost_per_mtok": 0.125,
       "verified": "estimated",
       "verified_at": "2026-04-30",
+      "notes": "Estimate: same shape as gpt-5-mini; live discovery (~/.pi/agent/discovered-models.json) returns placeholder $0/$0 — needs operator confirmation before billing-critical use.",
       "sources": [
-        "Estimate: same shape as gpt-5-mini; live discovery (~/.pi/agent/discovered-models.json) returns placeholder $0/$0 — needs operator confirmation before billing-critical use."
+        "https://www.metacto.com/blogs/unlocking-the-true-cost-of-openai-api-a-deep-dive-into-usage-integration-and-maintenance"
       ]
     },
     {

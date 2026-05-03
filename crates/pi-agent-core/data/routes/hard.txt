@@ -41,6 +41,7 @@ audit the use of transmute for type correctness and alignment
 review the unsafe Send impl and determine whether it is sound
 analyse the slice::from_raw_parts call for length and alignment invariants
 check whether the drop order is safe given these overlapping lifetimes
+find a soundness hole in this type system rule
 
 # Seed 4: concurrency correctness and race conditions
 analyse the data race potential in this concurrent map access

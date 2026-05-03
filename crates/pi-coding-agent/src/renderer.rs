@@ -586,11 +586,17 @@ fn push_welcome_banner(lines: &mut Vec<Line>, theme: &Theme, cols: u16, model_la
         spans.push(Span::coloured(" to exit".to_string(), muted));
     };
     // Build to a temp Vec to compute the visible width for centering.
+    // Skip the tip on viewports too narrow to fit it without overflow —
+    // a wrapped tip line garbles into nonsense and a clipped one is a
+    // worse UX than no tip at all (the keys are also documented in
+    // /help itself).
     let tip_visible = "/help commands  ·  @files  ·  !shell  ·  /quit to exit";
-    let tip_pad = ((cols as usize).saturating_sub(tip_visible.len())) / 2;
-    let mut tip_spans = vec![Span::plain(" ".repeat(tip_pad))];
-    make_tip(&mut tip_spans);
-    lines.push(Line { spans: tip_spans });
+    if (cols as usize) >= tip_visible.len() {
+        let tip_pad = ((cols as usize) - tip_visible.len()) / 2;
+        let mut tip_spans = vec![Span::plain(" ".repeat(tip_pad))];
+        make_tip(&mut tip_spans);
+        lines.push(Line { spans: tip_spans });
+    }
     if !model_label.is_empty() {
         let model_line = format!("connected to {}", model_label);
         let pad = ((cols as usize).saturating_sub(model_line.len())) / 2;

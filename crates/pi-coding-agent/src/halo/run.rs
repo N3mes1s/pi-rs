@@ -213,14 +213,20 @@ fn lock_pid(lock: &Path) -> Option<i32> {
 }
 
 pub fn operator_pause(repo_root: &Path) -> Result<()> {
-    let halo_dir = halo_dir_for_repo(repo_root).ok_or_else(|| anyhow::anyhow!("no home dir"))?; fs::create_dir_all(&halo_dir)?; let lock = lock_path(&halo_dir);
+    let halo_dir = halo_dir_for_repo(repo_root).ok_or_else(|| anyhow::anyhow!("no home dir"))?;
+    fs::create_dir_all(&halo_dir)?;
+    let lock = lock_path(&halo_dir);
     if let Some(pid) = lock_pid(&lock) {
         if pid > 0 {
             let alive = std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().map(|s| s.success()).unwrap_or(false);
-            if !alive { let _ = fs::remove_file(&lock); println!("stale lock cleared"); return Ok(()); }
+            if !alive {
+                let _ = fs::remove_file(&lock);
+                println!("stale lock cleared");
+            }
         }
     }
-    fs::write(pause_req_path(&halo_dir), b"")?; Ok(())
+    fs::write(pause_req_path(&halo_dir), b"")?;
+    Ok(())
 }
 
 pub fn operator_stop(repo_root: &Path) -> Result<()> {

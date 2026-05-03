@@ -16,6 +16,7 @@ refactor this monolithic function into smaller composable pieces
 break the god object into focused structs with clear responsibilities
 restructure the project so tests live next to their source files
 move the error types into a dedicated errors module and re-export them
+update the crate layout and explain tradeoffs
 
 # Seed 2: feature implementation
 implement the new cache invalidation strategy described in the PR

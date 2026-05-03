@@ -151,10 +151,14 @@ fn enter_replaces_at_query_with_chosen_path() {
     }
 }
 
-// ─── test 4: Esc closes picker but leaves @<query> literal in buffer ─────────
+// ─── test 4: Esc closes picker AND strips the @<query> that summoned it ──────
 
 #[test]
-fn esc_closes_picker_leaves_at_query_literal() {
+fn esc_closes_picker_and_strips_at_query() {
+    // Matches pi-mono / oh-my-pi UX: Escape = "abandon this whole input
+    // attempt". Leaving `@<query>` in the editor leaks a stale token into
+    // the next prompt the user types, so the @-overlay handler strips it
+    // (interactive.rs Esc arm in the picker branch).
     let mut v = fresh_view();
 
     // Type "foo @ba".
@@ -176,8 +180,8 @@ fn esc_closes_picker_leaves_at_query_literal() {
     assert_eq!(outcome, KeyOutcome::None);
     assert!(v.picker.is_none(), "picker should be closed after Esc");
     assert!(!v.at_active, "at_active should be false after Esc");
-    // The literal text "@ba" stays in the editor.
-    assert_eq!(v.editor.text, "foo @ba");
+    // The `@ba` token is removed; only the prefix typed before `@` remains.
+    assert_eq!(v.editor.text, "foo ");
 }
 
 // ─── test 5: typing `@` again after a previous completion opens a fresh picker

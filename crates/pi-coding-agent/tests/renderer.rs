@@ -19,16 +19,25 @@ fn theme() -> pi_tui::Theme {
 }
 
 #[test]
-fn empty_transcript_renders_only_trailing_separator_blank_line() {
+fn empty_transcript_renders_welcome_banner_and_trailing_separator_blank_line() {
+    // Renderer keeps the welcome banner as a permanent prelude (rather
+    // than gating it on `blocks.is_empty()` as an earlier draft did) so
+    // the logo doesn't pop off-screen the moment the first user message
+    // lands. An empty transcript is therefore: banner lines + the
+    // trailing blank separator. Test the trailing-blank invariant
+    // directly, not a brittle exact line count.
     let t = Transcript::default();
     let frame = t.render(&theme(), 80);
-    // single trailing separator
-    assert_eq!(frame.lines.len(), 1);
-    let line = &frame.lines[0];
     assert!(
-        line.spans.is_empty(),
+        frame.lines.len() > 1,
+        "expected welcome banner prelude, got only {} lines",
+        frame.lines.len()
+    );
+    let last = frame.lines.last().expect("at least one line");
+    assert!(
+        last.spans.is_empty(),
         "trailing separator should be blank, got {:?}",
-        line
+        last
     );
 }
 
