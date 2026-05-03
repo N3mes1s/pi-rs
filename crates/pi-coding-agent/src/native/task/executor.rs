@@ -232,21 +232,27 @@ pub async fn run_one(
     let user_msg = synth_first_message(parent_session, agent, shared_context, task).await;
 
     // 6. Build child RuntimeConfig.
-    let child_cfg = RuntimeConfig {
-        session_manager: child_session_mgr,
-        auth_storage: parent_cfg.auth_storage.clone(),
-        model_registry: parent_cfg.model_registry.clone(),
-        tools: child_tools,
-        settings: child_settings,
-        system_prompt: agent.system_prompt.clone(),
-        context_files: Vec::new(),
-        cwd: parent_cfg.cwd.clone(),
-        provider_factory: parent_cfg.provider_factory.clone(),
-        tool_gate: parent_cfg.tool_gate.clone(),
-        gate_ask_is_approve: parent_cfg.gate_ask_is_approve,
-        stream_interceptor: parent_cfg.stream_interceptor.clone(),
-        sandbox_provider: parent_cfg.sandbox_provider.clone(),
-    };
+    let mut child_builder = RuntimeConfig::builder()
+        .session_manager(child_session_mgr)
+        .auth_storage(parent_cfg.auth_storage.clone())
+        .model_registry(parent_cfg.model_registry.clone())
+        .tools(child_tools)
+        .settings(child_settings)
+        .system_prompt(agent.system_prompt.clone())
+        .cwd(parent_cfg.cwd.clone());
+    if let Some(f) = parent_cfg.provider_factory.clone() {
+        child_builder = child_builder.with_provider_factory(f);
+    }
+    if let Some(g) = parent_cfg.tool_gate.clone() {
+        child_builder = child_builder.with_tool_gate(g, parent_cfg.gate_ask_is_approve);
+    }
+    if let Some(i) = parent_cfg.stream_interceptor.clone() {
+        child_builder = child_builder.with_stream_interceptor(i);
+    }
+    if let Some(s) = parent_cfg.sandbox_provider.clone() {
+        child_builder = child_builder.with_sandbox_provider(s);
+    }
+    let child_cfg = child_builder.build_unwrap();
 
     // 7. Run a single prompt loop, with an updated ParentHandle scoped
     //    to the child so any nested `task` invocations see THIS agent

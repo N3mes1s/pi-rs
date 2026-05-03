@@ -107,7 +107,12 @@ impl ProviderFactory for DefaultProviderFactory {
     }
 }
 
+/// Per RFD 0027 §4: marked `#[non_exhaustive]` so MINOR-additive field
+/// growth is non-breaking. External crates (i.e. anything outside
+/// `pi-agent-core` itself) cannot construct this via struct literal;
+/// use [`RuntimeConfig::builder()`] instead.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct RuntimeConfig {
     pub session_manager: SessionManager,
     pub auth_storage: AuthStorage,
@@ -140,6 +145,16 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
+    /// Begin constructing a `RuntimeConfig` via the fluent builder.
+    /// See [`ConfigBuilder`] for the full set of setters.
+    ///
+    /// Per RFD 0027 §4, this is the canonical construction path for
+    /// embedders. Internal pi-rs callers may still use struct literals
+    /// (allowed because they are inside the same crate).
+    pub fn builder() -> ConfigBuilder {
+        ConfigBuilder::default()
+    }
+
     /// Replace the provider factory used by this runtime. Returns `self`
     /// for chaining.
     pub fn with_provider_factory(mut self, factory: Arc<dyn ProviderFactory>) -> Self {
@@ -168,6 +183,136 @@ impl RuntimeConfig {
     pub fn with_sandbox_provider(mut self, provider: Arc<dyn SandboxProvider>) -> Self {
         self.sandbox_provider = Some(provider);
         self
+    }
+}
+
+/// Builder for [`RuntimeConfig`]. Per RFD 0027 §4, this is the canonical
+/// construction path for embedders pinning `pi-sdk`. Required setters
+/// (no `with_` prefix) must be called before [`build`](Self::build);
+/// optional plug-ins use the `with_*` prefix.
+///
+/// The [`build`](Self::build) method returns `Err(ConfigError::Missing { field })`
+/// if any required setter was skipped. [`build_unwrap`](Self::build_unwrap)
+/// panics on the same condition — meant for tests / quick-start where a
+/// missing field is a programmer error, not an embedder error.
+#[derive(Default)]
+pub struct ConfigBuilder {
+    session_manager: Option<SessionManager>,
+    auth_storage: Option<AuthStorage>,
+    model_registry: Option<ModelRegistry>,
+    tools: Option<ToolRegistry>,
+    settings: Option<Settings>,
+    system_prompt: Option<String>,
+    cwd: Option<PathBuf>,
+    context_files: Vec<ContextFile>,
+    provider_factory: Option<Arc<dyn ProviderFactory>>,
+    tool_gate: Option<Arc<dyn ToolGate>>,
+    gate_ask_is_approve: bool,
+    stream_interceptor: Option<Arc<dyn StreamInterceptor>>,
+    sandbox_provider: Option<Arc<dyn SandboxProvider>>,
+}
+
+/// Error returned by [`ConfigBuilder::build`] when a required field
+/// was not set before `build()` was called.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ConfigError {
+    #[error("required RuntimeConfig field `{field}` was not set on the builder")]
+    Missing { field: &'static str },
+}
+
+impl ConfigBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    // ─── Required setters ──────────────────────────────────────
+    pub fn session_manager(mut self, m: SessionManager) -> Self {
+        self.session_manager = Some(m);
+        self
+    }
+    pub fn auth_storage(mut self, a: AuthStorage) -> Self {
+        self.auth_storage = Some(a);
+        self
+    }
+    pub fn model_registry(mut self, r: ModelRegistry) -> Self {
+        self.model_registry = Some(r);
+        self
+    }
+    pub fn tools(mut self, t: ToolRegistry) -> Self {
+        self.tools = Some(t);
+        self
+    }
+    pub fn settings(mut self, s: Settings) -> Self {
+        self.settings = Some(s);
+        self
+    }
+    pub fn system_prompt<S: Into<String>>(mut self, p: S) -> Self {
+        self.system_prompt = Some(p.into());
+        self
+    }
+    pub fn cwd(mut self, p: PathBuf) -> Self {
+        self.cwd = Some(p);
+        self
+    }
+
+    // ─── Optional plug-ins ─────────────────────────────────────
+    pub fn with_context_files(mut self, c: Vec<ContextFile>) -> Self {
+        self.context_files = c;
+        self
+    }
+    pub fn with_provider_factory(mut self, f: Arc<dyn ProviderFactory>) -> Self {
+        self.provider_factory = Some(f);
+        self
+    }
+    pub fn with_tool_gate(mut self, g: Arc<dyn ToolGate>, ask_is_approve: bool) -> Self {
+        self.tool_gate = Some(g);
+        self.gate_ask_is_approve = ask_is_approve;
+        self
+    }
+    pub fn with_stream_interceptor(mut self, i: Arc<dyn StreamInterceptor>) -> Self {
+        self.stream_interceptor = Some(i);
+        self
+    }
+    pub fn with_sandbox_provider(mut self, s: Arc<dyn SandboxProvider>) -> Self {
+        self.sandbox_provider = Some(s);
+        self
+    }
+
+    // ─── Terminals ─────────────────────────────────────────────
+    pub fn build(self) -> Result<RuntimeConfig, ConfigError> {
+        Ok(RuntimeConfig {
+            session_manager: self
+                .session_manager
+                .ok_or(ConfigError::Missing { field: "session_manager" })?,
+            auth_storage: self
+                .auth_storage
+                .ok_or(ConfigError::Missing { field: "auth_storage" })?,
+            model_registry: self
+                .model_registry
+                .ok_or(ConfigError::Missing { field: "model_registry" })?,
+            tools: self.tools.ok_or(ConfigError::Missing { field: "tools" })?,
+            settings: self
+                .settings
+                .ok_or(ConfigError::Missing { field: "settings" })?,
+            system_prompt: self
+                .system_prompt
+                .ok_or(ConfigError::Missing { field: "system_prompt" })?,
+            context_files: self.context_files,
+            cwd: self.cwd.ok_or(ConfigError::Missing { field: "cwd" })?,
+            provider_factory: self.provider_factory,
+            tool_gate: self.tool_gate,
+            gate_ask_is_approve: self.gate_ask_is_approve,
+            stream_interceptor: self.stream_interceptor,
+            sandbox_provider: self.sandbox_provider,
+        })
+    }
+
+    /// For tests / quick-start: panics on missing required fields.
+    /// Production code should use [`build`](Self::build) and handle
+    /// the `Result`.
+    pub fn build_unwrap(self) -> RuntimeConfig {
+        self.build().expect("ConfigBuilder::build_unwrap: required field missing")
     }
 }
 

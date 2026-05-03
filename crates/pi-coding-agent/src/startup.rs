@@ -437,21 +437,23 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         }
     };
 
-    let mut runtime_config = RuntimeConfig {
-        session_manager,
-        auth_storage: auth,
-        model_registry: registry,
-        tools,
-        settings: settings.clone(),
-        system_prompt: system,
-        context_files,
-        cwd,
-        provider_factory: None,
-        tool_gate: Some(auto_gate as std::sync::Arc<dyn pi_agent_core::ToolGate>),
-        gate_ask_is_approve,
-        stream_interceptor,
-        sandbox_provider: None,
-    };
+    let mut builder = RuntimeConfig::builder()
+        .session_manager(session_manager)
+        .auth_storage(auth)
+        .model_registry(registry)
+        .tools(tools)
+        .settings(settings.clone())
+        .system_prompt(system)
+        .with_context_files(context_files)
+        .cwd(cwd)
+        .with_tool_gate(
+            auto_gate as std::sync::Arc<dyn pi_agent_core::ToolGate>,
+            gate_ask_is_approve,
+        );
+    if let Some(i) = stream_interceptor {
+        builder = builder.with_stream_interceptor(i);
+    }
+    let mut runtime_config = builder.build_unwrap();
 
     // RFD 0022: wire sandbox provider from CLI flag.
     if let Some(kind) = &cli.sandbox_provider {

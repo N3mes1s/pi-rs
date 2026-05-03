@@ -106,21 +106,16 @@ fn build_parent_cfg(factory: Arc<dyn ProviderFactory>) -> RuntimeConfig {
     let mut s = Settings::default();
     s.provider = "anthropic".into();
     s.model = "sonnet".into();
-    RuntimeConfig {
-        session_manager: SessionManager::in_memory(),
-        auth_storage: auth.clone(),
-        model_registry: ModelRegistry::new(auth),
-        tools: ToolRegistry::new(),
-        settings: s,
-        system_prompt: "parent system".into(),
-        context_files: Vec::new(),
-        cwd: std::env::current_dir().unwrap(),
-        provider_factory: Some(factory),
-        tool_gate: None,
-        gate_ask_is_approve: false,
-        stream_interceptor: None,
-        sandbox_provider: None,
-    }
+    RuntimeConfig::builder()
+        .session_manager(SessionManager::in_memory())
+        .auth_storage(auth.clone())
+        .model_registry(ModelRegistry::new(auth))
+        .tools(ToolRegistry::new())
+        .settings(s)
+        .system_prompt("parent system")
+        .cwd(std::env::current_dir().unwrap())
+        .with_provider_factory(factory)
+        .build_unwrap()
 }
 
 fn agent_def() -> AgentDefinition {

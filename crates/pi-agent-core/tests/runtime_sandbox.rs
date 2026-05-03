@@ -165,21 +165,19 @@ fn build_cfg(
     settings.model = "sonnet".into();
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(PoisonTool));
-    RuntimeConfig {
-        session_manager: SessionManager::in_memory(),
-        auth_storage: auth.clone(),
-        model_registry: ModelRegistry::new(auth),
-        tools,
-        settings,
-        system_prompt: "you are pi".into(),
-        context_files: Vec::new(),
-        cwd: std::env::current_dir().unwrap(),
-        provider_factory: Some(Arc::new(MockFactory { inner: provider })),
-        tool_gate: None,
-        gate_ask_is_approve: false,
-        stream_interceptor: None,
-        sandbox_provider: sandbox,
+    let mut builder = RuntimeConfig::builder()
+        .session_manager(SessionManager::in_memory())
+        .auth_storage(auth.clone())
+        .model_registry(ModelRegistry::new(auth))
+        .tools(tools)
+        .settings(settings)
+        .system_prompt("you are pi")
+        .cwd(std::env::current_dir().unwrap())
+        .with_provider_factory(Arc::new(MockFactory { inner: provider }));
+    if let Some(s) = sandbox {
+        builder = builder.with_sandbox_provider(s);
     }
+    builder.build_unwrap()
 }
 
 #[tokio::test]

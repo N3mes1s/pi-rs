@@ -59,21 +59,16 @@ fn cfg(settings: Settings) -> RuntimeConfig {
         },
         last_model: Arc::new(StdMutex::new(None)),
     };
-    RuntimeConfig {
-        session_manager: SessionManager::in_memory(),
-        auth_storage: auth.clone(),
-        model_registry: ModelRegistry::new(auth),
-        tools: ToolRegistry::new(),
-        settings,
-        system_prompt: "".into(),
-        context_files: Vec::new(),
-        cwd: std::env::current_dir().unwrap(),
-        provider_factory: Some(Arc::new(NullFactory(provider))),
-        tool_gate: None,
-        gate_ask_is_approve: false,
-        stream_interceptor: None,
-        sandbox_provider: None,
-    }
+    RuntimeConfig::builder()
+        .session_manager(SessionManager::in_memory())
+        .auth_storage(auth.clone())
+        .model_registry(ModelRegistry::new(auth))
+        .tools(ToolRegistry::new())
+        .settings(settings)
+        .system_prompt("")
+        .cwd(std::env::current_dir().unwrap())
+        .with_provider_factory(Arc::new(NullFactory(provider)))
+        .build_unwrap()
 }
 
 #[tokio::test]

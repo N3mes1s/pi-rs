@@ -101,21 +101,16 @@ async fn transport_error_midstream_emits_error_and_aborted_before_failing() {
     let mut settings = Settings::default();
     settings.provider = "anthropic".into();
     settings.model = "sonnet".into();
-    let cfg = RuntimeConfig {
-        session_manager: SessionManager::in_memory(),
-        auth_storage: auth.clone(),
-        model_registry: ModelRegistry::new(auth),
-        tools: ToolRegistry::new(),
-        settings,
-        system_prompt: "you are pi".into(),
-        context_files: Vec::new(),
-        cwd: std::env::current_dir().unwrap(),
-        provider_factory: Some(Arc::new(ErrMidstreamFactory)),
-        tool_gate: None,
-        gate_ask_is_approve: false,
-        stream_interceptor: None,
-        sandbox_provider: None,
-    };
+    let cfg = RuntimeConfig::builder()
+        .session_manager(SessionManager::in_memory())
+        .auth_storage(auth.clone())
+        .model_registry(ModelRegistry::new(auth))
+        .tools(ToolRegistry::new())
+        .settings(settings)
+        .system_prompt("you are pi")
+        .cwd(std::env::current_dir().unwrap())
+        .with_provider_factory(Arc::new(ErrMidstreamFactory))
+        .build_unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let (_runtime, session) = create_agent_session(cfg, Some(tx)).unwrap();
 

@@ -79,23 +79,18 @@ async fn route_auto_flows_into_model_dispatch() {
     settings.provider = "anthropic".into();
     settings.model = "claude-sonnet-4-6".into();
     settings.route = pi_agent_core::RouteMode::Auto;
-    let cfg = RuntimeConfig {
-        session_manager: SessionManager::in_memory(),
-        auth_storage: auth.clone(),
-        model_registry: ModelRegistry::new(auth),
-        tools: ToolRegistry::new(),
-        settings,
-        system_prompt: "system".into(),
-        context_files: vec![],
-        cwd: std::env::current_dir().unwrap(),
-        provider_factory: Some(Arc::new(CaptureFactory {
+    let cfg = RuntimeConfig::builder()
+        .session_manager(SessionManager::in_memory())
+        .auth_storage(auth.clone())
+        .model_registry(ModelRegistry::new(auth))
+        .tools(ToolRegistry::new())
+        .settings(settings)
+        .system_prompt("system")
+        .cwd(std::env::current_dir().unwrap())
+        .with_provider_factory(Arc::new(CaptureFactory {
             seen_model: seen_model.clone(),
-        })),
-        tool_gate: None,
-        gate_ask_is_approve: false,
-        stream_interceptor: None,
-        sandbox_provider: None,
-    };
+        }))
+        .build_unwrap();
     let (_runtime, session) = create_agent_session(cfg, None).unwrap();
     session
         .prompt("rename foo to bar in src/lib.rs (just describe the diff)".into())

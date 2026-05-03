@@ -20,8 +20,9 @@ pub use router::{
     Router, RouterError, RoutingContext, RoutingDecision, StaticRouter, ToolSpec,
 };
 pub use runtime::{
-    create_agent_session, AgentSession, AgentSessionRuntime, DefaultProviderFactory,
-    InterceptAction, ProviderFactory, RuntimeConfig, StreamInterceptor, ToolGate, ToolGateOutcome,
+    create_agent_session, AgentSession, AgentSessionRuntime, ConfigBuilder, ConfigError,
+    DefaultProviderFactory, InterceptAction, ProviderFactory, RuntimeConfig, StreamInterceptor,
+    ToolGate, ToolGateOutcome,
 };
 pub use session::{
     OutcomeSource, SessionEntry, SessionEntryKind, SessionManager, SessionMeta, SessionTree,

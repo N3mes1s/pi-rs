@@ -57,22 +57,21 @@ impl Default for BuildConfig {
 /// (`provider_factory`, `tool_gate`, `stream_interceptor`,
 /// `sandbox_provider`) default to `None`; chain them on with the
 /// fluent `with_*` methods on the returned `RuntimeConfig`.
+///
+/// Implementation note: `RuntimeConfig` is `#[non_exhaustive]` (RFD 0027
+/// §4), so external crates like `pi-sdk` cannot construct it via struct
+/// literal. We use the canonical `RuntimeConfig::builder()` path instead.
 pub fn build_runtime_config(b: BuildConfig) -> RuntimeConfig {
-    RuntimeConfig {
-        session_manager: b.session_manager,
-        auth_storage: b.auth,
-        model_registry: b.registry,
-        tools: b.tools,
-        settings: b.settings,
-        system_prompt: b.system_prompt,
-        context_files: b.context_files,
-        cwd: b.cwd,
-        provider_factory: None,
-        tool_gate: None,
-        gate_ask_is_approve: false,
-        stream_interceptor: None,
-        sandbox_provider: None,
-    }
+    RuntimeConfig::builder()
+        .session_manager(b.session_manager)
+        .auth_storage(b.auth)
+        .model_registry(b.registry)
+        .tools(b.tools)
+        .settings(b.settings)
+        .system_prompt(b.system_prompt)
+        .with_context_files(b.context_files)
+        .cwd(b.cwd)
+        .build_unwrap()
 }
 
 #[cfg(test)]

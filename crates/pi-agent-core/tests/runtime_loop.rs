@@ -89,21 +89,16 @@ fn build_config(provider: MockProvider, tools: ToolRegistry) -> RuntimeConfig {
     let mut settings = Settings::default();
     settings.provider = "anthropic".into();
     settings.model = "sonnet".into();
-    RuntimeConfig {
-        session_manager: SessionManager::in_memory(),
-        auth_storage: auth.clone(),
-        model_registry: ModelRegistry::new(auth),
-        tools,
-        settings,
-        system_prompt: "you are pi".into(),
-        context_files: Vec::new(),
-        cwd: std::env::current_dir().unwrap(),
-        provider_factory: Some(Arc::new(MockFactory { inner: provider })),
-        tool_gate: None,
-        gate_ask_is_approve: false,
-        stream_interceptor: None,
-        sandbox_provider: None,
-    }
+    RuntimeConfig::builder()
+        .session_manager(SessionManager::in_memory())
+        .auth_storage(auth.clone())
+        .model_registry(ModelRegistry::new(auth))
+        .tools(tools)
+        .settings(settings)
+        .system_prompt("you are pi")
+        .cwd(std::env::current_dir().unwrap())
+        .with_provider_factory(Arc::new(MockFactory { inner: provider }))
+        .build_unwrap()
 }
 
 async fn drain(mut rx: UnboundedReceiver<AgentEvent>) -> Vec<AgentEventKind> {
@@ -405,24 +400,19 @@ async fn runtime_abort_emits_aborted_event() {
     let mut settings = Settings::default();
     settings.provider = "anthropic".into();
     settings.model = "sonnet".into();
-    let cfg = RuntimeConfig {
-        session_manager: SessionManager::in_memory(),
-        auth_storage: auth.clone(),
-        model_registry: ModelRegistry::new(auth),
-        tools: ToolRegistry::new(),
-        settings,
-        system_prompt: String::new(),
-        context_files: Vec::new(),
-        cwd: std::env::current_dir().unwrap(),
-        provider_factory: Some(Arc::new(AbortFactory {
+    let cfg = RuntimeConfig::builder()
+        .session_manager(SessionManager::in_memory())
+        .auth_storage(auth.clone())
+        .model_registry(ModelRegistry::new(auth))
+        .tools(ToolRegistry::new())
+        .settings(settings)
+        .system_prompt(String::new())
+        .cwd(std::env::current_dir().unwrap())
+        .with_provider_factory(Arc::new(AbortFactory {
             started: started.clone(),
             proceed: proceed.clone(),
-        })),
-        tool_gate: None,
-        gate_ask_is_approve: false,
-        stream_interceptor: None,
-        sandbox_provider: None,
-    };
+        }))
+        .build_unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_runtime, session) = create_agent_session(cfg, Some(tx)).expect("session");

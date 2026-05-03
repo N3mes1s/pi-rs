@@ -81,21 +81,17 @@ fn build_cfg(provider: MockProvider, context_files: Vec<ContextFile>) -> Runtime
     let mut settings = Settings::default();
     settings.provider = "anthropic".into();
     settings.model = "sonnet".into();
-    RuntimeConfig {
-        session_manager: SessionManager::in_memory(),
-        auth_storage: auth.clone(),
-        model_registry: ModelRegistry::new(auth),
-        tools: ToolRegistry::new(),
-        settings,
-        system_prompt: "you are pi".into(),
-        context_files,
-        cwd: std::env::current_dir().unwrap(),
-        provider_factory: Some(Arc::new(MockFactory(provider))),
-        tool_gate: None,
-        gate_ask_is_approve: false,
-        stream_interceptor: None,
-        sandbox_provider: None,
-    }
+    RuntimeConfig::builder()
+        .session_manager(SessionManager::in_memory())
+        .auth_storage(auth.clone())
+        .model_registry(ModelRegistry::new(auth))
+        .tools(ToolRegistry::new())
+        .settings(settings)
+        .system_prompt("you are pi")
+        .with_context_files(context_files)
+        .cwd(std::env::current_dir().unwrap())
+        .with_provider_factory(Arc::new(MockFactory(provider)))
+        .build_unwrap()
 }
 
 #[tokio::test]
