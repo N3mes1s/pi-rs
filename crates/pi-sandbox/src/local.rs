@@ -50,6 +50,16 @@ impl LocalProcessProvider {
     /// or shell out, NOT that arbitrary code in the agent process is
     /// isolated. For real isolation use `MicroVmProvider`
     /// (RFD 0023) or `RemoteProvider` (RFD 0026) once those land.
+    ///
+    /// **Network-tools omission** (per code-review pass-1 #11):
+    /// `with_readonly_defaults` does NOT register `web_search` —
+    /// "readonly" here is broader than RFD 0027 §4.5 #12's literal
+    /// wording ("no shell, no fs mutation"), and silently includes
+    /// "no network" because most embedders defining a `readonly`
+    /// surface mean both. Embedders that want a network-but-no-shell
+    /// set should construct the registry explicitly:
+    /// `let mut tr = ToolRegistry::with_readonly_extras();`
+    /// `tr.register(Arc::new(WebSearchTool::default())).unwrap();`
     pub fn with_readonly_defaults() -> Self {
         Self::new(ToolRegistry::with_readonly_extras())
     }
