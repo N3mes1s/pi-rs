@@ -236,6 +236,9 @@ Dual MIT / Apache-2.0.
 
 ## See also
 
+- [`CHANGELOG.md`](CHANGELOG.md) — per-release change list.
+- [`MIGRATION.md`](MIGRATION.md) — search-and-replace table for renamed/removed symbols across releases.
+- [`COMPATIBILITY.md`](COMPATIBILITY.md) — pi-sdk MINOR ↔ underlying-crate version matrix.
 - [RFD 0027](../../rfd/0027-pi-rs-sdk.md) — full design contract, threat model, hardening contract.
 - [RFD 0023](../../rfd/0023-sandbox-microvm.md) — local microVM sandbox.
 - [RFD 0026](../../rfd/0026-sandbox-remote.md) — remote sandbox transports.
