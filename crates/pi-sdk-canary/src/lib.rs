@@ -30,10 +30,8 @@ use pi_sdk::{
     // Sandbox:
     SandboxError, SandboxExecution,
     // Runtime:
-    create_agent_session, default_system_prompt, AgentSession, BuildConfig, Compactor,
+    create_agent_session, default_system_prompt, AgentSession, Compactor,
     ContextFile, DefaultProviderFactory, EventSender, SessionMeta, SessionTree,
-    // Convenience:
-    build_runtime_config,
     // Already-covered surface:
     AgentEvent, AgentEventKind, AgentSessionRuntime, AuthMethod, AuthStorage, ConfigBuilder,
     ConfigError, ContentBlock, Error, FinishReason, GateContext, LocalProcessProvider,
@@ -67,7 +65,6 @@ fn _every_re_export_compiles(
     _ar: &AgentSessionRuntime,
     _as_session: &AgentSession,
     _cb: &ConfigBuilder,
-    _bc: &BuildConfig,
     _rc: &RuntimeConfig,
     _ev: EventSender,
     _cf: &ContextFile,
@@ -140,7 +137,6 @@ fn _every_re_export_compiles(
     // removals are caught at compile time too (not just types).
     let _create_agent_session = create_agent_session;
     let _default_system_prompt: fn() -> &'static str = default_system_prompt;
-    let _build_runtime_config = build_runtime_config;
     let _estimate_cost_usd = estimate_cost_usd;
     // sum_session_cost_usd is generic over `I: IntoIterator`; concretise
     // with one type to satisfy type inference.

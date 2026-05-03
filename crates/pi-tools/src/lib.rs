@@ -1,13 +1,12 @@
 //! pi-tools — meta-crate re-exporting pi-tools-core +
-//! pi-tools-net for back-compat. Embedders should depend on
-//! the split crates directly when possible.
+//! pi-tools-net. Embedders should depend on the split crates
+//! directly when possible.
 //!
-//! # Back-compat guarantee
-//!
-//! Every `use pi_tools::Tool` / `use pi_tools::ToolRegistry` import that
-//! existed before the split continues to compile and behave identically.
-//! In particular, `ToolRegistry::with_extras()` still registers all built-in
-//! tools including `web_search`.
+//! `ToolRegistry::with_unsafe_extras()` registers all built-in tools
+//! including `web_search` (the meta-crate's value-add over
+//! `pi_tools_core::ToolRegistry::with_unsafe_extras()` is the network
+//! tool). For the safe-by-default surface use
+//! `ToolRegistry::with_readonly_extras()`.
 
 use std::sync::Arc;
 
@@ -22,8 +21,8 @@ pub use pi_tools_net::WebSearchTool;
 
 /// The canonical tool registry for pi-rs agent sessions.
 ///
-/// Wraps `pi_tools_core::ToolRegistry` and patches `with_extras()` to also
-/// include `WebSearchTool`, preserving the pre-split behaviour.
+/// Wraps `pi_tools_core::ToolRegistry` and adds `WebSearchTool` to
+/// the `with_unsafe_extras()` set (the meta-crate's value-add).
 #[derive(Default, Clone)]
 pub struct ToolRegistry(pi_tools_core::ToolRegistry);
 

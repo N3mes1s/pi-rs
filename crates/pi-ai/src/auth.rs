@@ -76,6 +76,23 @@ impl AuthStorage {
         })
     }
 
+    /// The full provider → env-var mapping that pi-rs binaries scan
+    /// when populating `AuthStorage` from the local environment. Pre-H5
+    /// `from_env()` walked this slice implicitly; post-H5 the SDK
+    /// requires an explicit allowlist (CWE-526), and this constant is
+    /// the canonical "I trust the whole list" shorthand:
+    ///
+    /// ```ignore
+    /// AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS.iter().copied())?;
+    /// ```
+    ///
+    /// **SDK embedders should typically pass a NARROWER allowlist** —
+    /// only the providers the embedding application actually uses.
+    /// Scanning all 17 keys is appropriate for a developer-facing CLI
+    /// running on the user's own machine (auditable in code review),
+    /// not for a multi-tenant service. The slice is `pub` so embedders
+    /// can intersect it (`ENV_KEYS.iter().filter(...)`) instead of
+    /// re-typing the env-var names.
     pub const ENV_KEYS: &'static [(&'static str, &'static str)] = &[
         ("anthropic", "ANTHROPIC_API_KEY"),
         ("openai", "OPENAI_API_KEY"),
@@ -384,6 +401,20 @@ mod h5_tests {
         // Vars don't exist; storage stays empty — but no panic, no
         // compile error.
         assert!(s.provider_names().is_empty());
+    }
+
+    #[test]
+    fn from_env_explicit_accepts_static_slice_via_iter_copied() {
+        // Per polish-15 NIT: the canonical "I trust the whole binary
+        // allowlist" call shape is `ENV_KEYS.iter().copied()`. Lock it
+        // into a test so a future regression in the IntoIterator bounds
+        // (e.g., requiring `Vec<(String, String)>`) breaks here loudly.
+        let s = AuthStorage::from_env_explicit(AuthStorage::ENV_KEYS.iter().copied())
+            .expect("ENV_KEYS.iter().copied() should compile and execute");
+        // Vars typically don't exist in test envs, but we don't assert
+        // emptiness — the point is that the call shape compiles and
+        // doesn't panic.
+        let _ = s.provider_names();
     }
 
     #[test]

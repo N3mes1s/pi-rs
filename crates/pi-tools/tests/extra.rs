@@ -34,7 +34,7 @@ fn registry_new_is_empty_and_specs_match_names() {
 fn registry_keep_only_filters_to_named_tools() {
     let mut r = ToolRegistry::with_unsafe_extras();
     let before = r.names();
-    assert!(before.len() >= 4, "with_extras should bring multiple tools");
+    assert!(before.len() >= 4, "with_unsafe_extras should bring multiple tools");
     r.keep_only(&["read".into(), "bash".into()]);
     let after = r.names();
     assert_eq!(after.len(), 2);

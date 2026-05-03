@@ -77,7 +77,7 @@ fn re_exports_resolve_without_mocks_feature() {
     // future regression that gates a re-export behind `mocks`.
     use pi_sdk::{
         cost::{estimate_cost_usd, sum_session_cost_usd, CostRegistry, Pricing},
-        AgentEventKind, BuildConfig, ConfigError, DuplicateName, Error, GateContext,
+        AgentEventKind, ConfigError, DuplicateName, Error, GateContext,
         ProviderKind, Result, RuntimeError, SettingsBuilder, ThinkingLevel, ToolError,
         ToolGateOutcome, WireSerializer,
     };
@@ -91,7 +91,6 @@ fn re_exports_resolve_without_mocks_feature() {
     let _: WireSerializer = WireSerializer::default();
     let _ = ConfigError::Missing { field: "x" };
     let _: SettingsBuilder = SettingsBuilder::new();
-    let _ = BuildConfig::default;
     // Error / variants
     let _ = ToolError::NotFound("y".into());
     let _ = DuplicateName("z".into());

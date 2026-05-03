@@ -59,6 +59,7 @@ versioning follows [SemVer](https://semver.org/) per RFD 0027 §3.
 - `BuildConfig::default()` no longer scans env vars (polish-12). Returns `AuthStorage::in_memory()`; embedders wanting auto-discovery name the providers they trust via `AuthStorage::from_env_explicit(...)` and pass the result on `BuildConfig.auth` explicitly.
 - `#[allow(deprecated)]` annotations across pi-coding-agent (startup, cmd, halo) and pi-ai tests — no longer needed once the deprecated symbol is gone.
 - `AuthStorage::from_env_explicit_iter` (polish-13). Consolidated into `from_env_explicit` which now accepts any `IntoIterator<Item = (impl Into<String>, impl AsRef<str>)>`. Slice callers migrate via bare-array literal (`[("a","b")]`) or `.iter().copied()` for the static `ENV_KEYS` slice.
+- `BuildConfig` + `build_runtime_config` (polish-15). Were the seed of the SDK extraction (originally `pi_coding_agent::sdk::BuildConfig`); when Commit K removed the `pi_coding_agent::sdk` shim they became pure overlap with `RuntimeConfig::builder()`. Per the user's pre-publish "remove migration cruft" direction they were dropped. Embedders use `RuntimeConfig::builder()` directly. `quick_start` survives as the one-liner first-touch convenience.
 
 ### Notes
 - This is the pre-0.1.0 working tree. Once Commit J publishes 0.1.0

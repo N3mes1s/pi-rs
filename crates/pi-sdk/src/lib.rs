@@ -53,9 +53,9 @@
 //! For embedders that need shell or fs-mutation tools, construct the
 //! [`RuntimeConfig`] explicitly via [`RuntimeConfig::builder()`] and
 //! pick the tool set deliberately (`ToolRegistry::with_unsafe_extras()`
-//! is the safety-named alias of `with_extras()` that registers `bash`).
-//! See the README and `examples/01_minimal.rs` for a runnable
-//! end-to-end version.
+//! registers `bash`, the full set including code-execution + mutation
+//! tools — the name itself signals the risk). See the README and
+//! `examples/01_minimal.rs` for a runnable end-to-end version.
 
 // ─── Provider / model ─────────────────────────────────────────────
 pub use pi_ai::{
@@ -93,14 +93,19 @@ pub use pi_agent_core::{
     ToolGateOutcome, WireSerializer,
 };
 
-// ─── Convenience builder ──────────────────────────────────────────
+// ─── quick_start convenience ──────────────────────────────────────
 //
-// `BuildConfig` is the convenience wrapper used by the binary, exposed
-// for SDK callers. Per RFD 0027 §3, it stays in 0.x for back-compat;
-// at 1.0 it becomes a deprecated wrapper around `RuntimeConfig::builder()`
-// (which lands in Commit B per RFD 0027 §4).
+// One-liner for first-touch demos that wires the safe defaults
+// (in_memory auth, readonly tools, in-process sandbox). Production
+// embedders construct via `RuntimeConfig::builder()` directly.
+//
+// (Polish-15: BuildConfig + build_runtime_config used to live here too
+// as the seed of the SDK extraction; they were pure overlap with the
+// canonical builder once Commit K removed the pi_coding_agent::sdk
+// shim, so per the user's pre-publish "remove migration cruft"
+// direction they were dropped.)
 pub mod build;
-pub use build::{build_runtime_config, quick_start, BuildConfig};
+pub use build::quick_start;
 
 // ─── Top-level error type (Commit C per RFD 0027 §1) ─────────────
 //
