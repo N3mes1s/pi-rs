@@ -1,9 +1,9 @@
 # RFD 0028 — Compiled agents from TOML manifest (meta + split into A/B/C/D)
 
-- **Status:** Draft (v0.2)
-- **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1 pass)
+- **Status:** Draft (v0.3)
+- **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1 + v0.2 passes)
 - **Created:** 2026-05-03
-- **Implemented:** *(pending sub-commits 0028§A–§D)*
+- **Implemented:** *(pending sub-commits Commit A–Commit D)*
 
 ## Summary
 
@@ -19,12 +19,12 @@ tedious). Compiled agents make (b) declarative.
 This RFD covers the entire compiled-agent design as **four
 sub-commits in a single document** (matching RFD 0023's
 A1/A2/B/C/D/E/F/G pattern). Each sub-commit ships independently
-but they share §Cross-cutting choices and §Out of scope:
+but they share Commit Cross-cutting choices and §Out of scope:
 
-- **§A** — Manifest schema (`pi.toml` + `agent.toml`).
-- **§B** — Codegen + runtime shape (what `pi-build` generates).
-- **§C** — Distribution (how the resulting binary is shipped).
-- **§D** — Halo integration (RFD 0025) — compiled agents as
+- **Commit A** — Manifest schema (`pi.toml` + `agent.toml`).
+- **Commit B** — Codegen + runtime shape (what `pi-build` generates).
+- **Commit C** — Distribution (how the resulting binary is shipped).
+- **Commit D** — Halo integration (RFD 0025) — compiled agents as
   autonomous-loop cycle nodes.
 
 (v0.1 proposed splitting into four separate RFD files. The
@@ -39,7 +39,7 @@ RFD 0023's single-file sub-commit pattern; deferring to that.)
   `--provider`, `--thinking`, etc.). Designed for interactive use
   + admin verbs. Production operators use it via shell scripts
   that string-paste flags; surface is unstable enough that we
-  refuse to commit to a 1.0 (RFD 0027 §Background).
+  refuse to commit to a 1.0 (RFD 0027 Commit Background).
 - **`pi-orchestrate`** (RFD 0021) — runs N campaign rows in
   parallel against a single agent shape. Closest thing to a
   "headless runner" today, but it's a wrapper around the same
@@ -115,10 +115,10 @@ A single self-contained Rust binary, built by Cargo, that:
 
 | Sub-commit | Owns | Blocks | Dep on |
 |---|---|---|---|
-| **§A** | Manifest schema (TOML grammar, validation, versioning) | §B, §C, §D | RFD 0027 (SDK surface) |
-| **§B** | Codegen + runtime (`pi-build` verb, generated `main.rs` shape, exit-code contract, JSONL stdout protocol) | §D | §A, RFD 0027 |
-| **§C** | Distribution (cargo profile + `--target` pass-through; reproducibility / `verify` / `migrate` deferred to v2) | — | §A, §B |
-| **§D** | Halo integration — halo spawns the compiled-agent binary the way it spawns `pi --orchestrate` today (no new halo cycle-kind plug-in surface) | — | §A, §B, RFD 0025 |
+| **Commit A** | Manifest schema (TOML grammar, validation, versioning) | Commit B, Commit C, Commit D | RFD 0027 (SDK surface) |
+| **Commit B** | Codegen + runtime (`pi-build` verb, generated `main.rs` shape, exit-code contract, JSONL stdout protocol) | Commit D | Commit A, RFD 0027 |
+| **Commit C** | Distribution (cargo profile + `--target` pass-through; reproducibility / `verify` / `migrate` deferred to v2) | — | Commit A, Commit B |
+| **Commit D** | Halo integration — halo spawns the compiled-agent binary the way it spawns `pi --orchestrate` today (no new halo cycle-kind plug-in surface) | — | Commit A, Commit B, RFD 0025 |
 
 Implementation order:
 
@@ -177,16 +177,31 @@ override them; changes require revising this meta-RFD first.
   or `cargo install` should never embed credentials. CWE-798
   defense.
 
-#### 4. Stdout wire format = pi-sdk's WireSerializer JSONL
+#### 4. Stdout wire format = `AgentEvent` JSONL
 
-- When invoked with `--jsonl`, the agent emits one JSON object
-  per line on stdout, identical to pi-sdk's
-  `SessionEntryKind` JSONL stream (RFD 0027 H6).
-- Operators (halo, orchestrate, ad-hoc shell pipelines) parse
-  the same wire format pi-sdk already stabilises. Zero
-  duplicate format work.
+- When invoked with `--jsonl`, the agent emits one
+  `serde_json::to_string(&AgentEvent)` per line on stdout.
+- `AgentEvent` (and the nested `AgentEventKind`) already derive
+  `Serialize`/`Deserialize` (verified `pi-agent-core/src/event.rs:6,68`)
+  and are re-exported from `pi-sdk`, so consumers
+  (halo, orchestrate, ad-hoc shell pipelines) deserialize via
+  the same types pi-sdk publishes. Zero duplicate format work.
 - Default mode (no `--jsonl`) is plain UTF-8 text — assistant
   output only, no metadata.
+
+**Note on the relationship to pi-sdk's `WireSerializer`:**
+`WireSerializer` serializes `SessionEntry` (the *on-disk
+session-log* format used by `SessionManager` for session replay,
+hardened in RFD 0027 H6 with a 1 MiB/field cap + ANSI strip +
+C1/bidi escape). That is a **different** format from the
+in-process `AgentEvent` channel — `SessionEntry` carries
+tool-result outcomes + interceptor injections + replay metadata
+that the channel doesn't. For streaming live events on stdout
+the `AgentEvent` shape is the right choice; converting to
+`SessionEntry` requires an `AgentEvent → SessionEntry` mapper
+that does not exist in pi-sdk today and would be net-new
+surface. (rfd-critic v0.2 finding N1; v0.2 incorrectly assumed
+the two formats were unified.)
 
 #### 5. Exit codes = numeric stability contract
 
@@ -232,7 +247,7 @@ compiled agent.
   backtraces, `rust_log` output, codegen warnings if any
   surface at runtime). NEVER any agent output, NEVER
   JSONL-formatted lines.
-- Rationale: halo's JSONL parser (§D) is fragile if `tracing`
+- Rationale: halo's JSONL parser (Commit D) is fragile if `tracing`
   ever logs to stdout. Keeping the two streams disjoint by
   contract is cheaper than parsing-with-resync.
 
@@ -259,7 +274,7 @@ content into `[runtime] system_prompt` at manifest-author time.
 
 ### Sketch — sub-commit scopes
 
-#### §A — Manifest schema
+#### Commit A — Manifest schema
 
 A complete `agent.toml` for v1 looks like:
 
@@ -297,14 +312,14 @@ max_tool_invocations_per_turn = 50
 max_recursion               = 4
 ```
 
-§A's deliverable: this schema + a `pi-build validate
+Commit A's deliverable: this schema + a `pi-build validate
 agent.toml` verb + serde types + round-trip test. ~600 LoC.
 
-#### §B — Codegen + runtime
+#### Commit B — Codegen + runtime
 
 `pi-build my-agent.toml [--out target-dir]` walks the manifest
 and emits a Cargo project. `main.rs` template (sketch, exact
-output frozen by §B):
+output frozen by Commit B):
 
 ```rust
 // CODE GENERATED by pi-build {version} from agent.toml hash {sha256}.
@@ -312,7 +327,7 @@ output frozen by §B):
 use pi_sdk::{
     create_agent_session, AgentEventKind, AuthStorage, LocalProcessProvider,
     ModelRegistry, RuntimeConfig, SessionManager, Settings, ThinkingSetting,
-    ToolRegistry, WireSerializer,
+    ToolRegistry,
 };
 use std::sync::Arc;
 
@@ -325,11 +340,14 @@ async fn main() -> std::process::ExitCode {
         Err(_) => return std::process::ExitCode::from(2),
     };
     // Build ONE registry honouring the manifest allowlist, then
-    // pass the SAME registry to BOTH the runtime (`.tools(...)`)
-    // AND the sandbox provider. `LocalProcessProvider::with_defaults()`
-    // would silently re-register all 8 unsafe tools and bypass
-    // the manifest's `tools.allowlist` — codegen MUST clone, NOT
-    // construct a fresh default. (rfd-critic v0.1 finding.)
+    // pass it to BOTH the runtime (`.tools(...)`) AND the sandbox
+    // provider via `tools.clone()` (the registry is `Clone`; the
+    // clone shares no mutable state — this is HashMap-of-Arcs
+    // under the hood). `LocalProcessProvider::with_defaults()`
+    // would silently instantiate a fresh `with_unsafe_extras()`
+    // registry inside the sandbox and bypass the manifest
+    // allowlist — codegen MUST use `LocalProcessProvider::new`
+    // with the cloned allowlist. (rfd-critic v0.1 finding C2.)
     let mut tools = ToolRegistry::with_unsafe_extras();
     tools.keep_only(&[
         "read".into(), "grep".into(), "find".into(),
@@ -358,17 +376,19 @@ async fn main() -> std::process::ExitCode {
         .build()
         .expect("compile-time-validated config");
 
-    // Event pump: stdout is the JSONL wire surface §D consumes.
-    // Default mode forwards only AssistantTextDelta as plain text.
+    // Event pump: stdout is the JSONL wire surface Commit D consumes.
+    // `AgentEvent` derives Serialize, so `serde_json` is the whole
+    // serialiser. NOT `WireSerializer` — that operates on
+    // `SessionEntry` (a different on-disk type; see Commit Cross-cutting
+    // #4). Default mode forwards only `AssistantTextDelta` as
+    // plain text.
     let jsonl = std::env::args().any(|a| a == "--jsonl");
     let pump = tokio::spawn(async move {
-        let serializer = WireSerializer::default();
         while let Some(evt) = event_rx.recv().await {
             if jsonl {
-                // §D's spend attribution reads Usage events from here.
-                if let Some(line) = serializer.serialize_event(&evt) {
-                    println!("{line}");
-                }
+                // Commit D's spend attribution reads Usage events from here.
+                // unwrap is safe: AgentEvent's serde shape is total.
+                println!("{}", serde_json::to_string(&evt).unwrap());
             } else if let AgentEventKind::AssistantTextDelta { text } = &evt.kind {
                 print!("{text}");
             }
@@ -376,48 +396,58 @@ async fn main() -> std::process::ExitCode {
         }
     });
 
-    let session = match create_agent_session(cfg, Some(event_tx)) {
-        Ok(s) => s,
+    // create_agent_session returns `(AgentSessionRuntime, AgentSession)`.
+    // The runtime is held alive across `prompt(...).await` — dropping
+    // it would close the provider/event channel. Bind both via tuple
+    // pattern; `_runtime` keeps it alive until end-of-scope.
+    let (_runtime, session) = match create_agent_session(cfg, Some(event_tx)) {
+        Ok(rs) => rs,
         Err(_) => return std::process::ExitCode::from(1),
     };
     let prompt = read_prompt_from_args_or_stdin();   // CLI helper, generated.
     let exit = match session.prompt(prompt).await {
         Ok(_) => 0,
-        Err(e) => map_runtime_error_to_exit(e),       // 1/2/3 per §Cross-cutting #5.
+        Err(e) => map_runtime_error_to_exit(e),       // 1/2/3 per Commit Cross-cutting #5.
     };
     let _ = pump.await;
     std::process::ExitCode::from(exit)
 }
 ```
 
-§B's deliverable: the `pi-build` binary (lives in
+Commit B's deliverable: the `pi-build` binary (lives in
 `crates/pi-build/`), the codegen template (built into the
 binary), the JSONL stdout protocol contract, the exit-code
 mapper, and the `read_prompt_from_args_or_stdin` + event-pump
 helpers. ~1200 LoC.
 
-§B's hard codegen invariants (each gets a regression test):
+Commit B's hard codegen invariants (each gets a regression test):
 
-1. The same `ToolRegistry` instance flows to both
-   `.tools(tools.clone())` and `LocalProcessProvider::new(tools)`.
-   Failing this silently restores all 8 unsafe tools.
-2. JSONL events are emitted via `WireSerializer::default()` — same
-   1 MiB/field cap + ANSI strip + C1/bidi escaping as pi-sdk's
-   on-disk session log (RFD 0027 §4.5 #11).
-3. Tracing, panics, and warnings go to stderr. Stdout in `--jsonl`
-   mode emits ONLY `serializer.serialize_event(...)` output — no
-   bare `println!` for diagnostics.
-4. `#[tokio::main(flavor = "current_thread")]` is non-negotiable
-   per §Cross-cutting #9.
+1. **Same allowlist, both registries.** The `ToolRegistry` value
+   passed to `.tools(...)` and the one inside the
+   `LocalProcessProvider` MUST contain the same set of tool
+   names. Test: build both, then
+   `assert_eq!(left.names(), right.names())`. Failing this
+   silently restores all 8 unsafe tools through the sandbox path.
+2. **AgentEvent JSONL shape is stable.** Serializing a
+   representative `AgentEvent` (`AssistantTextDelta`,
+   `AssistantToolCall`, `Usage`, `TurnComplete`) and
+   round-tripping through `serde_json::from_str` MUST equal the
+   original. Locks the Commit Cross-cutting #4 wire-format claim.
+3. **Stdout discipline.** Tracing, panics, and warnings go to
+   stderr. Stdout in `--jsonl` mode emits ONLY
+   `serde_json::to_string(&evt)` output — no bare `println!`
+   for diagnostics, no `tracing::info!` to stdout subscriber.
+4. **Tokio runtime flavour.** `#[tokio::main(flavor = "current_thread")]`
+   is non-negotiable per Commit Cross-cutting #9. Generated `main.rs`
+   contains the literal attribute exactly.
 
-§B explicitly does NOT: introduce a `WireSerializer::serialize_event`
-method if pi-sdk doesn't ship one. Verify the exact symbol name
-during §B implementation; if pi-sdk's surface is `WireSerializer::
-write_session_entry(&mut writer, &entry)` (writer-shaped) the
-codegen adapts. Pi-sdk surface is the source of truth, not this
-sketch.
+Commit B explicitly does NOT touch pi-sdk's surface. If a future
+embedder wants `WireSerializer`-grade hardening on the streamed
+event JSONL (1 MiB caps, ANSI strip, etc.), that's a separate
+follow-up against pi-sdk introducing an
+`AgentEvent → SessionEntry` adapter — not codegen scope.
 
-#### §C — Distribution
+#### Commit C — Distribution
 
 How the operator ships the resulting binary. v1 keeps the
 surface deliberately narrow (rfd-critic v0.1 flagged the
@@ -445,16 +475,16 @@ Out of scope (whole 0028 series): signing (Sigstore / cosign)
 their own Dockerfile; package-manager distribution (apt, brew)
 → operator's choice.
 
-§C's v1 deliverable: docs + `--target` flag pass-through +
+Commit C's v1 deliverable: docs + `--target` flag pass-through +
 `--release`/`--debug` toggle. ~150 LoC.
 
-#### §D — Halo integration
+#### Commit D — Halo integration
 
 Halo (RFD 0025) is pi-rs's autonomous-loop supervisor. Today
 halo invokes `pi --orchestrate` as a subprocess (verified
-RFD 0025 §Composition with pi-orchestrate, lines 247-258).
+RFD 0025 Commit Composition with pi-orchestrate, lines 247-258).
 
-§D adds a **second** subprocess shape halo knows how to spawn —
+Commit D adds a **second** subprocess shape halo knows how to spawn —
 a compiled-agent binary — using the same subprocess machinery,
 NOT a new "cycle-kind plug-in" surface. (rfd-critic v0.1 noted
 that halo today has no cycle-kind dispatch; inventing one
@@ -475,23 +505,23 @@ Halo:
    §Halo-owned clone precondition) — same subprocess plumbing
    that today spawns `pi --orchestrate`.
 2. Pipes the prompt to stdin (or appends as the final CLI arg
-   per §B's `read_prompt_from_args_or_stdin` helper).
+   per Commit B's `read_prompt_from_args_or_stdin` helper).
 3. Streams the binary's stdout `--jsonl` lines into the halo
    cycle log.
 4. Maps the agent's exit code to a halo policy (continue /
    alert / throttle) per `on_exit`.
 5. Attributes the agent's spend (parsed from `Usage`-kind JSONL
-   lines per §B's wire format) to halo's daily-budget ledger.
+   lines per Commit B's wire format) to halo's daily-budget ledger.
 
 Compiled agents are inert (they don't loop themselves) — halo
 provides the outer loop. This is the killer use case: operators
 write a TOML, halo runs it forever.
 
-§D's deliverable: halo subprocess-cycle support for arbitrary
+Commit D's deliverable: halo subprocess-cycle support for arbitrary
 binaries (not just `pi --orchestrate`) + JSONL stdout parser
 + spend attribution + integration test. ~600 LoC.
 
-§D explicitly does NOT add a new halo cycle-kind plug-in trait —
+Commit D explicitly does NOT add a new halo cycle-kind plug-in trait —
 that's a halo refactor + would need its own RFD.
 
 ### What we're NOT designing
@@ -503,7 +533,7 @@ that's a halo refactor + would need its own RFD.
   No persistent server mode, no `--listen`. Halo + cron supply
   the "keep running" semantics.
 - **Custom Rust tools at compile time.** Reserved
-  `[[tool.kind = "rust"]]` syntax in §A but rejected by the
+  `[[tool.kind = "rust"]]` syntax in Commit A but rejected by the
   v1 parser. v2 work.
 - **Microvm sandbox integration.** Blocked on **RFD 0023
   Commit G** (`MicroVmProvider` wire-up + `pi sandbox doctor`
@@ -528,22 +558,22 @@ verify the *split* itself works:
 
 - **End-to-end "dice oracle"** — `examples/dice-oracle.toml` →
   `pi-build` → cargo build → `./dice-oracle "roll a d20"` returns
-  text on stdout, exit code 0. Exercises §A + §B together.
+  text on stdout, exit code 0. Exercises Commit A + Commit B together.
 - *(Reproducibility integration test deferred to v2 alongside
-  the `verify` verb — see §C.)*
+  the `verify` verb — see Commit C.)*
 - **Halo cycle test** — halo.toml configures a compiled agent
   with a deterministic MockProvider; halo runs N cycles; assert
-  cycle log captures the agent's JSONL output. Exercises §D.
+  cycle log captures the agent's JSONL output. Exercises Commit D.
 - **Manifest forward-compat** — a v1 parser MUST reject a
   manifest with `schema_version = 2` (don't silently accept).
-  Exercises §A's versioning contract.
+  Exercises Commit A's versioning contract.
 
 ## Out of scope (this meta-RFD only)
 
-- The detailed serde shape of `agent.toml` — defined in §A.
-- The byte-exact codegen template — defined in §B.
-- Specific cross-compile target list — defined in §C.
-- Halo's `on_exit` policy table semantics — defined in §D.
+- The detailed serde shape of `agent.toml` — defined in Commit A.
+- The byte-exact codegen template — defined in Commit B.
+- Specific cross-compile target list — defined in Commit C.
+- Halo's `on_exit` policy table semantics — defined in Commit D.
 
 ## Open questions
 
@@ -597,7 +627,7 @@ verify the *split* itself works:
   Commit G ships + the not-yet-RFD'd "contextfs" fs-mount
   library API lands).
 - **RFD 0025** — `pi --halo` autonomous loop (the consumer for
-  §D; halo cycles become the outer loop for compiled agents).
+  Commit D; halo cycles become the outer loop for compiled agents).
 - **RFD 0027** — pi-rs SDK (the *required* dependency; compiled
   agents are the canonical SDK consumer per RFD 0027 §1).
 - **Flue** — https://flueframework.com/ (`flue build` was the
@@ -606,62 +636,99 @@ verify the *split* itself works:
 
 ## Revision history
 
+- **v0.3 (2026-05-03):** rfd-critic v0.2 pass returned
+  `NEEDS_REVISION` — closed v0.1's 4 critical (3 cleanly, 1
+  partially) but introduced 2 new criticals while rewriting the
+  Commit B template. v0.3 closes both:
+  - **N1 (`WireSerializer::serialize_event` doesn't exist):**
+    Verified `WireSerializer::serialize(entry: &SessionEntry)` is
+    the only serializer method, AND that the channel emits
+    `AgentEvent`, not `SessionEntry`. They are distinct types
+    with distinct serde shapes. Reframed §Cross-cutting #4 as
+    "stdout JSONL = `serde_json::to_string(&AgentEvent)`" and
+    added a note explaining that `WireSerializer` is the on-disk
+    `SessionEntry` format (RFD 0027 H6 hardened) — different
+    from in-process events. Commit B template now imports no
+    `WireSerializer`; pump body uses `serde_json::to_string(&evt)`.
+    Codegen invariant #2 rewritten as an `AgentEvent` JSONL
+    round-trip test. The "1 MiB cap + ANSI strip" claim removed
+    from invariants — that hardening lives on `SessionEntry`,
+    not on the streamed event surface.
+  - **N2 (`create_agent_session` returns a tuple):** Verified
+    the real signature is `Result<(AgentSessionRuntime,
+    AgentSession)>`. Template now binds via `let (_runtime,
+    session) = ...;` with a comment explaining `_runtime` must
+    stay alive through `prompt(...).await` so the provider /
+    event channel doesn't close.
+  - **N3 (`§A`/`§B` collides loosely with `Commit A`/`Commit B`
+    style RFD 0023 uses):** Renamed all `§A`/`§B`/`§C`/`§D` →
+    `Commit A`/`Commit B`/`Commit C`/`Commit D` for vocabulary
+    parity. Now identical structure to RFD 0023.
+  - **N4 (`Settings::builder().provider(...).model(...).thinking(...)`
+    unverified):** Verified all three exist as fluent setters at
+    `pi-agent-core/src/settings.rs:555,561,567`.
+  - **Critic delta #3 (codegen invariant #1 prose mismatch):**
+    Tightened the wording to "MUST contain the same set of tool
+    names" and specified the regression test as
+    `assert_eq!(left.names(), right.names())` rather than
+    pointer-identity.
+
 - **v0.2 (2026-05-03):** rfd-critic v0.1 pass returned
   `NEEDS_REVISION` with 4 critical + 5 underspec'd + 2
   overengineered + 4 missing items. Closed:
-  - **C1 (broken codegen template):** rewrote §B `main.rs` to
+  - **C1 (broken codegen template):** rewrote Commit B `main.rs` to
     use `ToolRegistry::with_unsafe_extras().keep_only([...])`
     instead of fictional `pi_sdk::read()` / `pi_sdk::bash()`
     bare functions. Pi-sdk doesn't re-export tool constructors;
     `keep_only` is the canonical pattern from `examples/01_minimal.rs`.
-  - **C2 (sandbox bypass):** §B template now passes the SAME
+  - **C2 (sandbox bypass):** Commit B template now passes the SAME
     `ToolRegistry` instance to both `.tools(...)` AND
     `LocalProcessProvider::new(tools.clone())`. Calling
     `LocalProcessProvider::with_defaults()` would silently
     instantiate a fresh `with_unsafe_extras()` registry inside
     the sandbox, bypassing the manifest's `tools.allowlist`.
-    Promoted to a §B hard codegen invariant with regression test.
+    Promoted to a Commit B hard codegen invariant with regression test.
   - **C3 (broken citation "RFD 0021 contextfs"):** RFD 0021 is
     pi-orchestrate-mode, not contextfs (verified via grep). Fixed
     both occurrences to cite RFD 0023 Commit G + Commit B as the
     real microvm gate. Noted that "contextfs" is a separate
     not-yet-RFD'd concern the user is tracking.
-  - **C4 (deny_unknown_fields conflates schema_version):** §A's
+  - **C4 (deny_unknown_fields conflates schema_version):** Commit A's
     parser is now two-pass — pass 1 reads `schema_version` from
     a permissive shim; pass 2 enforces strict parse only if
     version matches. v2 manifests fail with `SchemaTooNew`, not
     `unknown field`.
   - **Underspec'd: split-files convention.** Dropped Open Q #1;
     converted from "split into 4 separate RFD files" to "single
-    document with §A/§B/§C/§D sub-commits" matching RFD 0023's
+    document with Commit A/Commit B/Commit C/Commit D sub-commits" matching RFD 0023's
     pattern. Renamed all `0028A`/`0028B`/`0028C`/`0028D` →
-    `§A`/`§B`/`§C`/`§D` throughout.
-  - **Underspec'd: §D invented halo cycle-kind plug-in.** Halo
-    today has no cycle-kind dispatch trait; reframed §D as
+    `Commit A`/`Commit B`/`Commit C`/`Commit D` throughout.
+  - **Underspec'd: Commit D invented halo cycle-kind plug-in.** Halo
+    today has no cycle-kind dispatch trait; reframed Commit D as
     "halo spawns the binary the same way it spawns
-    `pi --orchestrate` today" (verified RFD 0025 §Composition).
+    `pi --orchestrate` today" (verified RFD 0025 Commit Composition).
   - **Underspec'd: per-tool config plumbing.** Dropped
-    `[tools.bash] timeout_ms` from §A sketch — pi-tools-core
+    `[tools.bash] timeout_ms` from Commit A sketch — pi-tools-core
     today reads tool params from per-invocation JSON, not from
     registration-time config. Reserved for v2.
-  - **Underspec'd: JSONL event pump missing from §B template.**
+  - **Underspec'd: JSONL event pump missing from Commit B template.**
     Added the `event_rx` pump to the codegen template — without
-    it, `--jsonl` mode emits nothing and §D's spend attribution
+    it, `--jsonl` mode emits nothing and Commit D's spend attribution
     breaks.
-  - **Overengineered: §C reproducibility / verify / migrate.**
-    Deferred all three to v2; §C v1 ships only profile + `--target`
+  - **Overengineered: Commit C reproducibility / verify / migrate.**
+    Deferred all three to v2; Commit C v1 ships only profile + `--target`
     pass-through. LoC estimate dropped from 400 → 150.
   - **Overengineered: Open Q #6 `pi-build migrate`.** Dropped —
     migration tooling for a one-version schema is premature.
   - **Missing: provider-list constraint, AGENTS.md policy,
     stdout/stderr separation, tokio runtime flavour.** Added as
-    §Cross-cutting #7-#10. Each is a hard contract for §B codegen.
+    Commit Cross-cutting #7-#10. Each is a hard contract for Commit B codegen.
   - **Citation accuracy fixes:** `LocalProcessProvider::new(tools)`
     is the actual constructor (with_defaults instantiates a fresh
     registry); halo invokes `pi --orchestrate`, not
     `pi-coding-agent`; bash `BASH_MAX_TIMEOUT_MS` is the max
     clamp, default is 120_000 ms (acknowledged but not cited in
-    v0.2 since §A's `tools.bash.timeout_ms` was dropped).
+    v0.2 since Commit A's `tools.bash.timeout_ms` was dropped).
 - **v0.1 (2026-05-03):** Initial draft. Establishes the split
   (A=manifest, B=codegen, C=dist, D=halo), the cross-cutting
   locked choices (TOML, Cargo project, env-only secrets,
