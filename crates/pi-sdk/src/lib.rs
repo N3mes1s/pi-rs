@@ -100,6 +100,14 @@ pub use build::{build_runtime_config, BuildConfig};
 pub mod error;
 pub use error::{Error, Result};
 
+// ─── Cost helper (Commit E per RFD 0027 §1) ──────────────────────
+//
+// Every embedder writes the same per-model price table. Ship one.
+// Best-effort numbers, refreshed each MINOR; embedders override via
+// `CostRegistry::override_for(model_id, prices)`.
+pub mod cost;
+pub use cost::{estimate_cost_usd, sum_session_cost_usd, CostRegistry, Pricing};
+
 // ─── Deferred (specified in RFD 0027 §1, ship in later commits) ───
 //
 // The following surface is part of the SDK contract but lands in

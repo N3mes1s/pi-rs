@@ -7,6 +7,7 @@
 
 pub mod auth;
 pub mod cost;
+pub use cost::{compute_cost, UsageAcc};
 pub mod discover;
 pub mod http;
 pub mod message;
