@@ -89,8 +89,8 @@ pub use pi_agent_core::{
     AgentSession, AgentSessionRuntime, Compactor, ConfigBuilder, ConfigError,
     ContextFile, DefaultProviderFactory, EventSender, GateContext, ProviderFactory,
     RuntimeConfig, RuntimeError, SessionEntry, SessionEntryKind, SessionManager,
-    SessionMeta, SessionTree, Settings, StreamInterceptor, ToolGate, ToolGateOutcome,
-    WireSerializer,
+    SessionMeta, SessionTree, Settings, SettingsBuilder, StreamInterceptor, ToolGate,
+    ToolGateOutcome, WireSerializer,
 };
 
 // ─── Convenience builder ──────────────────────────────────────────

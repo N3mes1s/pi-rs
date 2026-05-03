@@ -28,5 +28,5 @@ pub use session::{
     OutcomeSource, SessionEntry, SessionEntryKind, SessionManager, SessionMeta, SessionTree,
     WireSerializer,
 };
-pub use settings::{EvolveSettings, Settings};
+pub use settings::{EvolveSettings, Settings, SettingsBuilder};
 pub use system::default_system_prompt;

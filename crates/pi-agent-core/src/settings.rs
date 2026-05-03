@@ -441,6 +441,26 @@ pub enum Transport {
 }
 
 impl Settings {
+    /// Begin constructing a `Settings` via the fluent builder. Per
+    /// RFD 0027 §3 + pass-1 #8 polish track: `Settings` is on the
+    /// list of POD types that should eventually be marked
+    /// `#[non_exhaustive]` (forcing struct-literal callers off the
+    /// "spread defaults" pattern). Adding the builder is the
+    /// additive prerequisite; the `#[non_exhaustive]` mark itself
+    /// lands at 1.0 (per MIGRATION.md).
+    ///
+    /// The builder covers the **commonly-set** fields directly:
+    /// `provider`, `model`, `thinking`, `compact_threshold`,
+    /// `theme`, `route`. For the long tail of less-common fields
+    /// (LSP, monitor, evolve, task settings, etc.) the builder
+    /// exposes [`SettingsBuilder::with`] — an escape hatch that
+    /// gives the caller a `&mut Settings` to mutate any field.
+    /// The result of `build()` is a `Settings` materialised from
+    /// `Settings::default()` with the chosen overrides applied.
+    pub fn builder() -> SettingsBuilder {
+        SettingsBuilder::default()
+    }
+
     pub fn load(path: &std::path::Path) -> Self {
         std::fs::read_to_string(path)
             .ok()
@@ -493,5 +513,176 @@ impl From<ThinkingSetting> for pi_ai::ThinkingLevel {
             ThinkingSetting::High => pi_ai::ThinkingLevel::High,
             ThinkingSetting::XHigh => pi_ai::ThinkingLevel::XHigh,
         }
+    }
+}
+
+// ─── SettingsBuilder (RFD 0027 §3 + pass-1 #8 polish) ────────────
+
+/// Fluent builder for [`Settings`]. See [`Settings::builder`] for
+/// the rationale.
+///
+/// All setters are optional; `build()` materialises a `Settings`
+/// from `Settings::default()` with the chosen overrides applied.
+/// Setters return `Self` (consume-and-return) for chain ergonomics.
+///
+/// For the long tail of fields not surfaced as named setters, use
+/// [`with`](Self::with) — the escape hatch that hands the caller a
+/// `&mut Settings` to mutate any field.
+// SettingsBuilder is one-shot (consumed by `build`); not Clone
+// because the `with` mutator closures are FnOnce, which is not
+// itself Clone.
+#[derive(Default)]
+pub struct SettingsBuilder {
+    provider: Option<String>,
+    model: Option<String>,
+    thinking: Option<ThinkingSetting>,
+    compact_threshold: Option<f32>,
+    theme: Option<String>,
+    route: Option<crate::router::RouteMode>,
+    no_tools: Option<bool>,
+    /// Closures collected via `with(...)`. Applied in order at
+    /// `build()` time after the named-setter overrides land.
+    #[allow(clippy::type_complexity)]
+    mutators: Vec<Box<dyn FnOnce(&mut Settings) + 'static>>,
+}
+
+impl SettingsBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the default provider (e.g. `"anthropic"`).
+    pub fn provider<S: Into<String>>(mut self, p: S) -> Self {
+        self.provider = Some(p.into());
+        self
+    }
+
+    /// Set the default model id or alias.
+    pub fn model<S: Into<String>>(mut self, m: S) -> Self {
+        self.model = Some(m.into());
+        self
+    }
+
+    /// Set the default thinking level.
+    pub fn thinking(mut self, t: ThinkingSetting) -> Self {
+        self.thinking = Some(t);
+        self
+    }
+
+    /// Set the auto-compact threshold (fraction of context window
+    /// remaining; auto-compact triggers when below this value).
+    /// Default 0.15.
+    pub fn compact_threshold(mut self, t: f32) -> Self {
+        self.compact_threshold = Some(t);
+        self
+    }
+
+    /// Set the TUI theme name. Empty = pi default.
+    pub fn theme<S: Into<String>>(mut self, name: S) -> Self {
+        self.theme = Some(name.into());
+        self
+    }
+
+    /// Set the routing mode (RFD 0020).
+    pub fn route(mut self, r: crate::router::RouteMode) -> Self {
+        self.route = Some(r);
+        self
+    }
+
+    /// Disable all tool registration.
+    pub fn no_tools(mut self, v: bool) -> Self {
+        self.no_tools = Some(v);
+        self
+    }
+
+    /// Escape hatch for fields that don't have named setters
+    /// (LSP, monitor, evolve, task, role overrides, etc.). The
+    /// closure is applied to a mutable `Settings` after the
+    /// named-setter overrides land. Multiple `with(...)` calls
+    /// run in registration order.
+    ///
+    /// Example:
+    /// ```ignore
+    /// let s = Settings::builder()
+    ///     .provider("anthropic")
+    ///     .with(|s| s.evolve.enabled = false)
+    ///     .with(|s| s.task.max_concurrency = 10)
+    ///     .build();
+    /// ```
+    pub fn with<F: FnOnce(&mut Settings) + 'static>(mut self, f: F) -> Self {
+        self.mutators.push(Box::new(f));
+        self
+    }
+
+    /// Materialise the final `Settings`. Always succeeds — every
+    /// field has a sensible default.
+    pub fn build(self) -> Settings {
+        let mut s = Settings::default();
+        if let Some(v) = self.provider { s.provider = v; }
+        if let Some(v) = self.model { s.model = v; }
+        if let Some(v) = self.thinking { s.thinking = v; }
+        if let Some(v) = self.compact_threshold { s.compact_threshold = v; }
+        if let Some(v) = self.theme { s.theme = v; }
+        if let Some(v) = self.route { s.route = v; }
+        if let Some(v) = self.no_tools { s.no_tools = v; }
+        for f in self.mutators {
+            f(&mut s);
+        }
+        s
+    }
+}
+
+#[cfg(test)]
+mod settings_builder_tests {
+    use super::*;
+
+    #[test]
+    fn builder_round_trips_named_fields() {
+        let s = Settings::builder()
+            .provider("anthropic")
+            .model("claude-haiku-4-5-20251001")
+            .thinking(ThinkingSetting::Medium)
+            .compact_threshold(0.25)
+            .theme("solarized")
+            .no_tools(true)
+            .build();
+        assert_eq!(s.provider, "anthropic");
+        assert_eq!(s.model, "claude-haiku-4-5-20251001");
+        assert_eq!(s.thinking, ThinkingSetting::Medium);
+        assert!((s.compact_threshold - 0.25).abs() < f32::EPSILON);
+        assert_eq!(s.theme, "solarized");
+        assert!(s.no_tools);
+    }
+
+    #[test]
+    fn builder_defaults_match_settings_default() {
+        let s = Settings::builder().build();
+        let d = Settings::default();
+        assert_eq!(s.provider, d.provider);
+        assert_eq!(s.model, d.model);
+        assert_eq!(s.thinking, d.thinking);
+        assert_eq!(s.compact_threshold, d.compact_threshold);
+    }
+
+    #[test]
+    fn with_closures_run_in_order() {
+        let s = Settings::builder()
+            .provider("openai")
+            .with(|s| s.task.max_concurrency = 7)
+            .with(|s| s.evolve.enabled = false)
+            .build();
+        assert_eq!(s.provider, "openai");
+        assert_eq!(s.task.max_concurrency, 7);
+        assert!(!s.evolve.enabled);
+    }
+
+    #[test]
+    fn named_setter_then_with_closure_applies_both() {
+        let s = Settings::builder()
+            .compact_threshold(0.5)
+            .with(|s| s.compact_threshold = 0.75)
+            .build();
+        // `with` runs after named-setters, so 0.75 wins.
+        assert!((s.compact_threshold - 0.75).abs() < f32::EPSILON);
     }
 }
