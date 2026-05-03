@@ -358,9 +358,13 @@ impl RuntimeConfig {
     ///         .with_max_session_tokens(50_000)
     ///         .with_max_tool_invocations_per_turn(20)
     ///
-    /// **Composition note** (per code-review pass-9 NIT #2): if both
-    /// the `ConfigBuilder` and this post-build setter touch the same
-    /// field, the post-build setter wins (last-write-wins).
+    /// **Composition note** (per code-review pass-9 NIT #2 +
+    /// pass-10 NIT #2): if both the `ConfigBuilder` and this
+    /// post-build setter touch the same field, the post-build
+    /// setter wins (last-write-wins). Same semantics if the
+    /// embedder bypasses both and mutates the `pub` field
+    /// directly (`cfg.max_session_tokens = N;`) — the fields
+    /// are public for back-compat, last write still wins.
     ///
     /// **Not for `quick_start`** (per pass-9 NON-BLOCKING #1):
     /// `quick_start` returns an `AgentSessionRuntime` (not a

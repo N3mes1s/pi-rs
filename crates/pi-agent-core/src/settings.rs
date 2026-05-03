@@ -584,6 +584,22 @@ impl SettingsBuilder {
     }
 
     /// Set the routing mode (RFD 0020).
+    ///
+    /// **Per-route overrides** (`route_provider_override`,
+    /// `route_model_override`, `route_thinking_override`) are not
+    /// surfaced as named setters per code-review pass-10 NIT #4 —
+    /// embedders setting them go through the [`with`](Self::with)
+    /// escape hatch:
+    ///
+    /// ```ignore
+    /// let s = Settings::builder()
+    ///     .route(RouteMode::Static)
+    ///     .with(|s| {
+    ///         s.route_provider_override = Some("anthropic".into());
+    ///         s.route_model_override = Some("claude-haiku-4-5-20251001".into());
+    ///     })
+    ///     .build();
+    /// ```
     pub fn route(mut self, r: crate::router::RouteMode) -> Self {
         self.route = Some(r);
         self

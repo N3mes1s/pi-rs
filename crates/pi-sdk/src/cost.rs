@@ -296,18 +296,44 @@ mod tests {
 
     #[test]
     fn pricing_cost_for_matches_estimate_cost_usd() {
-        // Per polish-9: Pricing::cost_for should produce identical
-        // results to the registry-mediated estimate_cost_usd path.
+        // Per polish-9 + pass-10 NIT #1: Pricing::cost_for should
+        // produce identical results to estimate_cost_usd on EVERY
+        // path where the two could diverge — including the cache
+        // and reasoning token paths, and when usage.cost_usd is
+        // already populated by the provider (both should ignore
+        // it when the model is in the registry).
         let mut r = CostRegistry::empty();
-        r.override_for("test-model", Pricing::flat(2.0, 8.0));
-        let u = usage(1_000_000, 500_000); // $2 input + $4 output = $6
-        let via_registry = estimate_cost_usd(&u, "test-model", &r);
-        let via_pricing = Pricing::flat(2.0, 8.0).cost_for(&u);
-        assert!(
-            (via_registry - via_pricing).abs() < 1e-9,
-            "registry={via_registry} pricing={via_pricing}"
-        );
-        assert!((via_pricing - 6.0).abs() < 0.0001, "got {via_pricing}");
+        let p = Pricing::with_cache(2.0, 8.0, 0.20, 2.50);
+        r.override_for("test-model", p);
+
+        let cases: Vec<(&str, Usage)> = vec![
+            ("baseline", usage(1_000_000, 500_000)),
+            (
+                "with_cache_read",
+                Usage { cache_read_tokens: 500_000, ..usage(500_000, 500_000) },
+            ),
+            (
+                "with_cache_write",
+                Usage { cache_write_tokens: 250_000, ..usage(500_000, 500_000) },
+            ),
+            (
+                "with_reasoning",
+                Usage { reasoning_tokens: 100_000, ..usage(500_000, 400_000) },
+            ),
+            (
+                "with_cost_usd_already_populated",
+                Usage { cost_usd: 99.99, ..usage(1_000_000, 500_000) },
+            ),
+        ];
+
+        for (name, u) in cases {
+            let via_registry = estimate_cost_usd(&u, "test-model", &r);
+            let via_pricing = p.cost_for(&u);
+            assert!(
+                (via_registry - via_pricing).abs() < 1e-9,
+                "case {name}: registry={via_registry} pricing={via_pricing}"
+            );
+        }
     }
 
     #[test]

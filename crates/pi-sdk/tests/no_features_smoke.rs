@@ -112,6 +112,13 @@ fn provider_and_tool_traits_resolve_without_mocks() {
     // session-telemetry surface that `re_exports_resolve_without_mocks_feature`
     // doesn't reach by name. Catches a regression that drops a
     // provider re-export or moves it behind `mocks`.
+    //
+    // Per pass-10 NIT #5: the helpers below are never CALLED, only
+    // DEFINED. That's intentional — Rust type-checks unused-function
+    // parameter signatures at compile time, so a missing/renamed
+    // re-export fails to resolve and the test (and the whole binary)
+    // stops compiling. Calling the helpers would require constructing
+    // values for every parameter, defeating the purpose.
     use pi_sdk::{
         AnthropicProvider, AzureOpenAiProvider, BedrockAnthropicProvider, GoogleProvider,
         OpenAiCompatProvider, OpenAiProvider, Provider, ProviderConfig, SandboxError,

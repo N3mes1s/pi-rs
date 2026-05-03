@@ -180,6 +180,7 @@ The five examples in [`examples/`](examples/) cover the embedder shapes most lik
 | [`03_custom_tool.rs`](examples/03_custom_tool.rs) | Implement the `Tool` trait for a domain-specific tool, register it. |
 | [`04_custom_provider.rs`](examples/04_custom_provider.rs) | Implement `ProviderFactory` to inject a mock or custom LLM provider. |
 | [`05_custom_sandbox.rs`](examples/05_custom_sandbox.rs) | Implement `SandboxProvider` for a private execution backend. |
+| [`06_cost_tracking.rs`](examples/06_cost_tracking.rs) | `CostRegistry` + `Pricing::cost_for` end-to-end: bundled defaults, per-model overrides, per-turn cost, per-session aggregation. |
 
 Each is self-contained and runnable (most under `--features mocks`).
 
