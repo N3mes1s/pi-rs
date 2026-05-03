@@ -1,13 +1,16 @@
 //! Convenience builder for `RuntimeConfig`.
 //!
-//! Moved from `pi_coding_agent::sdk` per RFD 0027 Commit A. The shape
-//! is unchanged; only the import path changes from `pi_coding_agent::sdk`
-//! to `pi_sdk` (or `pi_sdk::build`).
+//! `BuildConfig` is the convenience wrapper used by the binary,
+//! exposed for SDK callers who prefer struct-literal-style
+//! construction. (Originally lived as `pi_coding_agent::sdk` per
+//! RFD 0027 Commit A; promoted to its own crate as the seed of
+//! `pi-sdk`. The legacy shim was removed in Commit K.)
 //!
 //! At SDK 1.0, `BuildConfig` becomes a deprecated wrapper around
-//! `RuntimeConfig::builder()` (which lands in Commit B). Embedders
-//! pinning `pi-sdk = "0.1"` get the convenience-builder shape today;
-//! pinning `pi-sdk = "1"` later adopts the builder API.
+//! `RuntimeConfig::builder()` (which lands in Commit B — already
+//! shipped). Embedders pinning `pi-sdk = "0.1"` get the
+//! convenience-builder shape today; pinning `pi-sdk = "1"` later
+//! adopts the builder API.
 
 use crate::{
     AgentSessionRuntime, AuthStorage, ContextFile, Error, LocalProcessProvider, ModelRegistry,

@@ -1,25 +1,34 @@
-//! pi-coding-agent — the `pi` binary plus its SDK surface.
+//! pi-coding-agent — the `pi` binary plus internal modules.
 //!
-//! The library re-exports everything callers need to build a session
-//! programmatically, mirroring the SDK described in upstream pi's README:
+//! Embedders integrating pi-rs into another Rust application should
+//! depend on **`pi-sdk`** (the public SDK façade, RFD 0027) instead
+//! of this crate. `pi-coding-agent` ships the pi binary's CLI, TUI,
+//! halo loop, evolve daemon, and other binary-side modules — none
+//! of which are part of the embedder contract.
 //!
 //! ```ignore
-//! use pi_coding_agent::sdk::*;
+//! // Embedders use pi-sdk:
+//! use pi_sdk::{quick_start, AgentEventKind, AuthMethod};
 //!
 //! # tokio_test::block_on(async {
-//! let auth = AuthStorage::from_env();
-//! let registry = ModelRegistry::new(auth.clone());
-//! let session_mgr = SessionManager::in_memory();
-//! let cfg = build_runtime_config(BuildConfig {
-//!     auth,
-//!     registry,
-//!     session_manager: session_mgr,
-//!     ..Default::default()
-//! }).unwrap();
-//! let (_runtime, session) = create_agent_session(cfg, None).unwrap();
-//! let _ = session.prompt("hello".into()).await;
+//! let runtime = quick_start("anthropic", "claude-haiku-4-5-20251001").unwrap();
+//! runtime.config().auth_storage.set(
+//!     "anthropic",
+//!     AuthMethod::ApiKey { value: "sk-...".into() },
+//! );
+//! let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+//! let session = runtime.create_session(Some(tx)).unwrap();
+//! tokio::spawn(async move {
+//!     let _ = session.prompt("hello".into()).await;
+//! });
+//! while let Some(evt) = rx.recv().await {
+//!     if matches!(evt.kind, AgentEventKind::TurnComplete) { break; }
+//! }
 //! # });
 //! ```
+//!
+//! See `crates/pi-sdk/README.md` and `crates/pi-sdk/examples/` for
+//! the full embedder surface.
 
 pub mod auto_approve;
 pub mod autoresearch;
@@ -38,7 +47,6 @@ pub mod picker;
 pub mod picker_model;
 pub mod prompts;
 pub mod renderer;
-pub mod sdk;
 pub mod settings_ui;
 pub mod share;
 pub mod skills;
