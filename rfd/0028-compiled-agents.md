@@ -1,7 +1,7 @@
 # RFD 0028 — Compiled agents from TOML manifest (meta + split into A/B/C/D)
 
-- **Status:** Draft (v0.4)
-- **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1, v0.2, v0.3 passes)
+- **Status:** Draft (v0.5; meta READY in v0.4, Commit A spec READY pending)
+- **Author:** Giuseppe Massaro (drafted with claude-opus-4-7, revised after rfd-critic v0.1, v0.2, v0.3, Commit A v1 passes)
 - **Created:** 2026-05-03
 - **Implemented:** *(pending sub-commits Commit A–Commit D)*
 
@@ -308,7 +308,7 @@ You are a flaky-test bisector. Identify the seed line.
 """
 max_session_tokens             = 200_000  # default 10_000_000 (pi-sdk H2 default).
 max_tool_invocations_per_turn  = 50       # default 64 (pi-sdk H2 default).
-max_recursion                  = 4        # default 3 (pi-sdk H2 default).
+max_recursion                  = 4        # default 8 (pi-sdk H2 default).
 ```
 
 ##### A.2 — Crate layout
@@ -339,7 +339,7 @@ Commit A delivers `manifest.rs` + `error.rs` + `parse.rs` + the
 use serde::{Deserialize, Serialize};
 
 /// Top-level manifest, v1.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]   // v1 strict — see A.5 for the two-pass parse.
 pub struct Manifest {
     pub schema_version: u32,    // MUST equal 1 for v1; checked in pass 2.
@@ -352,7 +352,7 @@ pub struct Manifest {
     pub runtime:  RuntimeConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentMeta {
     pub name:        String,    // pattern: ^[a-z][a-z0-9_-]{0,63}$
@@ -360,7 +360,7 @@ pub struct AgentMeta {
     pub version:     String,    // SemVer; parsed via `semver::Version::parse`.
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     pub name:  ProviderName,
@@ -381,14 +381,14 @@ pub enum ThinkingLevel {
     #[default] Off, Low, Medium, High, Xhigh,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretsConfig {
     #[serde(default)]
     pub required: Vec<String>,  // each MUST match `^[A-Z][A-Z0-9_]*$`.
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsConfig {
     #[serde(default = "default_tool_allowlist")]
@@ -401,26 +401,48 @@ fn default_tool_allowlist() -> Vec<String> {
     vec!["read".into(), "grep".into(), "find".into(), "ls".into()]
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     pub system_prompt: String,    // 1-65_536 chars; required.
     #[serde(default = "default_max_session_tokens")]
     pub max_session_tokens: u64,
+    // u64 (not usize) on the wire so manifests are platform-portable;
+    // Commit B lowers via `usize::try_from(n).expect(...)` against the
+    // pi-sdk builder methods which take `usize` (verified
+    // pi-agent-core/src/runtime.rs:386,394).
     #[serde(default = "default_max_tool_invocations_per_turn")]
-    pub max_tool_invocations_per_turn: u32,
+    pub max_tool_invocations_per_turn: u64,
     #[serde(default = "default_max_recursion")]
-    pub max_recursion: u32,
+    pub max_recursion: u64,
 }
 
 fn default_max_session_tokens()             -> u64 { 10_000_000 }
-fn default_max_tool_invocations_per_turn()  -> u32 { 64 }
-fn default_max_recursion()                  -> u32 { 3 }
+fn default_max_tool_invocations_per_turn()  -> u64 { 64 }
+fn default_max_recursion()                  -> u64 { 8 }
 ```
 
-The defaults are pulled from pi-sdk's `RuntimeConfig::builder()`
-defaults (`pi-agent-core/src/runtime.rs` H2 invariants), so an
-omitted block produces the same caps as a hand-built embedder.
+The defaults match pi-sdk's `RuntimeConfig::default()`
+(`pi-agent-core/src/runtime.rs:445-447` — `max_session_tokens =
+10_000_000`, `max_tool_invocations_per_turn = 64`,
+`max_recursion = 8`), so an omitted block produces the same caps
+as a hand-built embedder.
+
+**Wire vs runtime types:** `max_tool_invocations_per_turn` and
+`max_recursion` are `u64` on the manifest wire but `usize` in
+pi-sdk's runtime fields. Commit B's codegen lowers via
+`usize::try_from(n)?` and surfaces an `OutOfRange` error if the
+manifest specified a value beyond the host platform's `usize::MAX`
+(would only matter on a hypothetical 16-bit target). `u64` here
+is deliberate — keeps the schema platform-portable.
+
+**ProviderName wire-form parity:** the `kebab-case` rename emits
+`"anthropic" | "openai" | "openai-compat" | "google" | "bedrock"
+| "azure-openai"` — identical to the strings pi-sdk's
+`Settings.provider: String` expects (verified
+`pi-ai/src/auth.rs:102`, `pi-ai/src/registry.rs:711`). Commit B's
+codegen passes them through as `serde_json::to_string(&p.name)`-
+equivalent string slices with no remapping.
 
 ##### A.4 — Validation rules (post-parse, semantic)
 
@@ -429,22 +451,38 @@ Result<(), ManifestError>` pass:
 
 | Rule | Failure |
 |---|---|
-| `schema_version == 1` | `SchemaTooNew { found, supported: 1 }` if `> 1`; `SchemaTooOld { found }` if `< 1`. |
-| `agent.name` matches `^[a-z][a-z0-9_-]{0,63}$` | `InvalidAgentName(name)`. |
-| `agent.description.len()` in `1..=1024` | `InvalidDescription { len }`. |
+| `schema_version == 1` | `SchemaTooNew { found, supported: 1 }` if `> 1`; `SchemaTooOld { found }` if `< 1` (i.e., `0`). |
+| `agent.name` matches `^[a-z][a-z0-9_-]{0,63}$` (case-sensitive, lowercase only) | `InvalidAgentName(name)`. |
+| `agent.description.len()` in `1..=1024` (UTF-8 bytes, not chars) | `InvalidDescription { len }`. |
 | `agent.version` parses as `semver::Version` | `InvalidVersion(name, e)`. |
-| `provider.model.len()` in `1..=256` | `InvalidModelLen { len }`. |
-| every `secrets.required[i]` matches `^[A-Z][A-Z0-9_]*$` | `InvalidEnvVarName(name)`. |
-| every `tools.allowlist[i]` ∈ `{read, write, edit, bash, grep, find, ls, web_search}` | `UnknownTool(name)`. |
+| `provider.name` is a valid `ProviderName` enum variant | enforced at serde layer; produces `Parse(unknown variant '...')`. |
+| `provider.thinking` is a valid `ThinkingLevel` variant | enforced at serde layer (closed enum); no semantic rule. |
+| `provider.model.len()` in `1..=256` (UTF-8 bytes) | `InvalidModelLen { len }`. |
+| every `secrets.required[i]` matches `^[A-Z][A-Z0-9_]*$` (case-sensitive, uppercase only) | `InvalidEnvVarName(name)`. |
+| every `tools.allowlist[i]` ∈ `{read, write, edit, bash, grep, find, ls, web_search}` (case-sensitive, lowercase only — `"Read"` produces `UnknownTool("Read")`, no normalization) | `UnknownTool(name)`. |
 | if `tools.disallow_unsafe`, `allowlist ∩ {bash, write, edit} == ∅` | `UnsafeToolWithDisallow(name)`. |
-| `tools.allowlist` is non-empty after dedup | `EmptyAllowlist`. |
-| `runtime.system_prompt.len()` in `1..=65_536` | `InvalidSystemPromptLen { len }`. |
+| `tools.allowlist` is non-empty after silent dedup | `EmptyAllowlist`. |
+| `runtime.system_prompt.len()` in `1..=65_536` (UTF-8 bytes) | `InvalidSystemPromptLen { len }`. |
 | `runtime.max_session_tokens` ≥ 1_000 | `MaxSessionTokensTooLow { found }`. |
 | `runtime.max_tool_invocations_per_turn` ≥ 1 | `MaxInvocationsTooLow`. |
-| `runtime.max_recursion` ≥ 1 and ≤ 16 | `MaxRecursionOutOfRange { found }`. |
+| `runtime.max_recursion` in `1..=16` | `MaxRecursionOutOfRange { found }`. |
+| `usize::try_from(max_tool_invocations_per_turn).is_ok()` | `OutOfRangeForUsize { field, found }`. |
+| `usize::try_from(max_recursion).is_ok()` | `OutOfRangeForUsize { field, found }`. |
 
 Validation is total — every error variant carries the bad input
 so the CLI prints the offending value, not just the rule name.
+
+**Dedup behavior:** `tools.allowlist` is silently de-duplicated
+in `validate(&Manifest)` before the `EmptyAllowlist` check —
+duplicates are NOT a parse error, just a no-op. The `Manifest`
+returned to Commit B carries the de-duplicated `Vec<String>`.
+
+**Enum-validation note:** `ProviderName` and `ThinkingLevel` are
+closed enums with `deny_unknown_fields`-equivalent semantics at
+the serde layer (an unknown variant produces a serde
+`unknown variant 'foo', expected one of ...` error which the
+parser surfaces as `ManifestError::Parse`). No separate
+validation rule needed.
 
 ##### A.5 — Two-pass parser (per §Cross-cutting #1)
 
@@ -466,10 +504,10 @@ pub fn parse(raw: &str) -> Result<Manifest, ManifestError> {
     // `unknown field 'foo'`.
     let v: VersionShim = toml::from_str(raw)
         .map_err(ManifestError::VersionDetect)?;
-    if v.schema_version != 1 {
-        return Err(ManifestError::SchemaTooNew {
-            found: v.schema_version, supported: 1,
-        });
+    match v.schema_version {
+        1 => {}
+        0 => return Err(ManifestError::SchemaTooOld { found: 0 }),
+        n => return Err(ManifestError::SchemaTooNew { found: n, supported: 1 }),
     }
     // PASS 2: strict v1 parse with deny_unknown_fields.
     let m: Manifest = toml::from_str(raw).map_err(ManifestError::Parse)?;
@@ -478,10 +516,19 @@ pub fn parse(raw: &str) -> Result<Manifest, ManifestError> {
 }
 ```
 
-Test (Commit A regression): a manifest with
-`schema_version = 2` + a v2-introduced key fails with
-`ManifestError::SchemaTooNew { found: 2, supported: 1 }` —
-NOT `ManifestError::Parse(unknown field 'foo')`.
+Tests (Commit A regression):
+
+- `schema_version = 2` + a v2-introduced key fails with
+  `ManifestError::SchemaTooNew { found: 2, supported: 1 }` —
+  NOT `ManifestError::Parse(unknown field 'foo')`.
+- `schema_version = 0` fails with
+  `ManifestError::SchemaTooOld { found: 0 }`.
+- `schema_version = -1` (or any non-`u32`-representable integer)
+  fails at the toml layer surfaced as
+  `ManifestError::VersionDetect(_)`.
+- A file containing only invalid UTF-8 bytes fails as
+  `ManifestError::VersionDetect(_)` (toml parse fails before
+  the shim deserializes).
 
 ##### A.6 — Error type
 
@@ -538,7 +585,10 @@ pub enum ManifestError {
     MaxInvocationsTooLow,
 
     #[error("runtime.max_recursion {found} out of range 1..=16")]
-    MaxRecursionOutOfRange { found: u32 },
+    MaxRecursionOutOfRange { found: u64 },
+
+    #[error("runtime.{field} = {found} exceeds usize::MAX on this host")]
+    OutOfRangeForUsize { field: &'static str, found: u64 },
 }
 ```
 
@@ -564,20 +614,50 @@ covering every valid + every error variant.
 ##### A.8 — Test plan
 
 - **Round-trip:** `toml::to_string(&Manifest)` then `parse` returns
-  an equal `Manifest` (PartialEq derive on every type).
+  an equal `Manifest` (PartialEq+Eq derived on every type per A.3).
 - **Schema-version-too-new:** `schema_version = 2 \n agent.name =
   "x"` (with all v1 keys present) fails with `SchemaTooNew`,
   not `Parse(unknown field)`.
+- **Schema-version-too-old:** `schema_version = 0` fails with
+  `SchemaTooOld { found: 0 }`.
 - **Defaults applied:** a manifest omitting `[secrets]`, `[tools]`,
   and `runtime.max_*` fields parses cleanly with defaults
   (`required = []`, `allowlist = ["read","grep","find","ls"]`,
-  `max_session_tokens = 10_000_000`, etc.).
+  `max_session_tokens = 10_000_000`,
+  `max_tool_invocations_per_turn = 64`, `max_recursion = 8`).
 - **disallow_unsafe rejects bash:** `tools.allowlist = ["bash"]
   + tools.disallow_unsafe = true` fails with
   `UnsafeToolWithDisallow("bash")`.
+- **Tool-name case sensitivity:** `tools.allowlist = ["Read"]`
+  fails with `UnknownTool("Read")` (no normalization).
+- **Allowlist dedup:** `tools.allowlist = ["read", "grep", "read"]`
+  parses to a `Vec` of `["read", "grep"]` after `validate()`;
+  no error.
+- **Length boundaries — accept:** description = exactly 1024
+  bytes, system_prompt = exactly 65_536 bytes, model = exactly
+  256 bytes all parse + validate cleanly.
+- **Length boundaries — reject:** each of the above + 1 byte
+  fails with the matching `Invalid*Len` variant carrying the
+  exact length.
+- **`max_recursion` boundaries:** 1, 8, 16 accept; 0 fails with
+  `MaxRecursionOutOfRange { found: 0 }`; 17 fails with
+  `MaxRecursionOutOfRange { found: 17 }`.
+- **`OutOfRangeForUsize`:** a manifest with
+  `max_tool_invocations_per_turn = 18_446_744_073_709_551_615`
+  (`u64::MAX`) on a 32-bit target (or any host where `u64 >
+  usize::MAX`) fails with `OutOfRangeForUsize`. CI runs the
+  test conditionally on `cfg(target_pointer_width = "32")` so
+  it's a no-op on 64-bit hosts but compiles everywhere.
+- **Empty / garbage:**
+  - empty file → `VersionDetect(_)` (toml's "missing field
+    `schema_version`").
+  - file with only `schema_version = 1` (and no other required
+    blocks) → `Parse(_)` ("missing field `agent`").
+  - file containing invalid UTF-8 bytes → `VersionDetect(_)`.
 - **Per-error fixture file:** one `.toml` per `ManifestError`
   variant under `crates/pi-build/tests/fixtures/invalid/`; the
-  test sweeps and asserts the exact variant.
+  test sweeps and asserts the exact variant via
+  `matches!(err, ManifestError::Foo { .. })`.
 
 ##### A.9 — Out of scope (explicitly noted for future commits)
 
@@ -585,7 +665,10 @@ covering every valid + every error variant.
   — pi-tools-core today reads tool params from per-invocation
   JSON, not from registration time; manifest-time overrides need
   pi-tools API changes. Reserved syntax: `[tools.<name>]` table
-  rejected in v1 with `Parse(unknown field 'tools.bash')` for now.
+  rejected in v1 by serde's `deny_unknown_fields` on `ToolsConfig`
+  (`ManifestError::Parse(unknown field 'bash')`; the toml-rs
+  error span points at the `[tools.bash]` line, but the field
+  name in the message is `bash` not `tools.bash`).
 - **Custom Rust tools** (`[[tool]] kind = "rust" path = "..."`)
   — v2.
 - **Sandbox provider selection** (`[runtime] sandbox = "microvm"`)
@@ -924,6 +1007,48 @@ verify the *split* itself works:
   significantly).
 
 ## Revision history
+
+- **v0.5 (2026-05-03):** Commit A expanded from sketch to full
+  spec (sub-sections A.1-A.9, +303 lines in `e873917`); rfd-critic
+  Commit A pass returned `NEEDS_REVISION` with 3 critical
+  findings + 5 underspec'd. v0.5 closes:
+  - **Critical: `max_recursion` default wrong (3 vs 8).** Verified
+    real H2 default is 8 (`pi-agent-core/src/runtime.rs:447`).
+    Fixed in both A.1 comment and A.3 default fn.
+  - **Critical: type mismatch (`u32` vs `usize`).** Verified
+    pi-sdk fields are `usize` (`runtime.rs:300,306`) and the
+    builder setters take `usize` (`:386,394`). Manifest wire
+    types changed to `u64` (platform-portable, then lowered via
+    `usize::try_from(n)?` in Commit B); added `OutOfRangeForUsize`
+    error variant + matching A.4 validation rule.
+  - **Critical: missing `PartialEq`/`Eq` derives.** A.8's
+    round-trip test required them but A.3 only derived
+    `Debug, Clone, Serialize, Deserialize`. Added `PartialEq, Eq`
+    to every struct.
+  - **Underspec'd: `provider.thinking` validation.** Added a row
+    explaining no semantic rule needed (closed enum, serde-layer
+    enforcement). Same note added for `provider.name`.
+  - **Underspec'd: `tools.allowlist` dedup behavior.** Specified
+    silent dedup in `validate()`; `EmptyAllowlist` error fires
+    only if dedup empties the list.
+  - **Underspec'd: tool name case sensitivity.** Specified
+    case-sensitive lowercase-only match (`"Read"` →
+    `UnknownTool("Read")`, no normalization).
+  - **Underspec'd: `schema_version = 0` reachability.** A.5
+    parser routes `0` → `SchemaTooOld` and `> 1` → `SchemaTooNew`;
+    `SchemaTooOld` variant is now reachable.
+  - **Underspec'd: A.8 fixture coverage.** Added length-boundary
+    (±1 byte at description/system_prompt/model boundaries),
+    `max_recursion` boundaries (0/1/8/16/17),
+    `OutOfRangeForUsize` (cfg-gated 32-bit), empty-file, and
+    binary-garbage cases.
+  - **A.9 wording fix:** changed `[tools.bash]` rejection error
+    text from `Parse(unknown field 'tools.bash')` to
+    `Parse(unknown field 'bash')` (serde's actual output —
+    field is `bash` under `ToolsConfig`).
+  - Added explicit "ProviderName wire-form parity" note in A.3
+    confirming Commit B can pass `kebab-case` strings through to
+    `Settings.provider` with no remapping.
 
 - **v0.4 (2026-05-03):** rfd-critic v0.3 pass returned
   `NEEDS_REVISION` solely because the v0.3 `_runtime` lifetime
