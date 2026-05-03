@@ -1,0 +1,19 @@
+# Per-error fixture: ManifestError::UnsafeToolWithDisallow.
+# disallow_unsafe = true rejects bash/write/edit at validate-time.
+schema_version = 1
+
+[agent]
+name        = "x"
+description = "y"
+version     = "0.1.0"
+
+[provider]
+name  = "anthropic"
+model = "m"
+
+[tools]
+allowlist       = ["bash"]
+disallow_unsafe = true
+
+[runtime]
+system_prompt = "p"

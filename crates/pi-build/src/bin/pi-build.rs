@@ -34,7 +34,7 @@ fn main() -> ExitCode {
 
     // Codegen form: `pi-build <agent.toml> [opts]` (Commit B).
     let path = PathBuf::from(&args[0]);
-    let opts = match parse_build_opts(&args[1..], &path) {
+    let opts = match parse_build_opts(&args[1..]) {
         Ok(o) => o,
         Err(msg) => {
             eprintln!("pi-build: {msg}\n{USAGE}");
@@ -71,7 +71,7 @@ fn run_validate(path: PathBuf) -> ExitCode {
     }
 }
 
-fn parse_build_opts(args: &[String], _path: &std::path::Path) -> Result<BuildArgs, String> {
+fn parse_build_opts(args: &[String]) -> Result<BuildArgs, String> {
     let mut out_dir: Option<PathBuf> = None;
     let mut force = false;
     let mut build = false;
@@ -147,10 +147,14 @@ fn run_build(path: PathBuf, args: BuildArgs) -> ExitCode {
     if let Err(e) = pi_build::write_tree(&tree, &opts) {
         eprintln!("pi-build: {e}");
         return match e {
-            pi_build::BuildError::OutDirNotEmpty(_) => ExitCode::from(73),
-            pi_build::BuildError::Io { .. } => ExitCode::from(73),
-            // Other variants don't surface during write_tree.
-            _ => ExitCode::from(1),
+            pi_build::BuildError::OutDirNotEmpty(_) | pi_build::BuildError::Io { .. } => {
+                ExitCode::from(73)
+            }
+            // write_tree only returns OutDirNotEmpty or Io variants.
+            // CargoNotFound / CargoFailed surface from cargo_build below.
+            pi_build::BuildError::CargoNotFound | pi_build::BuildError::CargoFailed(_) => {
+                unreachable!("cargo errors don't originate from write_tree")
+            }
         };
     }
     println!("Wrote {}", opts.out_dir.display());

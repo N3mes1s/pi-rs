@@ -136,7 +136,21 @@ pub async fn cargo_build(opts: &BuildOptions) -> Result<BuildOutcome, BuildError
         return Err(BuildError::CargoFailed(status));
     }
 
-    // target/{<triple>/}{release|debug}/<agent_name>
+    // target/{<triple>/}{release|debug}/<basename-of-out-dir-stripped-of-"-build">
+    //
+    // Note: cargo names the binary after the `[package].name` in the
+    // generated Cargo.toml, which the codegen sets to the manifest's
+    // `agent.name`. When the operator chose the default `--out =
+    // <agent_name>-build/`, stripping `-build` from the dir basename
+    // round-trips to `agent.name`. With a custom `--out`, the binary
+    // name is whatever cargo derived from `[package].name` in the
+    // generated Cargo.toml — the dir-basename heuristic below may
+    // produce a non-existent path when the operator used `--out
+    // some-other-dir`. Acceptable for v1 since the operator can
+    // always look in `<out>/target/{release,debug}/<agent_name>`
+    // directly; precise binary-path discovery is a v2 follow-up
+    // that would `cargo metadata --format-version 1` to read the
+    // resolved package name.
     let agent_name = opts
         .out_dir
         .file_name()

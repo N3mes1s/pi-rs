@@ -1,0 +1,16 @@
+# Per-error fixture: ManifestError::MaxRecursionOutOfRange.
+# 1..=16 is the v1 valid range; 17 is just past.
+schema_version = 1
+
+[agent]
+name        = "x"
+description = "y"
+version     = "0.1.0"
+
+[provider]
+name  = "anthropic"
+model = "m"
+
+[runtime]
+system_prompt = "p"
+max_recursion = 17

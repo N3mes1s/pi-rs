@@ -70,39 +70,61 @@ fn pi_build_lock_is_byte_identical_across_runs() {
     assert_eq!(a.pi_build_lock, b.pi_build_lock);
 }
 
-// --- C.7 — `--debug` produces target/debug/<name>, not release ---
+// --- C.7 — `--debug` flips both the cargo invocation AND BuildOutcome.binary_path ---
 
-#[test]
-fn debug_profile_changes_expected_binary_path() {
-    // We don't run cargo here (too heavy + needs network for pi-sdk).
-    // What we can verify: the BuildOutcome.binary_path computation
-    // routes via `target/debug/` for --debug and `target/release/`
-    // for --release. That's a pure-function shape test on the
-    // build module's path-derivation logic — exercised by spawning
-    // cargo against a stand-in tree where cargo doesn't get to the
-    // build phase (we fail before).
-    //
-    // Approach: use the `cargo not found` failure path (PATH=empty)
-    // which short-circuits before binary_path matters; verify
-    // BuildOptions{release: false} round-trips through the API.
-    let opts_release = BuildOptions {
-        out_dir: std::path::PathBuf::from("/tmp/pi-build-test-release"),
+#[tokio::test]
+async fn release_profile_drives_release_argv_and_release_binary_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cargo_path, recorder) = build_mock_cargo(tmp.path());
+    let out_dir = tmp.path().join("agent-build");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    std::fs::write(out_dir.join("Cargo.toml"), "").unwrap();
+
+    let opts = BuildOptions {
+        out_dir: out_dir.clone(),
         force: false,
         build: true,
         target: None,
         release: true,
-        cargo_path: None,
+        cargo_path: Some(cargo_path),
     };
-    let opts_debug = BuildOptions {
-        out_dir: std::path::PathBuf::from("/tmp/pi-build-test-debug"),
+    let outcome = cargo_build(&opts).await.expect("mock cargo exits 0");
+    let argv = std::fs::read_to_string(&recorder).unwrap();
+    assert!(argv.lines().any(|l| l == "--release"), "release flag forwarded: {argv}");
+    assert!(
+        outcome.binary_path.to_string_lossy().contains("/target/release/"),
+        "binary_path must route through target/release/, got {}",
+        outcome.binary_path.display(),
+    );
+}
+
+#[tokio::test]
+async fn debug_profile_drops_release_argv_and_routes_debug_binary_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cargo_path, recorder) = build_mock_cargo(tmp.path());
+    let out_dir = tmp.path().join("agent-build");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    std::fs::write(out_dir.join("Cargo.toml"), "").unwrap();
+
+    let opts = BuildOptions {
+        out_dir: out_dir.clone(),
         force: false,
         build: true,
         target: None,
         release: false,
-        cargo_path: None,
+        cargo_path: Some(cargo_path),
     };
-    assert!(opts_release.release);
-    assert!(!opts_debug.release);
+    let outcome = cargo_build(&opts).await.expect("mock cargo exits 0");
+    let argv = std::fs::read_to_string(&recorder).unwrap();
+    assert!(
+        !argv.lines().any(|l| l == "--release"),
+        "--release MUST NOT appear in --debug argv: {argv}",
+    );
+    assert!(
+        outcome.binary_path.to_string_lossy().contains("/target/debug/"),
+        "binary_path must route through target/debug/, got {}",
+        outcome.binary_path.display(),
+    );
 }
 
 // --- C.7 — no extraneous flags via wrapping cargo mock ---

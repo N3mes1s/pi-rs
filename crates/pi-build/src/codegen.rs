@@ -182,7 +182,9 @@ async fn main() -> std::process::ExitCode {{
     // §Cross-cutting #4: stdout JSONL is `serde_json::to_string(&AgentEvent)`.
     // Use `writeln!` over a locked stdout handle so a broken-pipe error
     // (operator pipes through `head` etc.) ends the pump gracefully
-    // rather than panicking on EPIPE inside println!.
+    // rather than panicking on EPIPE inside println!. A serde error
+    // on a single event is logged to stderr and skipped (don't crash
+    // a long-running agent on one malformed line).
     let jsonl = std::env::args().any(|a| a == "--jsonl");
     let pump = tokio::spawn(async move {{
         use std::io::Write as _;
@@ -190,7 +192,13 @@ async fn main() -> std::process::ExitCode {{
         while let Some(evt) = event_rx.recv().await {{
             let mut handle = stdout.lock();
             let r = if jsonl {{
-                writeln!(handle, "{{}}", serde_json::to_string(&evt).unwrap())
+                match serde_json::to_string(&evt) {{
+                    Ok(s) => writeln!(handle, "{{s}}"),
+                    Err(e) => {{
+                        eprintln!("pi-agent: skipping unserialisable event: {{e}}");
+                        Ok(())
+                    }}
+                }}
             }} else if let AgentEventKind::AssistantTextDelta {{ text }} = &evt.kind {{
                 write!(handle, "{{text}}")
             }} else {{
@@ -498,8 +506,11 @@ mod tests {
         assert!(r.main_rs.contains("with_max_tool_invocations_per_turn(50usize)"));
         assert!(r.main_rs.contains("with_max_recursion(4usize)"));
         assert!(r.main_rs.contains("with_max_session_tokens(200000u64)"));
-        // §Cross-cutting #4: serde_json on AgentEvent.
-        assert!(r.main_rs.contains("serde_json::to_string(&evt).unwrap()"));
+        // §Cross-cutting #4: serde_json on AgentEvent. Now wrapped
+        // in a match (post-pass-2 reviewer fix — don't crash a
+        // long-running agent on a single unserialisable event).
+        assert!(r.main_rs.contains("serde_json::to_string(&evt)"));
+        assert!(r.main_rs.contains("Ok(s) => writeln!"));
         // B.6 lowering — anthropic + ANTHROPIC_API_KEY pair literal.
         assert!(r.main_rs.contains(
             r#"from_env_explicit([("anthropic", "ANTHROPIC_API_KEY")])"#

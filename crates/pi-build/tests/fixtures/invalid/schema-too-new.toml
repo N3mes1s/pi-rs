@@ -1,0 +1,18 @@
+# Per-error fixture: ManifestError::SchemaTooNew.
+# v2-introduced keys (`new_v2_key`) are silently ignored by the
+# permissive shim in pass 1; the SchemaTooNew error fires before
+# pass 2's deny_unknown_fields would surface them.
+schema_version = 2
+new_v2_key = "anything goes here"
+
+[agent]
+name        = "x"
+description = "y"
+version     = "0.1.0"
+
+[provider]
+name  = "anthropic"
+model = "m"
+
+[runtime]
+system_prompt = "p"

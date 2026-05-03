@@ -328,3 +328,41 @@ fn validate_runs_on_already_parsed_manifest() {
     let mut m: Manifest = toml::from_str(&raw).expect("toml parse");
     validate(&mut m).expect("validate should pass on dice-oracle");
 }
+
+// --- Per-error fixture sweep (RFD A.8 promise) ---
+//
+// Every `tests/fixtures/invalid/*.toml` file maps to one
+// `ManifestError` variant. Inline-string fixtures above cover
+// the same surface; the directory sweep additionally honours
+// the spec's exact wording ("one .toml per ManifestError variant").
+
+#[test]
+fn invalid_fixture_dir_files_each_produce_their_named_error() {
+    use pi_build::ManifestError;
+    let dir = format!("{FIXTURES}/invalid");
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("invalid fixture dir exists")
+        .filter_map(|r| r.ok())
+        .filter(|e| e.path().extension().map_or(false, |x| x == "toml"))
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "no invalid fixtures found; A.8 sweep needs at least one .toml here"
+    );
+
+    for entry in entries {
+        let path = entry.path();
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        let raw = std::fs::read_to_string(&path).expect("read fixture");
+        let err = parse(&raw).expect_err(&format!("{name} fixture should fail to parse"));
+        // Filename → expected error variant matcher.
+        let matched = match (name.as_str(), &err) {
+            ("schema-too-new", ManifestError::SchemaTooNew { found: 2, supported: 1 }) => true,
+            ("unsafe-tool-with-disallow", ManifestError::UnsafeToolWithDisallow(s)) if s == "bash" => true,
+            ("invalid-agent-name", ManifestError::InvalidAgentName(s)) if s == "BadName" => true,
+            ("max-recursion-out-of-range", ManifestError::MaxRecursionOutOfRange { found: 17 }) => true,
+            _ => false,
+        };
+        assert!(matched, "fixture {name} produced unexpected error: {err:?}");
+    }
+}
