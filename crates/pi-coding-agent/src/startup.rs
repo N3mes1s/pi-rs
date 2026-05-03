@@ -347,26 +347,39 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         // Strip any builtins that extensions declare they replace, *before*
         // registering the extension tools so there are no duplicates.
         extensions::apply_replacements(&mut tools, &loaded_exts);
-        for t in extensions::extension_tools(&loaded_exts) {
-            // Per RFD 0027 §4.5 #5 (Hardening H3) + code-review
-            // finding #4 (pass-2): apply_replacements above already
-            // unregistered builtins that extensions declared they
-            // replace. So at this point each extension tool's name
-            // SHOULD be unique. Use the strict `register` path so a
-            // collision (two extensions both claiming the same name
-            // without declaring each other in `replaces_builtin`)
-            // surfaces as a hard startup error instead of silently
-            // shadowing — that pattern was the exact pre-H3 bypass
-            // we set out to kill, and the previous use of
-            // register_or_replace re-introduced it one layer up.
+        // Per RFD 0027 §4.5 #5 (Hardening H3) + code-review
+        // finding #4 (pass-2) + finding #5 (pass-3): apply_replacements
+        // above already unregistered builtins that extensions declared
+        // they replace. Each extension tool's name SHOULD be unique
+        // by this point. Use the strict `register` path so a collision
+        // surfaces as a hard startup error. Also track which extension
+        // contributed each tool name so the panic message names BOTH
+        // colliding extensions, not just the tool name (pass-3 #5: the
+        // pre-fix message left the operator grepping all manifests).
+        let mut owners: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (owner, t) in extensions::extension_tools_with_owner(&loaded_exts) {
             let name = t.spec().name.clone();
-            tools.register(t).unwrap_or_else(|_| {
+            if let Some(prev_owner) = owners.get(&name) {
                 panic!(
-                    "extension tool collision: `{name}` registered by multiple extensions \
-                     and not declared in `replaces_builtin` — fix the offending \
-                     extension manifest"
+                    "extension tool collision on `{name}`: \
+                     extensions `{prev_owner}` and `{owner}` both register it \
+                     and neither declares the other in `replaces_builtin` — \
+                     edit one extension manifest to add the other to its \
+                     `replaces_builtin` list (or rename the tool)"
+                );
+            }
+            tools.register(t).unwrap_or_else(|_| {
+                // The pre-loop `apply_replacements` should have stripped
+                // builtins, so a DuplicateName here means the extension
+                // tried to register a builtin name without declaring
+                // the replacement. Same operator action.
+                panic!(
+                    "extension `{owner}` tool `{name}` collides with an unstripped \
+                     builtin — declare it in `replaces_builtin` in the manifest"
                 )
             });
+            owners.insert(name, owner);
         }
         // Fire-and-forget startup hooks (errors are only warned, never fatal).
         extensions::run_startup_hooks(&loaded_exts).await;

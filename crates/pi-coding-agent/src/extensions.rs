@@ -282,14 +282,32 @@ fn load_one(root: &Path) -> Option<LoadedExtension> {
 
 /// Build `Tool` adapters for every tool exported by every extension.
 pub fn extension_tools(exts: &[LoadedExtension]) -> Vec<Arc<dyn Tool>> {
-    let mut out: Vec<Arc<dyn Tool>> = Vec::new();
+    extension_tools_with_owner(exts)
+        .into_iter()
+        .map(|(_owner, t)| t)
+        .collect()
+}
+
+/// Like [`extension_tools`] but pairs each tool with the manifest
+/// name of the extension that registered it. Per RFD 0027 §4.5 #5
+/// + code-review pass-3 finding #5: when two extensions collide on
+/// a tool name, the panic message in startup.rs needs to name both
+/// extensions, not just the tool. Returning `(owner, tool)` pairs
+/// lets the caller track which extension contributed which name.
+pub fn extension_tools_with_owner(
+    exts: &[LoadedExtension],
+) -> Vec<(String, Arc<dyn Tool>)> {
+    let mut out: Vec<(String, Arc<dyn Tool>)> = Vec::new();
     for ext in exts {
         let arc = Arc::new(ext.clone());
         for spec in &ext.manifest.tools {
-            out.push(Arc::new(ExtensionTool {
-                ext: arc.clone(),
-                spec: spec.clone(),
-            }));
+            out.push((
+                ext.manifest.name.clone(),
+                Arc::new(ExtensionTool {
+                    ext: arc.clone(),
+                    spec: spec.clone(),
+                }),
+            ));
         }
     }
     out
