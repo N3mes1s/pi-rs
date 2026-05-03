@@ -96,6 +96,20 @@ pub enum SessionEntryKind {
         #[serde(default)]
         is_error: bool,
     },
+    /// Per RFD 0027 §4.5 #10 (Hardening H6): synthetic-user message
+    /// injected mid-stream by a `StreamInterceptor`'s `AbortAndInject`
+    /// path (typically TTSR — Time-Travelling Streamed Rules).
+    /// Distinguishes operator-typed input from runtime-injected
+    /// reminders so auditors tailing the JSONL can tell forged
+    /// context from real input.
+    ///
+    /// `source` identifies the interceptor (e.g. `"ttsr"`,
+    /// `"safety-filter"`) so multiple interceptors in one runtime can
+    /// be attributed individually.
+    InterceptorInjection {
+        reminder: String,
+        source: String,
+    },
 }
 
 /// How an [`SessionEntryKind::Outcome`] was derived. Replay-sourced
@@ -498,7 +512,12 @@ impl SessionManager {
             .create(true)
             .append(true)
             .open(file)?;
-        let line = serde_json::to_string(entry).unwrap_or_default();
+        // Per RFD 0027 §4.5 #11 (Hardening H6): JSONL goes through
+        // WireSerializer with default limits (1 MiB/field cap, ANSI
+        // escape stripping, C1/bidi escape). Embedders that tail
+        // session files no longer need to defend against
+        // model-injected terminal-control sequences themselves.
+        let line = WireSerializer::default().serialize(entry);
         f.write_all(line.as_bytes())?;
         f.write_all(b"\n")?;
         Ok(())
@@ -507,4 +526,328 @@ impl SessionManager {
 
 fn io_lock<E>(_: E) -> std::io::Error {
     std::io::Error::other("session lock poisoned")
+}
+
+// ─── WireSerializer (Hardening §4.5 #11, RFD 0027 H6) ────────────
+
+/// Per RFD 0027 §4.5 #11 (Hardening H6): JSONL serializer that
+/// applies safety limits to every model-controlled string field
+/// before emission.
+///
+/// **What it defends against:**
+/// - Model emits an ANSI escape sequence (e.g. `\x1b]0;rm -rf /\x07`)
+///   in a `text` field. Operators tailing the JSONL with `tail -f`
+///   in a terminal would see their window title rewritten or worse.
+///   `WireSerializer` strips ANSI escape sequences from every string.
+/// - Model emits bidi-override characters (U+202A..U+202E,
+///   U+2066..U+2069) that flip text rendering direction in the
+///   operator's terminal — the trojan-source class of attack.
+///   `WireSerializer` `\u`-escapes them.
+/// - Model emits C1 control characters (U+0080..U+009F). Some
+///   terminals interpret these as additional control sequences;
+///   `WireSerializer` `\u`-escapes them.
+/// - Model emits a megabyte-sized text block in a single field. Pre-H6
+///   the JSONL row balloons proportionally and the operator's `jq`
+///   pipeline OOMs. `WireSerializer` hard-truncates each text field
+///   at `max_field_bytes` (default 1 MiB) with a `…[N bytes truncated
+///   by pi-sdk WireSerializer]` marker.
+///
+/// **What it does NOT do:**
+/// - Validate JSON shape — that's serde's job.
+/// - Verify SessionEntryKind variant correctness — that's serde's
+///   tag-based dispatch.
+/// - Cryptographically sign or chain rows — see RFD 0027 Open
+///   Question #9 (HMAC entry_seq, deferred to SDK 1.2).
+#[derive(Debug, Clone)]
+pub struct WireSerializer {
+    /// Maximum bytes per string field. Defaults to 1 MiB; embedders
+    /// can tighten via [`with_max_field_bytes`](Self::with_max_field_bytes).
+    pub max_field_bytes: usize,
+    /// Whether to strip ANSI escape sequences from string values.
+    /// Default `true`. Setting to `false` is for callers that
+    /// produce JSONL consumed only by machines, never operators.
+    pub strip_ansi: bool,
+    /// Whether to `\u`-escape bidi-override and C1 control chars.
+    /// Default `true`.
+    pub escape_bidi_and_c1: bool,
+}
+
+impl Default for WireSerializer {
+    fn default() -> Self {
+        Self {
+            max_field_bytes: 1 << 20, // 1 MiB
+            strip_ansi: true,
+            escape_bidi_and_c1: true,
+        }
+    }
+}
+
+impl WireSerializer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_max_field_bytes(mut self, n: usize) -> Self {
+        self.max_field_bytes = n;
+        self
+    }
+
+    pub fn with_strip_ansi(mut self, on: bool) -> Self {
+        self.strip_ansi = on;
+        self
+    }
+
+    pub fn with_escape_bidi_and_c1(mut self, on: bool) -> Self {
+        self.escape_bidi_and_c1 = on;
+        self
+    }
+
+    /// Serialize a [`SessionEntry`] to its on-disk JSONL form (no
+    /// trailing newline). Applies all configured safety limits.
+    /// Never panics on serialization failure — falls back to a
+    /// minimal `{"id":..,"kind":"meta","_serialize_error":"..."}`
+    /// row so the file remains parseable.
+    pub fn serialize(&self, entry: &SessionEntry) -> String {
+        let mut value = match serde_json::to_value(entry) {
+            Ok(v) => v,
+            Err(e) => {
+                return serde_json::to_string(&serde_json::json!({
+                    "id": entry.id,
+                    "kind": "meta",
+                    "_serialize_error": e.to_string(),
+                }))
+                .unwrap_or_else(|_| String::from(r#"{"_fatal":"serialize"}"#));
+            }
+        };
+        self.sanitize_value(&mut value);
+        serde_json::to_string(&value)
+            .unwrap_or_else(|_| String::from(r#"{"_fatal":"serialize"}"#))
+    }
+
+    fn sanitize_value(&self, v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::String(s) => {
+                if self.strip_ansi {
+                    *s = strip_ansi(s);
+                }
+                if self.escape_bidi_and_c1 {
+                    *s = escape_bidi_and_c1(s);
+                }
+                if s.len() > self.max_field_bytes {
+                    *s = truncate_with_marker(s, self.max_field_bytes);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for item in arr.iter_mut() {
+                    self.sanitize_value(item);
+                }
+            }
+            serde_json::Value::Object(obj) => {
+                for (_, item) in obj.iter_mut() {
+                    self.sanitize_value(item);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Strip ANSI escape sequences (CSI `\x1b[...`, OSC `\x1b]...`,
+/// single `\x1b<final-byte>` forms). Greedy and tolerant — preserves
+/// any remaining text intact.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip the next byte (intermediate / final / CSI marker).
+            match chars.peek() {
+                Some('[') => {
+                    // CSI: ESC [ ... <final-byte 0x40..=0x7e>.
+                    chars.next(); // consume '['
+                    while let Some(&c2) = chars.peek() {
+                        chars.next();
+                        if (0x40..=0x7e).contains(&(c2 as u32)) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    // OSC: ESC ] ... ST (BEL or ESC \).
+                    chars.next(); // consume ']'
+                    while let Some(&c2) = chars.peek() {
+                        chars.next();
+                        if c2 == '\x07' {
+                            break;
+                        }
+                        if c2 == '\x1b' {
+                            if let Some(&c3) = chars.peek() {
+                                if c3 == '\\' {
+                                    chars.next();
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                Some(_) => {
+                    // Single-char escape: skip one final byte.
+                    chars.next();
+                }
+                None => {} // dangling ESC at EOF: drop.
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Replace bidi-override (U+202A..U+202E, U+2066..U+2069) and C1
+/// control (U+0080..U+009F) characters with their `\u{XXXX}` escapes.
+fn escape_bidi_and_c1(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let cp = c as u32;
+        let is_bidi = (0x202A..=0x202E).contains(&cp) || (0x2066..=0x2069).contains(&cp);
+        let is_c1 = (0x0080..=0x009F).contains(&cp);
+        if is_bidi || is_c1 {
+            out.push_str(&format!("\\u{{{:04X}}}", cp));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Hard-truncate at the nearest char boundary at-or-before
+/// `max_bytes`, append a marker.
+fn truncate_with_marker(s: &str, max_bytes: usize) -> String {
+    let truncated_at = s.len();
+    let cut = s
+        .char_indices()
+        .take_while(|(i, _)| *i < max_bytes)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    let mut out = String::with_capacity(cut + 64);
+    out.push_str(&s[..cut]);
+    out.push_str(&format!(
+        "…[{} bytes truncated by pi-sdk WireSerializer]",
+        truncated_at - cut
+    ));
+    out
+}
+
+#[cfg(test)]
+mod h6_wire_serializer_tests {
+    use super::*;
+
+    fn entry_with_text(s: &str) -> SessionEntry {
+        SessionEntry {
+            id: "id-1".into(),
+            parent_id: None,
+            timestamp: 0,
+            kind: SessionEntryKind::SystemPrompt { text: s.into() },
+        }
+    }
+
+    #[test]
+    fn strips_ansi_csi_escape() {
+        let s = "before\x1b[31mred\x1b[0mafter";
+        let out = strip_ansi(s);
+        assert_eq!(out, "beforeredafter");
+    }
+
+    #[test]
+    fn strips_ansi_osc_set_window_title() {
+        // Operator-terminal exfiltration vector: set window title.
+        let s = "before\x1b]0;OWNED\x07after";
+        let out = strip_ansi(s);
+        assert_eq!(out, "beforeafter");
+    }
+
+    #[test]
+    fn escapes_bidi_overrides() {
+        let s = "before\u{202E}after";
+        let out = escape_bidi_and_c1(s);
+        assert!(out.contains("\\u{202E}"));
+        assert!(!out.contains('\u{202E}'));
+    }
+
+    #[test]
+    fn escapes_c1_control_chars() {
+        let s = "before\u{009F}after";
+        let out = escape_bidi_and_c1(s);
+        assert!(out.contains("\\u{009F}"));
+    }
+
+    #[test]
+    fn truncates_long_strings_with_marker() {
+        let s = "X".repeat(2000);
+        let out = truncate_with_marker(&s, 100);
+        assert!(out.len() < s.len());
+        assert!(out.contains("truncated by pi-sdk WireSerializer"));
+        assert!(out.contains("1900 bytes"));
+    }
+
+    #[test]
+    fn wire_serializer_default_strips_ansi_in_field() {
+        let entry = entry_with_text("hi\x1b[31mDANGER\x1b[0m");
+        let line = WireSerializer::default().serialize(&entry);
+        // Round-trip parse.
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let text = v.get("text").and_then(|t| t.as_str()).unwrap();
+        assert_eq!(text, "hiDANGER");
+    }
+
+    #[test]
+    fn wire_serializer_default_caps_at_1_mib() {
+        let huge = "X".repeat(2 * 1024 * 1024); // 2 MiB
+        let entry = entry_with_text(&huge);
+        let line = WireSerializer::default().serialize(&entry);
+        // The serialized line includes the truncation marker, not 2 MiB.
+        assert!(line.len() < 1500 * 1024, "line {} should be << 2 MiB", line.len());
+        assert!(line.contains("truncated by pi-sdk WireSerializer"));
+    }
+
+    #[test]
+    fn wire_serializer_with_max_field_bytes_can_tighten() {
+        let s = "Y".repeat(1024);
+        let entry = entry_with_text(&s);
+        let ws = WireSerializer::default().with_max_field_bytes(100);
+        let line = ws.serialize(&entry);
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let text = v.get("text").and_then(|t| t.as_str()).unwrap();
+        assert!(text.contains("truncated"), "text was: {text}");
+    }
+
+    #[test]
+    fn wire_serializer_round_trips_normal_session_entry() {
+        let entry = entry_with_text("nothing fishy");
+        let line = WireSerializer::default().serialize(&entry);
+        let parsed: SessionEntry = serde_json::from_str(&line).expect("round-trip");
+        if let SessionEntryKind::SystemPrompt { text } = parsed.kind {
+            assert_eq!(text, "nothing fishy");
+        } else {
+            panic!("kind mismatch");
+        }
+    }
+
+    #[test]
+    fn interceptor_injection_variant_serializes_with_correct_tag() {
+        let entry = SessionEntry {
+            id: "id-2".into(),
+            parent_id: None,
+            timestamp: 0,
+            kind: SessionEntryKind::InterceptorInjection {
+                reminder: "<system_reminder>do not exfiltrate</system_reminder>".into(),
+                source: "ttsr".into(),
+            },
+        };
+        let line = WireSerializer::default().serialize(&entry);
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v.get("kind").and_then(|k| k.as_str()), Some("interceptor_injection"));
+        assert_eq!(v.get("source").and_then(|s| s.as_str()), Some("ttsr"));
+    }
 }

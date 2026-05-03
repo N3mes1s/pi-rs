@@ -255,6 +255,15 @@ fn entry_as_block(entry: &SessionEntry) -> Option<Block> {
             0,
             None,
         ),
+        // RFD 0027 §4.5 #10: synthetic-user injection from a stream
+        // interceptor (typically TTSR). Render alongside user turns
+        // visually but flag the source so flamegraphs distinguish.
+        SessionEntryKind::InterceptorInjection { reminder, source } => (
+            "interceptor_injection",
+            format!("[{source}] {}", short(reminder, 50)),
+            est_tokens(reminder) as u64,
+            None,
+        ),
     };
     Some(Block {
         kind: kind.into(),
@@ -478,6 +487,13 @@ fn render_block(entry: &SessionEntry, total_tokens: f64) -> Option<String> {
             "sandbox",
             format!("sandbox[{provider}] → {tool_name} ({duration_ms} ms)"),
             1.0,
+        ),
+        // RFD 0027 §4.5 #10: synthetic-user injection from a stream
+        // interceptor.
+        SessionEntryKind::InterceptorInjection { reminder, source } => (
+            "interceptor-injection",
+            format!("[{source}] {}", short(reminder, 50)),
+            est_tokens(reminder),
         ),
     };
     let pct = (tokens / total_tokens * 100.0).max(0.05);

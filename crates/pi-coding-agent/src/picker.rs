@@ -101,6 +101,11 @@ pub fn format_tree_entry(entry: &pi_agent_core::SessionEntry) -> String {
         } => {
             return format!("sandbox[{provider}]  {tool_name} ({duration_ms} ms)");
         }
+        // RFD 0027 §4.5 #10: synthetic-user message injected by a
+        // stream interceptor (typically TTSR).
+        SessionEntryKind::InterceptorInjection { reminder, source } => {
+            return format!("interceptor[{source}]  {}", short_text(reminder, 60));
+        }
     };
 
     let snippet = short_text(&raw_text, 60);
