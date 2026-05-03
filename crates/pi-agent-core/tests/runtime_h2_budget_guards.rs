@@ -178,6 +178,109 @@ async fn finish_tool_use_with_no_calls_is_rejected() {
 }
 
 #[tokio::test]
+async fn cumulative_usage_events_in_one_turn_are_not_double_counted() {
+    // Per code-review pass-4 finding #1: Google emits Usage on a
+    // standalone usageMetadata chunk AND again on the terminal
+    // candidate chunk; both carry CUMULATIVE values. Pre-fix the
+    // runtime added them together, so a turn that legitimately
+    // consumed 50 tokens looked like 100 against the cap.
+    //
+    // This test sends two Usage events in one turn (50 input + 50
+    // output cumulative on each) and asserts the session-token
+    // accumulator only sees 100 total, NOT 200. Cap is 150 so the
+    // pre-fix behaviour would trip BudgetExhausted; post-fix it
+    // succeeds.
+    let cumulative_usage = Usage {
+        input_tokens: 50,
+        output_tokens: 50,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        cost_usd: 0.0,
+    };
+    let turns = vec![vec![
+        ev(StreamEventKind::TextDelta { text: "hi".into() }),
+        // First Usage event (e.g. usageMetadata mid-stream chunk).
+        ev(StreamEventKind::Usage { usage: cumulative_usage.clone() }),
+        // Second Usage event (e.g. message_delta terminal chunk),
+        // with the same cumulative numbers.
+        ev(StreamEventKind::Usage { usage: cumulative_usage.clone() }),
+        ev(StreamEventKind::Finish { reason: FinishReason::Stop }),
+    ]];
+
+    // Cap of 150 — pre-fix would trip on 50+50+50+50 = 200; post-fix
+    // sees 100 cumulative and stays well under.
+    let auth = AuthStorage::in_memory();
+    auth.set("anthropic", AuthMethod::ApiKey { value: "k".into() });
+    let mut settings = Settings::default();
+    settings.provider = "anthropic".into();
+    settings.model = "sonnet".into();
+    let cfg = RuntimeConfig::builder()
+        .session_manager(SessionManager::in_memory())
+        .auth_storage(auth.clone())
+        .model_registry(ModelRegistry::new(auth))
+        .tools(ToolRegistry::new())
+        .settings(settings)
+        .system_prompt("you are pi")
+        .cwd(std::env::current_dir().unwrap())
+        .with_provider_factory(Arc::new(MockFactory(MockProvider::new(turns))))
+        .with_max_session_tokens(150)
+        .with_max_tool_invocations_per_turn(64)
+        .build_unwrap();
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_runtime, session) = create_agent_session(cfg, Some(tx)).expect("session");
+    let res = session.prompt("cumulative usage scenario".into()).await;
+    assert!(
+        res.is_ok(),
+        "cumulative-Usage providers must not double-count; got {res:?}"
+    );
+}
+
+#[tokio::test]
+async fn max_session_tokens_zero_means_disabled_not_starve() {
+    // Per code-review pass-4 finding #2: cap=0 must NOT immediately
+    // starve every session on the first non-zero Usage event.
+    // Pre-fix `total > 0` would trip BudgetExhausted on any spend.
+    let cfg = {
+        let auth = AuthStorage::in_memory();
+        auth.set("anthropic", AuthMethod::ApiKey { value: "k".into() });
+        let mut settings = Settings::default();
+        settings.provider = "anthropic".into();
+        settings.model = "sonnet".into();
+        RuntimeConfig::builder()
+            .session_manager(SessionManager::in_memory())
+            .auth_storage(auth.clone())
+            .model_registry(ModelRegistry::new(auth))
+            .tools(ToolRegistry::new())
+            .settings(settings)
+            .system_prompt("you are pi")
+            .cwd(std::env::current_dir().unwrap())
+            .with_provider_factory(Arc::new(MockFactory(MockProvider::new(vec![vec![
+                ev(StreamEventKind::TextDelta { text: "hi".into() }),
+                ev(StreamEventKind::Usage {
+                    usage: Usage {
+                        input_tokens: 10_000,
+                        output_tokens: 10_000,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                        reasoning_tokens: 0,
+                        cost_usd: 0.0,
+                    },
+                }),
+                ev(StreamEventKind::Finish { reason: FinishReason::Stop }),
+            ]]))))
+            .with_max_session_tokens(0) // disabled
+            .build_unwrap()
+    };
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_runtime, session) = create_agent_session(cfg, Some(tx)).expect("session");
+    let res = session.prompt("test".into()).await;
+    assert!(res.is_ok(), "max=0 should be disabled, not starve; got {res:?}");
+}
+
+#[tokio::test]
 async fn saturating_add_does_not_panic_on_max_token_usage() {
     // Adversarial provider sends a Usage event with u64::MAX token
     // counts. saturating_add prevents the runtime from overflowing

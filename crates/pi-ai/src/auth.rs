@@ -200,6 +200,10 @@ impl AuthStorage {
     /// are no longer visible. Embedders needing intersection should
     /// compute it caller-side and pass the result as a single
     /// `scoped(...)` call.
+    ///
+    /// **`sealed` is preserved:** `s.sealed().scoped(["a"])` returns
+    /// a scoped+sealed view. The seal carries through; subsequent
+    /// `scoped` calls do not unseal.
     pub fn scoped<I, S>(&self, allow: I) -> Self
     where
         I: IntoIterator<Item = S>,

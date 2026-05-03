@@ -402,6 +402,11 @@ impl ConfigBuilder {
     /// Set the per-session token cap (Hardening §4.5 #3, H2). Default
     /// 10M. Embedders should size this per-tenant; the default catches
     /// pathological model loops without blocking normal sessions.
+    ///
+    /// Per code-review pass-4 finding #2: `n = 0` is treated as
+    /// "disabled" — the runtime short-circuits the cap check entirely.
+    /// Otherwise the first non-zero Usage event would immediately
+    /// trip BudgetExhausted on every session.
     pub fn with_max_session_tokens(mut self, n: u64) -> Self {
         self.max_session_tokens = n;
         self
@@ -1201,36 +1206,22 @@ impl AgentSession {
                         tool_calls.push(call);
                     }
                     K::Usage { usage } => {
-                        // Per RFD 0027 §4.5 #3 (Hardening H2): per-session
-                        // token accumulator with `saturating_add` so
-                        // adversarial u64::MAX deltas don't wrap. Compare
-                        // against `cfg.max_session_tokens` and emit
-                        // `BudgetExhausted` if exceeded.
-                        {
-                            let mut g = self.inner.lock().await;
-                            g.session_input_tokens =
-                                g.session_input_tokens.saturating_add(usage.input_tokens);
-                            g.session_output_tokens =
-                                g.session_output_tokens.saturating_add(usage.output_tokens);
-                            let total = g
-                                .session_input_tokens
-                                .saturating_add(g.session_output_tokens);
-                            if total > self.cfg.max_session_tokens {
-                                let cap = self.cfg.max_session_tokens;
-                                drop(g);
-                                tracing::warn!(
-                                    used = total,
-                                    cap,
-                                    "per-session token budget exhausted"
-                                );
-                                self.emit(AgentEventKind::Usage { usage: usage.clone() })
-                                    .await;
-                                return Err(RuntimeError::BudgetExhausted {
-                                    used: total,
-                                    cap,
-                                });
-                            }
-                        }
+                        // Per RFD 0027 §4.5 #3 (Hardening H2) + code-review
+                        // pass-4 finding #1: PROVIDERS EMIT CUMULATIVE
+                        // USAGE EVENTS. Google emits a Usage on a
+                        // standalone usageMetadata chunk AND again on the
+                        // terminal-candidate chunk; Anthropic does similar
+                        // via message_delta. The per-event accumulation
+                        // pre-pass-4 double-counted these turns and threw
+                        // legitimate sessions into BudgetExhausted at a
+                        // fraction of the configured cap.
+                        //
+                        // Fix: keep `usage_total = usage.clone()` per event
+                        // (idempotent vs cumulative providers — last value
+                        // wins), then accumulate the per-turn TOTAL into
+                        // the session-wide accumulator at end-of-turn
+                        // (after the stream loop ends, before the
+                        // assistant-message persistence).
                         usage_total = usage.clone();
                         self.emit(AgentEventKind::Usage { usage }).await;
                     }
@@ -1298,6 +1289,61 @@ impl AgentSession {
                 let mut g = self.inner.lock().await;
                 g.messages.push(assistant_msg.clone());
             }
+            // Per RFD 0027 §4.5 #2 (Hardening H2) + code-review pass-4
+            // finding #5: check Finish::ToolUse + empty tool_calls
+            // BEFORE persisting / emitting the assistant message.
+            // Otherwise replay tooling sees a bogus assistant turn
+            // followed by an out-of-band runtime error.
+            if matches!(finish, FinishReason::ToolUse) && tool_calls.is_empty() {
+                return Err(RuntimeError::ToolUseFinishWithoutCalls);
+            }
+
+            // Per RFD 0027 §4.5 #3 (Hardening H2) + pass-4 finding #1:
+            // accumulate the per-turn TOTAL (already cumulative for
+            // Google/Anthropic providers thanks to the per-event
+            // last-write-wins above) into the session-wide accumulator,
+            // then check the cap BEFORE persisting the assistant
+            // message. If the budget trips, the malformed turn is
+            // never persisted and the embedder sees a clean error.
+            //
+            // `cfg.max_session_tokens == 0` is treated as "disabled"
+            // (per pass-4 finding #2): any non-zero turn would
+            // otherwise immediately starve all sessions.
+            let session_cap = self.cfg.max_session_tokens;
+            if session_cap > 0
+                && (usage_total.input_tokens != 0 || usage_total.output_tokens != 0)
+            {
+                let mut g = self.inner.lock().await;
+                g.session_input_tokens =
+                    g.session_input_tokens.saturating_add(usage_total.input_tokens);
+                g.session_output_tokens =
+                    g.session_output_tokens.saturating_add(usage_total.output_tokens);
+                let total =
+                    g.session_input_tokens.saturating_add(g.session_output_tokens);
+                if total > session_cap {
+                    let cap = session_cap;
+                    drop(g);
+                    tracing::warn!(
+                        used = total,
+                        cap,
+                        "per-session token budget exhausted"
+                    );
+                    // Synthesize a final Usage event whose `input_tokens`/
+                    // `output_tokens` reflect the cumulative session totals
+                    // — matches the figures in `BudgetExhausted` so
+                    // log-correlation tools see one consistent number
+                    // (pass-4 finding #4).
+                    let cumulative_usage = Usage {
+                        input_tokens: total.saturating_sub(usage_total.output_tokens),
+                        output_tokens: usage_total.output_tokens,
+                        ..usage_total.clone()
+                    };
+                    self.emit(AgentEventKind::Usage { usage: cumulative_usage })
+                        .await;
+                    return Err(RuntimeError::BudgetExhausted { used: total, cap });
+                }
+            }
+
             let _ = self.cfg.session_manager.append(
                 &self.id,
                 SessionEntryKind::Assistant {
@@ -1335,18 +1381,6 @@ impl AgentSession {
             // `0`; `0` is reserved for "before any assistant message
             // emitted" which never reaches the gate code path.)
             turn_index_for_gate = turn_index_for_gate.saturating_add(1);
-
-            // Per RFD 0027 §4.5 #2 (Hardening H2): Finish::ToolUse
-            // means "this turn ends because the model is requesting
-            // tools" — it MUST be paired with at least one tool call
-            // in the assistant message. A provider stream that emits
-            // Finish::ToolUse with empty tool_calls is malformed
-            // (or adversarial); reject explicitly so the runtime
-            // doesn't fall through to the no-tools "this turn ended,
-            // emit TurnComplete" path on a malformed signal.
-            if matches!(finish, FinishReason::ToolUse) && tool_calls.is_empty() {
-                return Err(RuntimeError::ToolUseFinishWithoutCalls);
-            }
 
             if tool_calls.is_empty() {
                 // drain queued steering messages — convert into next user turn
