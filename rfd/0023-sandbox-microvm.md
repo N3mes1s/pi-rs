@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.20)
+- **Status:** Discussion (v0.21)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -527,6 +527,29 @@ pub trait VmHandle: Send + Sync {
     /// are **destroyed** rather than returned to the pool, to
     /// bound the leak from corrupt guest state.
     async fn release(self: Box<Self>, exec_outcome: ExecuteOutcomeHint);
+
+    /// Synchronous best-effort teardown. Used **only** by
+    /// `ReleaseGuard::Drop` when no tokio runtime is available
+    /// (e.g. drop happens in a sync test, in panic-unwind, or after
+    /// runtime shutdown). Default impl spawns a detached OS thread
+    /// that drives a one-shot current-thread runtime just long
+    /// enough to drive `release(Cancelled)` to completion or hit a
+    /// 5-second timeout, whichever first. Launchers may override for
+    /// faster paths (e.g. firecracker can SIGKILL its child PID
+    /// directly without spinning a runtime). Must not panic.
+    fn kill_blocking(self: Box<Self>) {
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(rt) = rt {
+                let _ = rt.block_on(tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    self.release(ExecuteOutcomeHint::Cancelled),
+                ));
+            }
+        });
+    }
 }
 
 /// Hint to `release()` so the launcher can decide pool-vs-destroy.
@@ -736,9 +759,38 @@ impl ReleaseGuard {
 impl Drop for ReleaseGuard {
     fn drop(&mut self) {
         if let Some(vm) = self.vm.take() {
-            // Cannot await in Drop. Spawn detached on the current runtime;
-            // the launcher's release path is bounded (no unbounded await).
-            tokio::spawn(async move { vm.release(ExecuteOutcomeHint::Cancelled).await; });
+            // Cannot await in Drop. Two failure modes to consider:
+            //
+            // 1. No current tokio runtime (Drop running outside an async
+            //    context). `tokio::runtime::Handle::try_current()` lets us
+            //    detect this; on Err we fall through to a synchronous
+            //    best-effort cleanup. The VmHandle's launcher exposes
+            //    `kill_blocking()` for this case (default impl: spawn a
+            //    detached thread that drives a one-shot Tokio runtime
+            //    just long enough to fire `release(Cancelled)` — bounded
+            //    because release is non-await on the happy path and
+            //    timeout-bounded on the slow path).
+            //
+            // 2. Runtime is shutting down. `tokio::spawn` may panic or
+            //    drop the future immediately. We tolerate this: at
+            //    process shutdown the launcher's pool is being torn
+            //    down anyway, and any leaked VM is reaped by the
+            //    process-exit hook (Linux: `prctl(PR_SET_PDEATHSIG)`
+            //    on the firecracker child; macOS/Windows: process
+            //    group teardown). A leak window of milliseconds at
+            //    shutdown is acceptable.
+            match tokio::runtime::Handle::try_current() {
+                Ok(_) => {
+                    tokio::spawn(async move { vm.release(ExecuteOutcomeHint::Cancelled).await; });
+                }
+                Err(_) => {
+                    // Synchronous fallback. Panics here would be
+                    // worse than a brief leak, so swallow.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        vm.kill_blocking();
+                    }));
+                }
+            }
         }
     }
 }
@@ -858,11 +910,30 @@ pub struct ToolRequest {
 #[serde(deny_unknown_fields)]
 pub struct ToolResponse {
     pub call_id: String,
+    /// Post-processed text destined for `ToolResult.model_output`.
+    /// The guest worker has already invoked the native pi-tools-core
+    /// tool, so this is what `tool.invoke()` returned for the current
+    /// process model — e.g. for `bash`, the worker emits the existing
+    /// `stdout + stderr + [exit N]` model-formatted string here. The
+    /// host then only path-rewrites this value; it does NOT re-derive
+    /// it from raw stdout/stderr.
+    pub model_output: String,
+    /// Raw stdout/stderr/exit_status, kept for telemetry and debugging
+    /// only. Surfaces on `SandboxOutcome.execution`, not on the
+    /// model-facing `ToolResult`. May equal `model_output` for
+    /// pass-through tools (read/write/edit/etc.) and differ for
+    /// tools that post-process (bash today).
     pub stdout: String,
     pub stderr: String,
     pub exit_status: i32,
     pub guest_duration_ms: u32,
     pub is_error: bool,
+    /// Mirrors `ToolResult.display`. The worker copies the native
+    /// tool's `display` value here verbatim; the host inverse-rewrites
+    /// embedded path strings before forwarding (per the path-key
+    /// registry below).
+    #[serde(default)]
+    pub display: Option<serde_json::Value>,
 }
 ```
 
@@ -884,35 +955,20 @@ pub struct ToolResult {
 }
 ```
 
-`display` is `Option<serde_json::Value>` — host-side tools like `task` populate it for child-session pointers; **most pi-tools-core tools also populate `display`** (verified at `crates/pi-tools-core/src/{read,write,edit,grep,find,ls,bash,monitor}.rs`). v1 must therefore carry `display` across the wire (or have the worker return a full `ToolResult`), not drop it.
+`display` is `Option<serde_json::Value>` — host-side tools like `task` populate it for child-session pointers; **most pi-tools-core tools also populate `display`** (verified at `crates/pi-tools-core/src/{read,write,edit,grep,find,ls,bash,monitor}.rs`). The wire shape above mirrors this with an explicit `display` field.
 
-**Wire shape revision (v1):** `ToolResponse` carries an explicit `display: Option<serde_json::Value>` field (set by the in-guest worker from each tool's native `ToolResult.display`). The host-side mapping is then a near-direct copy after path-rewriting.
-
-```rust
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ToolResponse {
-    pub call_id: String,
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_status: i32,
-    pub guest_duration_ms: u32,
-    pub is_error: bool,
-    #[serde(default)]
-    pub display: Option<serde_json::Value>,
-}
-```
+**Why the wire carries both `model_output` and raw `stdout/stderr` instead of recomputing one from the other:** today's `bash` tool builds `model_output = "<stdout>\n<stderr>\n[exit N]"` inside `pi-tools-core/src/bash.rs`. If the wire carried only raw streams the host couldn't reproduce that without re-implementing bash's formatting (or every tool's). Conversely, dropping raw stdout/stderr destroys the telemetry value of `SandboxOutcome.execution`. Carrying both fields is one extra string in the JSONL (gzipped on persistence) for full parity.
 
 Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 
 | `ToolResult` field | Sourced from                                       | Note |
 |--------------------|----------------------------------------------------|------|
 | `tool_use_id`      | Threaded **explicitly** as a parameter to `SandboxProvider::execute_tool(ctx, tool_use_id, tool_name, tool_input)` from the runtime. The runtime passes the outer `ToolCall.call_id` (the LLM-facing id) here; the provider stores it on the resulting `ToolResult` so the LLM can correlate. NOT the wire `ToolRequest.call_id` (which is host-allocated for guest-side dedup and lives only on the wire). | RFD 0022's trait gains a `tool_use_id: &str` parameter on `execute_tool` as a non-default change; LocalProcessProvider, MicroVmProvider, and remote-backend providers all accept it. |
-| `model_output`     | `ToolResponse.stdout` after inverse path rewrite (`/work` → `<host_cwd>`) | Stderr is dropped on the model-facing path; preserved in `SandboxAction.stderr` telemetry. |
+| `model_output`     | `ToolResponse.model_output` after inverse path rewrite (`/work` → `<host_cwd>`) | The guest worker has already done the native tool's post-processing (e.g. bash's stdout+stderr+[exit N] formatting); the host only rewrites paths. |
 | `display`          | `ToolResponse.display` after inverse path rewrite of any string field whose JSON path matches the per-tool path-key list (e.g. `path`, `paths[*]`, `matches[*].path`). Image `read` carries `{kind: "image", path: <abs>, base64: <b64>}` — `path` is rewritten, `base64` is passed through verbatim. | Preserves UI parity with `LocalProcessProvider`. |
 | `is_error`         | `ToolResponse.is_error`                            | Direct copy. |
 
-`ToolResponse.exit_status` and `guest_duration_ms` go into the `SandboxAction` telemetry row, not into `ToolResult`. `ToolResponse.stderr` is currently dropped on the model-facing path; a future v1.x can add `stderr_tail: Option<String>` to `ToolResult` if telemetry shows it's load-bearing for debugging.
+`SandboxOutcome.execution: SandboxExecution` (defined in §2) is populated from the raw fields: `execution.stdout = ToolResponse.stdout` (path-rewritten for telemetry parity), `execution.stderr = ToolResponse.stderr` (rewritten), `execution.exit_status = ToolResponse.exit_status`. `guest_duration_ms` goes into the `SandboxAction` telemetry row alongside the existing `duration_ms`. There is **no** `SandboxAction.stderr` field — earlier drafts referenced one; it does not exist in the schema in §2 and is not added.
 
 This mapping is what `RemoteSession::execute()` in RFD 0026 must also implement so that local + remote sandboxes produce indistinguishable `ToolResult` shapes downstream of the agent loop.
 
@@ -932,7 +988,16 @@ diff hunks stay coherent across providers). The provider performs
 the translation; the model never sees `/work` in tool inputs or
 outputs.
 
-**Per-tool rewriting**:
+**Per-tool rewriting**: the table below is the **specification**; the
+**source of truth** is `crates/pi-sandbox/src/path_rewrite/registry.rs`,
+a normative const map of per-tool input/output path keys
+(`InputKey::Single("path")`, `OutputKey::DisplayJsonPath("path")`,
+`OutputKey::ModelOutputSubstring`, etc.). A unit test
+(`crates/pi-sandbox/tests/path_rewrite_registry.rs`) iterates the
+registry against fixtures derived from real `LocalProcessProvider`
+results and asserts host↔guest parity for each tool. Adding a new
+guest-bound tool requires extending the registry + adding a fixture;
+the parity test fails closed otherwise.
 
 | Tool          | Inputs rewritten host→guest                          | Outputs rewritten guest→host (in `model_output` AND `display`)            |
 | ------------- | ---------------------------------------------------- | ------------------------------------------------------- |
@@ -1627,7 +1692,7 @@ The `boot_ms` + `cold_boot` telemetry fields make the pool-hit-rate visible.
 
 ## Implementation schedule
 
-Eight commits across three phases. Realistic LoC estimates (calibrated against aegis's 3486 LoC for Firecracker alone):
+Nine commits across four phases. Realistic LoC estimates (calibrated against aegis's 3486 LoC for Firecracker alone):
 
 ### Phase 1 — Foundations (no user-visible changes)
 
@@ -1735,6 +1800,33 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.21 (2026-05-04):** rfd-critic v0.20 pass found 1 critical +
+  3 small. Critical: §2 (`VmExecution`) and §3 (wire `ToolResponse`)
+  disagreed on what crosses the wire — §2 said the worker
+  post-processes (so `tool_result.model_output` and raw
+  `execution.stdout` may diverge), but the wire only carried raw
+  `stdout`/`stderr`, with `ToolResult.model_output := stdout` direct.
+  That breaks `bash` immediately, since today's `pi-tools-core/src/bash.rs`
+  builds `model_output = "<stdout>\n<stderr>\n[exit N]"`. Fix:
+  `ToolResponse` now carries an explicit `model_output: String`
+  field alongside raw `stdout`/`stderr`/`exit_status` — the worker
+  post-processes once (calls native tool, reads its `ToolResult`)
+  and emits both: post-processed `model_output` for
+  `ToolResult.model_output`, and raw streams for
+  `SandboxOutcome.execution`. One JSONL string of overhead per call,
+  full parity with local-process. Removed duplicate `ToolResponse`
+  definition that v0.20 had left in place. Three small: (a)
+  `ReleaseGuard::Drop` now uses `Handle::try_current()` and falls
+  back to a synchronous `VmHandle::kill_blocking()` (default
+  thread-spawn + one-shot runtime + 5s timeout) when no async
+  context exists or runtime is shutting down. (b) Path-rewrite
+  registry promoted from prose to a code-owned const map at
+  `crates/pi-sandbox/src/path_rewrite/registry.rs` with a normative
+  parity test against `LocalProcessProvider` fixtures. (c) Schedule
+  header corrected: "Eight commits across three phases" → "Nine
+  commits across four phases" (matches the table). Also dropped
+  the stale `SandboxAction.stderr` reference (no such field exists
+  in §2's schema).
 - **v0.20 (2026-05-04):** rfd-critic v0.19 pass found 2 critical
   issues, both real, both closed. (1) **Path-validation primitive
   was wrong**: spec said `ToolError::InvalidPath` (which doesn't
