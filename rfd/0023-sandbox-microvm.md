@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.25)
+- **Status:** Discussion (v0.26)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -27,6 +27,19 @@ Remote sandbox vendors (E2B, Sprites, Daytona) are split into a sister RFD — s
 - **Snapshot / restore** beyond simple pooling — v1.0 keeps a warm pool of N pre-booted VMs; snapshot/restore is a v1.x optimization.
 - **Per-tool network policy** — guests have no network in v1.0. A future RFD adds selective egress.
 - **Custom rootfs per tool** — one rootfs serves all tools in v1.0.
+
+### Terminology (one source per concept)
+
+The RFD distinguishes three orthogonal axes that v0.25 reviewers have repeatedly conflated. This table is normative.
+
+| Concept           | Values                                                    | Where it lives                                | CLI surface                                                   |
+| ----------------- | --------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------- |
+| **Provider name** | `local-process` \| `microvm` \| `e2b`/`sprites`/`daytona` (RFD 0026) | `SandboxAction.provider`, `SandboxTelemetry.provider` | `--sandbox-provider=<name>` (or `<name>:<launcher>`)          |
+| **Launcher name** | `firecracker` \| `vfkit` \| `cloud-hypervisor`            | `SandboxAction.launcher`, `MicroVmLauncher::launcher_name()` | `--sandbox-provider=microvm:<launcher>` (explicit pin)        |
+| **Transport mode**| `local` \| `managed`                                      | `BootSpec.transport_mode`                      | `--sandbox-microvm-mode=<mode>` (Linux/Firecracker only)      |
+| **Dispatch path** | `guest` \| `host-direct`                                  | `SandboxAction.dispatch_path`, `SandboxTelemetry.dispatch_path` | not user-configurable; per-tool, derived from `tool_disposition()` |
+
+`microvm:local` and `microvm:managed` are NOT CLI names; they would conflate provider/launcher with transport mode. The CLI uses `--sandbox-provider=microvm:firecracker --sandbox-microvm-mode=managed` for the Linux/managed case.
 
 ## Background
 
@@ -287,9 +300,9 @@ guest worker.
   proxying egress through the guest would require giving the guest
   net access (which IS what we are explicitly preventing).
 - The agent's mental model stays consistent across providers
-  (`local-process`, `microvm:local`, `microvm:managed`,
-  remote-backend) — the same tool name behaves the same way from the
-  model's perspective.
+  (`local-process`, `microvm:firecracker`, `microvm:vfkit`,
+  `microvm:cloud-hypervisor`, future remote backends) — the same
+  tool name behaves the same way from the model's perspective.
 - Auto-approve policy (RFD 0027 H4) governs `web_search` calls
   identically regardless of provider.
 
@@ -394,11 +407,20 @@ pub enum AcquireError {
     HostTransportSetup { detail: String },
     #[error("guest daemon ({daemon}) exited with code {exit}")]
     GuestDaemonStartFailed { daemon: String, exit: i32 },
-    #[error("broker rejected with master_epoch_too_old (configured epoch={configured_epoch})")]
+    // The three Broker* variants below fire ONLY on the
+    // Linux/Firecracker `managed` transport mode (contextfs-mediated
+    // /work). They are NOT remote-backend concerns — RFD 0026
+    // remote vendors are out of scope for AcquireError. These
+    // variants exist here because the local-Linux `managed` mode
+    // negotiates with an in-host contextfs broker over a UDS, and
+    // each is the broker's authoritative response to a misconfigured
+    // pi-rs side. Kept on `AcquireError` (not split) so callers can
+    // pattern-match a single error type per acquire.
+    #[error("contextfs broker rejected with master_epoch_too_old (configured epoch={configured_epoch}); refresh required")]
     BrokerMasterEpochTooOld { configured_epoch: u32 },
-    #[error("broker oidc denial: {code} ({detail})")]
+    #[error("contextfs broker oidc denial: {code} ({detail})")]
     BrokerOidcRejected { code: String, detail: String },
-    #[error("broker tenant-mode mismatch: {detail}")]
+    #[error("contextfs broker tenant-mode mismatch: {detail}")]
     BrokerTenantModeMismatch { detail: String },
     #[error("pool capacity exhausted (max={max})")]
     PoolExhausted { max: u32 },
@@ -796,7 +818,7 @@ impl SandboxProvider for MicroVmProvider {
             execution: exec.execution,        // raw stdout/stderr/exit_status, separate from model_output
             telemetry: SandboxTelemetry {
                 provider: "microvm",
-                launcher: Some(self.launcher_name()),  // "firecracker" | "vfkit" | "cloud-hypervisor"
+                launcher: Some(self.launcher.launcher_name()),  // "firecracker" | "vfkit" | "cloud-hypervisor"
                 dispatch_path: Some("guest"),
                 acquire_to_ready_ms: Some(exec.acquire_to_ready_ms),
                 guest_duration_ms: Some(exec.guest_duration_ms),
@@ -1094,10 +1116,11 @@ Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 
 `SandboxOutcome.execution: SandboxExecution` (defined in §2) is populated from the raw wire fields **without rewriting**: `execution.stdout = ToolResponse.stdout`, `execution.stderr = ToolResponse.stderr`, `execution.exit_status = ToolResponse.exit_status`. Path rewriting applies **only** to `model_output` and `display`; `execution` stays guest-truthful so post-mortem debugging shows what the guest process actually saw (`/work/...` paths included). Operators who want a host-flavored execution view can derive it from `model_output` (which IS rewritten); the raw stream is kept for fidelity. `guest_duration_ms` goes into the `SandboxAction` telemetry row alongside the existing `duration_ms`. There is **no** `SandboxAction.stderr` field — earlier drafts referenced one; it does not exist in the schema in §2 and is not added.
 
-**Post-call hygiene (background daemon problem).** v1 microvm does **not** support cross-call background daemons or services. After every guest tool call — successful, errored, or timed out — the worker MUST run a hygiene probe before signaling the host that the VM is idle. The probe verifies:
+**Post-call hygiene (background daemon AND filesystem-reset problems).** v1 microvm does **not** support cross-call background daemons or services, AND does **not** preserve any guest-local writable state outside `/work` across calls. After every guest tool call — successful, errored, or timed out — the worker MUST run a hygiene probe before signaling the host that the VM is idle. The probe verifies:
 
 1. **Process subtree empty.** Every descendant the per-call tool spawned (the `bash` shell, anything it forked) is gone. Implementation: bash runs as the leader of a fresh process group; the worker reaps it, then `kill(-pgid, 0)` returns `ESRCH`. On Linux the worker additionally consults a per-call cgroup v2 (`cgroup.procs` empty) — the cgroup is the authoritative test because a daemonized child reparented to PID 1 still appears in the cgroup. macOS/Windows use process-group reparenting detection as a coarser fallback (a known v1 gap; documented).
 2. **Worker transient state cleared.** Per-call temp dirs (`$TMPDIR`/<call_id>) removed; per-call open file descriptors closed; `$PWD`/env scrubbed.
+3. **Guest-local filesystem reset to baseline.** The rootfs is mounted **read-only** from the launcher; everything writable in the guest (other than `/work`, which is the host-mediated workspace) is a tmpfs upper layer in an overlayfs union. The worker's hygiene step unmounts and remounts that tmpfs, restoring the rootfs to the baseline image bit-for-bit. Any `bash` write to `/root/poison`, `/usr/local/bin/poison`, `/etc/passwd`, or any other path outside `/work` evaporates as part of the post-call reset. The ONLY guest mutation that survives a tool call is what the tool wrote to `/work` (which is the host's session cwd) — the contract that the agent's `read`/`write`/`edit` semantics depend on. **Required test:** `bash 'echo poison > /root/marker; ls /usr/local/bin/'`, then verify the next acquire on the same `BootSpec` returns no `/root/marker` and no `/usr/local/bin/<modified>`. macOS/Windows v1 inherit this guarantee transitively from the destroy-on-release rule (the VM itself is gone).
 
 The worker reports the verdict on the wire as `ToolResponse.post_call_state` (`Clean` | `SuspectGuestState`). The tool itself may have succeeded; the post-call probe is what decides pool reuse. The host composes `final_hint = min(host_outcome_hint, post_call_state)` (`Clean < SuspectGuestState`) before calling `release(final_hint)`, so a daemonization leak forces destroy regardless of the tool's success bit. A missing `post_call_state` field defaults to `SuspectGuestState` — workers must *prove* cleanliness rather than implicitly assert it. The verdict is not surfaced to the model (the tool's `model_output` is unchanged); it's strictly a host/launcher signal.
 
@@ -1940,6 +1963,32 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.26 (2026-05-04):** rfd-critic v0.25 pass: 1 critical
+  (filesystem reset between pool reuses) + small. Critical was
+  real and substantive. v0.25's post-call hygiene only covered
+  process subtree + temp dirs; nothing prevented
+  `bash 'echo poison > /root/marker'` or
+  `bash 'cp evil /usr/local/bin/'` from contaminating the next
+  reuse on the same `BootSpec`. Closed: §"Post-call hygiene" now
+  pins **read-only rootfs + tmpfs upper in overlayfs**; the
+  worker's hygiene step unmounts and remounts the tmpfs upper,
+  restoring the rootfs to baseline bit-for-bit. The ONLY surviving
+  guest mutation per call is `/work` (host-mediated workspace,
+  intentional). Required test added:
+  `bash 'echo poison > /root/marker; ls /usr/local/bin/'` then
+  next-acquire on same BootSpec must not see `/root/marker`.
+  macOS/Windows v1 inherit transitively from destroy-on-release.
+  Small items: (a) `self.launcher_name()` →
+  `self.launcher.launcher_name()` in pseudocode; (b) terminology
+  table added in §"Terminology" — provider name × launcher name ×
+  transport mode × dispatch path; (c) `microvm:local` /
+  `microvm:managed` rationale paragraph corrected to use
+  `--sandbox-provider=microvm:firecracker` +
+  `--sandbox-microvm-mode=managed` (`local`/`managed` reserved for
+  `TransportMode`); (d) `AcquireError::Broker*` variants annotated:
+  fire only on Linux/Firecracker `managed` mode (NOT remote-backend
+  concerns), kept on `AcquireError` for caller pattern-match
+  ergonomics.
 - **v0.25 (2026-05-04):** rfd-critic v0.24 pass: 1 critical
   (telemetry-contract self-contradiction) + 4 small. All closed.
   (1) `SandboxAction` struct field list was missing
