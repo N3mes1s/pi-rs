@@ -199,8 +199,64 @@ fn main() -> anyhow::Result<()> {
                 .join(".pi")
                 .join("orchestrate")
         });
-        let summary = pi_orchestrate::run(&campaign, &state_root)
-            .map_err(|e| anyhow::anyhow!("orchestrate run failed: {e}"))?;
+
+        // --orchestrate-isolate: allocate a fresh worktree, run inside it,
+        // then remove it (best-effort) on exit.
+        let summary = if cli.orchestrate_isolate {
+            // Sanitise the campaign name for use as a filesystem path
+            // component: replace slashes with underscores.
+            let safe_name = campaign.name.replace('/', "_");
+            let uid = uuid::Uuid::new_v4().simple().to_string();
+            let wt_path = std::env::temp_dir()
+                .join(format!("pi-orch-{}-{}", safe_name, &uid[..8]));
+
+            // `git worktree add --detach <path> HEAD` — seeded from the
+            // current HEAD so the child sees all milestone branches.
+            let add_out = std::process::Command::new("git")
+                .args(["worktree", "add", "--detach"])
+                .arg(&wt_path)
+                .arg("HEAD")
+                .output()
+                .map_err(|e| anyhow::anyhow!("git worktree add: {e}"))?;
+            if !add_out.status.success() {
+                anyhow::bail!(
+                    "git worktree add failed: {}",
+                    String::from_utf8_lossy(&add_out.stderr)
+                );
+            }
+
+            let dispatcher = pi_orchestrate::RealDispatch::default();
+            let result = pi_orchestrate::run_with(&campaign, &state_root, &dispatcher, &wt_path)
+                .map_err(|e| anyhow::anyhow!("orchestrate run failed: {e}"));
+
+            // Best-effort cleanup: remove the worktree regardless of
+            // whether the run succeeded. A failure here is non-fatal —
+            // `git worktree prune` in a later invocation will reclaim it.
+            let rm_out = std::process::Command::new("git")
+                .args(["worktree", "remove", "--force"])
+                .arg(&wt_path)
+                .output();
+            if let Ok(o) = rm_out {
+                if !o.status.success() {
+                    eprintln!(
+                        "warning: git worktree remove --force {} failed (ignored): {}",
+                        wt_path.display(),
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    );
+                }
+            } else if let Err(e) = rm_out {
+                eprintln!(
+                    "warning: could not invoke git worktree remove for {} (ignored): {e}",
+                    wt_path.display()
+                );
+            }
+
+            result?
+        } else {
+            pi_orchestrate::run(&campaign, &state_root)
+                .map_err(|e| anyhow::anyhow!("orchestrate run failed: {e}"))?
+        };
+
         println!();
         println!("=== Run summary ===");
         println!("Campaign : {}", summary.campaign);

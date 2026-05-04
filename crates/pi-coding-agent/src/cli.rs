@@ -271,6 +271,14 @@ pub struct Cli {
     #[arg(long = "orchestrate-state-root", value_name = "PATH")]
     pub orchestrate_state_root: Option<PathBuf>,
 
+    /// Wrap a `--orchestrate` run in a freshly-allocated git worktree.
+    /// The worktree is seeded from HEAD of the current repo and removed
+    /// (best-effort) when the run completes. Useful for isolating the
+    /// orchestrator's `git checkout` calls from the operator's working
+    /// tree. Has no effect when `--orchestrate` is not set.
+    #[arg(long = "orchestrate-isolate", action = ArgAction::SetTrue)]
+    pub orchestrate_isolate: bool,
+
     // ---- halo flags (RFD 0025 M1) ----
 
     /// Read-only snapshot of halo supervisor state. Exit 0. Use with
