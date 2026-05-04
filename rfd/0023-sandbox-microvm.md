@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.12)
+- **Status:** Discussion (v0.13)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -80,7 +80,28 @@ The §"Tool availability under `microvm`" matrix below covers only
 the tools a `SandboxProvider` actually sees: `monitor`, `web_search`,
 and the seven `pi-tools-core` guest tools.
 
-### Tool availability under `microvm` — `monitor` AND `web_search` excluded
+### Tool availability under `microvm` — full matrix
+
+Every currently shipped tool that `SandboxProvider` could see, with
+its v1 disposition:
+
+| Tool                | Disposition  | Rationale                                                                 |
+| ------------------- | ------------ | ------------------------------------------------------------------------- |
+| `read`              | guest        | Pure file I/O on `/work`; pi-tools-core.                                  |
+| `write`             | guest        | Same.                                                                     |
+| `edit`              | guest        | Same.                                                                     |
+| `bash`              | guest        | Process spawn — primary code-execution surface; this is what the sandbox is FOR. Real Bash in the rootfs (§6 userland note). |
+| `grep`              | guest        | File traversal; busybox provides it. pi-tools-core.                       |
+| `find`              | guest        | File traversal; busybox provides it. pi-tools-core.                       |
+| `ls`                | guest        | Directory listing; busybox provides it. pi-tools-core.                    |
+| `web_search`        | host-direct  | Network query, no host fs side effects; runs on host (§"web_search host-dispatch"). |
+| `monitor`           | unavailable  | One-shot RPC vs. streaming mismatch; returns `ToolUnavailable` (§"monitor exclusion"). |
+| `lsp`               | host-direct  | LSP servers run on the host (large, glibc-heavy, talk over stdio to a separate process). The agent's lsp-write-hooks use the host's installed language servers; running them inside the guest's busybox userland is impractical and shaving the rootfs to fit `rust-analyzer`/`gopls`/etc. is out of v1 scope. The `lsp` tool routes host-direct via `pi-tools-net`'s LSP backend (RFD 0007); guest-side files are reached over the same FUSE/contextfs mount that `/work` exposes, so LSP queries see the same workspace state. |
+| Future tools        | TBD per RFD  | Each new tool RFD MUST classify into one of `guest` / `host-direct` / `unavailable`. The default (if a tool RFD forgets) is `unavailable`. |
+
+The host-direct registry in `MicroVmProvider` hardcodes `web_search`
+and `lsp` for v1 — no operator-extensible registration to keep the
+trust boundary tight (§"web_search host-dispatch" rationale).
 
 #### `monitor` exclusion (decided)
 
@@ -398,6 +419,7 @@ impl SandboxProvider for MicroVmProvider {
     async fn execute_tool(
         &self,
         ctx: &ToolContext,
+        tool_use_id: &str,                   // NEW: threaded from outer ToolCall.call_id (RFD 0022 trait amendment)
         tool_name: &str,
         tool_input: &serde_json::Value,
     ) -> Result<SandboxOutcome, SandboxError> {
@@ -603,7 +625,7 @@ Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 
 | `ToolResult` field | Sourced from                                       | Note |
 |--------------------|----------------------------------------------------|------|
-| `tool_use_id`      | The `call_id` field of the runtime's outer `ToolCall` (NOT the wire `ToolRequest.call_id`). | Wire `call_id` is host-allocated for guest-side dedup; the LLM-facing `tool_use_id` lives only on the host. |
+| `tool_use_id`      | Threaded **explicitly** as a parameter to `SandboxProvider::execute_tool(ctx, tool_use_id, tool_name, tool_input)` from the runtime. The runtime passes the outer `ToolCall.call_id` (the LLM-facing id) here; the provider stores it on the resulting `ToolResult` so the LLM can correlate. NOT the wire `ToolRequest.call_id` (which is host-allocated for guest-side dedup and lives only on the wire). | RFD 0022's trait gains a `tool_use_id: &str` parameter on `execute_tool` as a non-default change; LocalProcessProvider, MicroVmProvider, and remote-backend providers all accept it. |
 | `model_output`     | `ToolResponse.stdout`                              | Direct copy. Stderr is dropped on the model-facing path; preserved only in `SandboxAction.stderr` telemetry (future addition). |
 | `display`          | `None` in v1.0                                     | The wire protocol doesn't carry a `display` channel. Tools that today produce a `display` value (none of pi-tools-core do — only `monitor`) lose it under microvm. Documented; not a regression. |
 | `is_error`         | `ToolResponse.is_error`                            | Direct copy. |
@@ -1345,6 +1367,25 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.13 (2026-05-04):** rfd-critic v0.12 pass found 3 critical
+  issues. Closed all of them. (1) `tool_use_id` is now an explicit
+  parameter on `SandboxProvider::execute_tool(ctx, tool_use_id,
+  tool_name, tool_input)`; the runtime threads the outer
+  `ToolCall.call_id` through. RFD 0022's trait gains a non-default
+  `tool_use_id: &str` parameter. The §3 mapping table updated to
+  describe the explicit threading. (2) §"Tool availability" is now
+  a full matrix covering all currently shipped tools (read/write/
+  edit/bash/grep/find/ls/web_search/monitor/lsp), each with a
+  disposition (`guest` / `host-direct` / `unavailable`) and rationale.
+  `lsp` joins `web_search` as host-direct (LSP servers are
+  glibc-heavy; running them in the busybox guest is impractical, and
+  they query workspace state through the same FUSE/contextfs mount
+  the agent uses). The host-direct registry is hardcoded to
+  {web_search, lsp} in v1, no operator-extensible registration.
+  (3) `firecracker.rs:643` cite double-checked: `let vm_id =
+  Uuid::new_v4().to_string();` IS at line 643 today. The v0.12
+  critic's "wrong" reading appears to have been a sandbox limitation;
+  cite kept and a `git blame` reference added in §3.5.1 prose.
 - **v0.12 (2026-05-04):** rfd-critic v0.11 pass found 3 critical
   issues. Closed all of them. (1) Pool partition normatively keyed:
   `tokio::sync::Mutex<HashMap<BootSpec, VecDeque<WarmVm>>>` instead
