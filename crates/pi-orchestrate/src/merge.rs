@@ -358,8 +358,13 @@ pub fn cherry_pick_to_target(
                 }
             };
             let ref_path = format!("refs/heads/{target_branch}");
+            // Use compare-and-swap: `git update-ref <ref> <new_sha> <expected_old_sha>`
+            // so that two parallel isolated runs cannot silently overwrite each
+            // other's merged commits. If the ref has moved since this run's
+            // staleness check, git will exit non-zero and we surface it as a
+            // GitError (the operator should re-run after the other run finishes).
             let ur = Command::new("git")
-                .args(["update-ref", &ref_path, &new_sha])
+                .args(["update-ref", &ref_path, &new_sha, target_head_at_review])
                 .current_dir(repo_root)
                 .output();
             match ur {

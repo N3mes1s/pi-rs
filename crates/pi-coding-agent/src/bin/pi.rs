@@ -225,7 +225,12 @@ fn main() -> anyhow::Result<()> {
                 );
             }
 
-            let dispatcher = pi_orchestrate::RealDispatch::default();
+            let mut dispatcher = pi_orchestrate::RealDispatch::default();
+            // When running inside an isolated worktree, agent definitions
+            // live in the original repo (gitignored/untracked files are
+            // absent from the linked worktree). Lock agent lookup to the
+            // original cwd so `.pi/agents/` is always reachable.
+            dispatcher.agent_root = Some(std::env::current_dir()?);
             let result = pi_orchestrate::run_with(&campaign, &state_root, &dispatcher, &wt_path)
                 .map_err(|e| anyhow::anyhow!("orchestrate run failed: {e}"));
 

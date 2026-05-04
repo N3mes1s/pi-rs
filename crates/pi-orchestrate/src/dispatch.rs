@@ -198,14 +198,35 @@ pub trait Dispatch {
 pub struct RealDispatch {
     /// Path to the pi binary. Defaults to `current_exe()`. Override in
     /// tests so we can swap in a fake binary that prints a canned
-    /// verdict.
+    /// verdict. Also overridable via the `PI_PI_BINARY` environment
+    /// variable so integration tests can point at a mock script without
+    /// recompiling.
     pub pi_binary: PathBuf,
+
+    /// Root directory from which agent definitions are loaded. When
+    /// `None`, agents are resolved relative to the `cwd` argument of
+    /// each `dispatch()` call (the legacy behaviour). When `Some`,
+    /// agents are loaded from `<agent_root>/.pi/agents/` instead.
+    ///
+    /// Set this to the original repository root when running inside an
+    /// isolated worktree so that `.pi/agents/` — which is typically
+    /// gitignored/untracked and therefore absent from a fresh linked
+    /// worktree — is still reachable.
+    pub agent_root: Option<PathBuf>,
 }
 
 impl Default for RealDispatch {
     fn default() -> Self {
+        // `PI_PI_BINARY` lets integration tests swap in a mock script that
+        // echoes a canned verdict without hitting a real LLM.
+        let pi_binary = std::env::var_os("PI_PI_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pi"))
+            });
         Self {
-            pi_binary: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pi")),
+            pi_binary,
+            agent_root: None,
         }
     }
 }
@@ -232,7 +253,11 @@ impl Dispatch for RealDispatch {
         // via `--system-prompt-file` so the spawned pi sets it as
         // the true runtime system prompt. The tempfile is kept alive
         // across the entire wait_with_output() call.
-        let agent = load_agent_spec(cwd, agent_name).map_err(|e| {
+        // Resolve the directory from which the agent definition is loaded.
+        // When `agent_root` is set (e.g. for isolated-worktree runs where
+        // `.pi/agents/` is absent from the linked worktree), prefer it.
+        let agent_lookup_root = self.agent_root.as_deref().unwrap_or(cwd);
+        let agent = load_agent_spec(agent_lookup_root, agent_name).map_err(|e| {
             std::io::Error::new(
                 e.kind(),
                 format!("dispatch role={} agent={agent_name}: {e}", role.label()),

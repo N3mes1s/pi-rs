@@ -5,12 +5,13 @@
 //!   2. The worktree is removed after the run (no leftover `pi-orch-*` dir).
 //!   3. The campaign's MERGED commit is visible on `main` in the parent repo.
 //!
-//! Two levels of coverage:
+//! Three levels of coverage:
 //!   a. Library-level: exercises `run_with` via a `FakeDispatch` — verifies
 //!      merge.rs handles the detached-worktree checkout path correctly.
-//!   b. CLI-level: spawns the real `pi` binary with `--orchestrate-isolate`
-//!      and verifies worktree cleanup even when the campaign fails (no LLM
-//!      credentials needed; we just need the flag to be wired end-to-end).
+//!   b. CLI success-path: spawns the real `pi` binary with `--orchestrate-isolate`
+//!      using a mock dispatch script (PI_PI_BINARY); verifies cleanup AND the
+//!      MERGED commit lands on `main`.
+//!   c. CLI failure-path: same flag, missing agents → exit 2, no leaked worktree.
 
 use pi_orchestrate::dispatch::{Dispatch, DispatchOutcome, DispatchRole};
 use pi_orchestrate::{parse_campaign, replay, run_with, validate};
@@ -163,6 +164,57 @@ fn worktree_remove(repo: &Path, wt_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Write the minimal agent definition files needed by `RealDispatch`.
+/// The `agent_root` directory receives `.pi/agents/{name}.md` files
+/// with a trivial frontmatter (no real model — the mock dispatch binary
+/// replaces the pi subprocess before any LLM call is made).
+fn write_agent_files(agent_root: &Path) {
+    let agents_dir = agent_root.join(".pi").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    for name in &["halo-implementer", "code-reviewer"] {
+        std::fs::write(
+            agents_dir.join(format!("{name}.md")),
+            format!("---\nname: {name}\nmodel: fake/model\n---\nSystem prompt.\n"),
+        )
+        .unwrap();
+    }
+}
+
+/// Write a shell script that mimics the `pi -p` dispatch subprocess.
+///
+/// It checks `$PI_ORCHESTRATE_ROLE`:
+///   - "reviewer"     → print READY_TO_MERGE verdict, exit 0
+///   - anything else  → print "implemented", exit 0
+///
+/// This is pointed at via `PI_PI_BINARY` so `RealDispatch` uses it
+/// instead of the real `pi` binary (no LLM calls).
+fn write_mock_pi_script(dir: &Path) -> std::path::PathBuf {
+    let script_path = dir.join("mock-pi.sh");
+    std::fs::write(
+        &script_path,
+        r#"#!/bin/sh
+if [ "$PI_ORCHESTRATE_ROLE" = "reviewer" ]; then
+    echo "Looks good."
+    echo ""
+    echo "Merge readiness: READY_TO_MERGE"
+else
+    echo "implemented"
+fi
+exit 0
+"#,
+    )
+    .unwrap();
+    // Make executable on Unix.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+    }
+    script_path
+}
+
 // ─── tests ───────────────────────────────────────────────────────────────────
 
 /// Library-level happy path: run a one-milestone campaign inside an isolated
@@ -172,7 +224,7 @@ fn worktree_remove(repo: &Path, wt_path: &Path) -> bool {
 /// This specifically validates the merge.rs fix: the linked worktree is
 /// detached; when cherry_pick_to_target tries `git checkout main` and gets
 /// "already used by worktree", it must fall back to detached-HEAD mode and
-/// advance the branch ref via `git branch -f`.
+/// advance the branch ref via `git update-ref` (CAS form).
 #[test]
 fn orchestrate_isolate_cleans_up_worktree_and_merges_to_main() {
     let repo = make_repo();
@@ -214,7 +266,8 @@ fn orchestrate_isolate_cleans_up_worktree_and_merges_to_main() {
     );
 
     // Assertion 2: the MERGED commit is on main in the parent repo.
-    // (The cherry_pick_to_target detach-mode fix must advance the branch ref.)
+    // (The cherry_pick_to_target detach-mode + CAS ref-update fix must
+    // advance the branch ref so the parent sees the cherry-picked commit.)
     let log = git_output(repo_path, &["log", "--oneline", "main"]);
     assert!(
         log.contains("feat: m1"),
@@ -225,6 +278,112 @@ fn orchestrate_isolate_cleans_up_worktree_and_merges_to_main() {
     let events = replay(&summary.state_path).unwrap();
     let has_merged = events.iter().any(|e| e.to == "MERGED");
     assert!(has_merged, "state.jsonl should contain a MERGED event");
+}
+
+/// CLI success-path test: spawns the real `pi` binary with `--orchestrate-isolate`
+/// using a mock dispatch binary (`PI_PI_BINARY` env var) that returns canned
+/// verdicts without hitting a real LLM.
+///
+/// Verifies:
+///   1. `pi` exits 0 (campaign fully MERGED).
+///   2. No `pi-orch-<campaign>-*` directory leaks into `std::env::temp_dir()`.
+///   3. The MERGED commit from `feat/m1` appears on `main` in the parent repo.
+///
+/// This exercises the full `src/bin/pi.rs` code path:
+///   flag parsing → worktree add → run_with(RealDispatch{agent_root=original_cwd})
+///   → mock dispatch → cherry-pick (detached mode, CAS ref update) → worktree remove
+///   → exit 0.
+#[test]
+fn cli_orchestrate_isolate_success_merges_to_main_and_cleans_up() {
+    let repo = make_repo();
+    let repo_path = repo.path();
+
+    // Write agent definition files in the repo root (the `agent_root` that
+    // pi.rs passes to RealDispatch so isolated worktrees can load agents).
+    write_agent_files(repo_path);
+
+    // Write the mock pi script and put it in a tempdir.
+    let script_dir = tempdir().unwrap();
+    let mock_pi = write_mock_pi_script(script_dir.path());
+
+    let unique_suffix = {
+        let uid = uuid::Uuid::new_v4().simple().to_string();
+        uid[..8].to_string()
+    };
+    let campaign_name = format!("cli-isolate-ok-{unique_suffix}");
+    let safe_campaign_name = campaign_name.replace('/', "_");
+
+    let campaign_toml = format!(
+        r#"
+name = "{campaign_name}"
+target_branch = "main"
+
+[defaults]
+reviewer    = "code-reviewer"
+fix_loop_max = 1
+
+[[milestones]]
+id          = "m1"
+branch      = "feat/m1"
+implementer = "halo-implementer"
+assignment  = "implement m1"
+"#
+    );
+    let toml_path = repo_path.join("campaign.toml");
+    std::fs::write(&toml_path, &campaign_toml).unwrap();
+    let state_root = tempdir().unwrap();
+
+    let expected_prefix = format!("pi-orch-{safe_campaign_name}-");
+
+    // Spawn `pi --orchestrate campaign.toml --orchestrate-isolate` with
+    // PI_PI_BINARY pointing at the mock script so RealDispatch uses it
+    // instead of the real pi binary (no LLM calls).
+    let out = Command::new(env!("CARGO_BIN_EXE_pi"))
+        .args([
+            "--orchestrate",
+            toml_path.to_str().unwrap(),
+            "--orchestrate-isolate",
+            "--orchestrate-state-root",
+            state_root.path().to_str().unwrap(),
+        ])
+        .current_dir(repo_path)
+        .env("PI_PI_BINARY", mock_pi.to_str().unwrap())
+        // Strip real API keys — the mock script exits before any LLM call.
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("PI_PROVIDER")
+        .output()
+        .expect("pi binary should spawn");
+
+    let exit_code = out.status.code().unwrap_or(-1);
+    assert_eq!(
+        exit_code, 0,
+        "campaign with mock dispatch should exit 0 (MERGED);\
+         \nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Assertion 1: no leftover pi-orch-* dir for this campaign.
+    let tmpdir = std::env::temp_dir();
+    let leaked: Vec<String> = std::fs::read_dir(&tmpdir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&expected_prefix))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "pi-orch-* dir(s) leaked after --orchestrate-isolate: {:?}",
+        leaked
+    );
+
+    // Assertion 2: feat/m1 commit is now on main in the parent repo.
+    let log = git_output(repo_path, &["log", "--oneline", "main"]);
+    assert!(
+        log.contains("feat: m1"),
+        "feat/m1 commit should be on main after isolated merge, log={log:?}"
+    );
 }
 
 /// CLI-level test: spawn the real `pi` binary with `--orchestrate-isolate`.
