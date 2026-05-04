@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.26)
+- **Status:** Discussion (v0.27)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -1120,7 +1120,7 @@ Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 
 1. **Process subtree empty.** Every descendant the per-call tool spawned (the `bash` shell, anything it forked) is gone. Implementation: bash runs as the leader of a fresh process group; the worker reaps it, then `kill(-pgid, 0)` returns `ESRCH`. On Linux the worker additionally consults a per-call cgroup v2 (`cgroup.procs` empty) — the cgroup is the authoritative test because a daemonized child reparented to PID 1 still appears in the cgroup. macOS/Windows use process-group reparenting detection as a coarser fallback (a known v1 gap; documented).
 2. **Worker transient state cleared.** Per-call temp dirs (`$TMPDIR`/<call_id>) removed; per-call open file descriptors closed; `$PWD`/env scrubbed.
-3. **Guest-local filesystem reset to baseline.** The rootfs is mounted **read-only** from the launcher; everything writable in the guest (other than `/work`, which is the host-mediated workspace) is a tmpfs upper layer in an overlayfs union. The worker's hygiene step unmounts and remounts that tmpfs, restoring the rootfs to the baseline image bit-for-bit. Any `bash` write to `/root/poison`, `/usr/local/bin/poison`, `/etc/passwd`, or any other path outside `/work` evaporates as part of the post-call reset. The ONLY guest mutation that survives a tool call is what the tool wrote to `/work` (which is the host's session cwd) — the contract that the agent's `read`/`write`/`edit` semantics depend on. **Required test:** `bash 'echo poison > /root/marker; ls /usr/local/bin/'`, then verify the next acquire on the same `BootSpec` returns no `/root/marker` and no `/usr/local/bin/<modified>`. macOS/Windows v1 inherit this guarantee transitively from the destroy-on-release rule (the VM itself is gone).
+3. **Guest-local filesystem reset to baseline (launcher-owned).** The rootfs image is attached as a **read-only** block device by the launcher. The guest's `/init` mounts an overlayfs union: `lowerdir=<read-only-rootfs>`, `upperdir=<launcher-supplied tmpfs>`, `workdir=<launcher-supplied tmpfs>`. Crucially, **the launcher owns the reset, not the worker**: the worker cannot reliably unmount its own running root. After every tool call, the worker reports `post_call_state` over the wire and the **launcher** then performs the reset by issuing a host-side reset RPC over a separate vsock control port (port `5002`) that triggers a guest-side `pivot_root`-style remount: the in-guest reset agent (a tiny static helper at `/sbin/pi-vm-reset`, ~50 LoC) unmounts the current overlay tmpfs upperdir/workdir and replaces them with fresh tmpfs instances, leaving the read-only lowerdir untouched. Any `bash` write to `/root/poison`, `/usr/local/bin/poison`, `/etc/passwd`, or any other path outside `/work` evaporates because those writes were upperdir-only. The ONLY guest mutation that survives a tool call is what the tool wrote to `/work` (which is the host's session cwd) — the contract `read`/`write`/`edit` semantics depend on. **Fallback rule:** if the reset RPC fails or the in-guest reset agent isn't present in the rootfs (older rootfs version), the launcher MUST destroy the VM rather than return it to the pool — never silently fall back to "best effort", which would re-introduce the leak. **Required negative tests:** (a) `bash 'echo poison > /root/marker'` then verify next acquire on the same `BootSpec` ring (the harness must assert it hit the warm pool and reused, not cold-booted) finds no `/root/marker`; (b) `bash 'install -m755 /usr/bin/true /usr/local/bin/poison && /usr/local/bin/poison'` (forces an upperdir copy-up of a system path) — next acquire's `ls /usr/local/bin/` must NOT show `poison`; (c) `bash 'echo bad >> /etc/passwd'` — next acquire's `cat /etc/passwd` must equal the baseline. macOS/Windows v1 inherit this guarantee transitively from the destroy-on-release rule (the VM itself is gone).
 
 The worker reports the verdict on the wire as `ToolResponse.post_call_state` (`Clean` | `SuspectGuestState`). The tool itself may have succeeded; the post-call probe is what decides pool reuse. The host composes `final_hint = min(host_outcome_hint, post_call_state)` (`Clean < SuspectGuestState`) before calling `release(final_hint)`, so a daemonization leak forces destroy regardless of the tool's success bit. A missing `post_call_state` field defaults to `SuspectGuestState` — workers must *prove* cleanliness rather than implicitly assert it. The verdict is not surfaced to the model (the tool's `model_output` is unchanged); it's strictly a host/launcher signal.
 
@@ -1657,12 +1657,16 @@ build time, and `pi sandbox doctor` re-checks at host provisioning):
    connection.
 3. Spawns `contextfsd --config /etc/contextfsd/daemon.toml` (the
    actual flag form, per `<contextfs>/crates/contextfsd/src/main.rs`).
-4. Polls `stat("/work")` until it returns a `FUSE` filesystem type
-   (typically <100 ms after contextfsd reports the mount). On success,
-   writes `/work/.cfs-ready` (touch).
+4. Polls readiness **without mutating `/work`**: (a) `statfs("/work")`
+   returns `FUSE_SUPER_MAGIC`; (b) a control-plane health RPC to
+   contextfsd's `/run/contextfs/broker.sock` returns `READY`. The
+   user workspace is **never** written to as part of boot — boot/
+   readiness MUST be observable without modifying `/work`. The
+   readiness gate file (`/run/pi-cfs/.ready`, on the guest's tmpfs
+   root, NOT `/work`) is what later steps wait on.
 5. Spawns `pi-sandbox-worker` with `cwd = /work` only after step 4's
-   sentinel exists. This is the existing worker; no changes beyond
-   the cwd.
+   `/run/pi-cfs/.ready` sentinel exists. This is the existing
+   worker; no changes beyond the cwd.
 6. Acts as PID 1 / re-aps zombies from the daemon side; if `contextfsd`
    exits, `pi-cfs-init` writes a single-line failure record to the
    guest's serial console (`/dev/ttyS0`) of the form
@@ -1677,11 +1681,14 @@ build time, and `pi sandbox doctor` re-checks at host provisioning):
    and exits non-zero. The `MicroVmLauncher` surfaces this as a typed
    `AcquireError::ReadyTimeout { boot_timeout, last_dmesg }`.
 
-The readiness sentinel lives in `/work` (the FUSE mount itself); its
-appearance proves both that the FUSE mount is up AND that contextfsd
-accepted the write through the broker → `cfs-fs-server` → kernel
-path. We do NOT claim contextfsd writes the sentinel — `pi-cfs-init`
-does, after externally observing the FUSE mount.
+**Boot must not mutate `/work`.** The readiness sentinel lives on the
+guest's private tmpfs root (`/run/pi-cfs/.ready`), NOT on the user's
+workspace mount. Earlier drafts (≤v0.25) wrote `/work/.cfs-ready` and
+relied on its appearance to prove FUSE-up + broker-acceptance; that
+silently mutated the host's session cwd at every boot. v0.26+ proves
+readiness via the `statfs(/work) == FUSE_SUPER_MAGIC` check plus a
+control-plane health RPC to contextfsd. The host's session cwd is
+read-only-clean across boot.
 
 Failure surface visible to `MicroVmProvider`:
 
@@ -1692,7 +1699,7 @@ Failure surface visible to `MicroVmProvider`:
 | `contextfsd` rejects with `BrokerMasterEpochTooOld`     | `BrokerMasterEpochTooOld { epoch }` (eviction per §3.5.2) |
 | `contextfsd` rejects with `tenant_mode_legacy_no_vm_id` | `BrokerTenantModeMismatch`        |
 | `contextfsd` rejects with `oidc_*` codes                | `BrokerOidcRejected { code }`     |
-| `/work/.cfs-ready` not written within `boot_timeout`    | `ReadyTimeout { boot_timeout, last_dmesg }` |
+| `/run/pi-cfs/.ready` not written within `boot_timeout`  | `ReadyTimeout { boot_timeout, last_dmesg }` |
 
 Schema-drift detection: pi-rs's `MicroVmProviderConfig` has a
 `#[serde(deny_unknown_fields)]` mirror of contextfsd's `DaemonConfig`
@@ -1778,7 +1785,9 @@ A real probe takes 50–200ms, not 10ms — the time accounts for the actual fil
 `microvm` defends against:
 
 - **Malicious model output executing arbitrary host commands.** A model that is jailbroken or prompt-injected emits `bash` calls; the guest contains the blast radius (no host fs outside `/work`, no network, killed on timeout).
-- **Tool input crafted to escape the sandbox.** Path traversal via absolute paths or `..` segments in `read`/`write`/`edit` is rejected by the guest worker. Host-side cwd boundary enforcement is **strong on Linux/Firecracker** (`cfs-fs-server --backend-root` does symlink-resolve-beneath: every path operation is canonicalised under the backend root, and a symlink whose target escapes the root is rejected). On **macOS/vfkit** and **Windows/cloud-hypervisor** v1, virtio-fs's mount-rooted scope only blocks paths that escape via the FUSE namespace; a symlink already inside `/work` that points outside (e.g. `/work/escape -> /etc`) is followed by virtio-fs without a beneath-root check. **v1 limitation, documented**: on those platforms the agent can theoretically read/write outside `/work` via a pre-existing symlink in the host cwd. v1.1 adds explicit resolve-beneath in the worker on those platforms; until then, operators on macOS/Windows should not microvm-sandbox sessions where the host cwd contains adversarially-placed symlinks.
+- **Tool input crafted to escape the sandbox.** Two distinct boundaries to keep separate:
+  1. **Structured file tools** (`read`/`write`/`edit`/`grep`/`find`/`ls`) — input paths come from JSON tool input. The HOST runs `resolve_beneath(host_cwd, requested, allow_missing_leaf)` BEFORE the path crosses the wire (per §"Path virtualization"); absolute paths or `..` segments outside `<host_cwd>` are rejected with `ToolError::InvalidInput`. This protection works identically across Linux/macOS/Windows because it's host-side and doesn't depend on the underlying `/work` mount.
+  2. **`bash`-followed symlinks already on disk** — when bash inside the guest dereferences a path, the guest filesystem layer follows symlinks. On **Linux/Firecracker** the contextfs `cfs-fs-server --backend-root` does symlink-resolve-beneath at the FUSE layer: a symlink inside `/work` whose target escapes the backend root (e.g. `/work/escape → /etc`) is rejected at dereference time. On **macOS/vfkit** and **Windows/cloud-hypervisor** v1 the virtio-fs RW share has no equivalent beneath-root check — bash following a pre-existing escape symlink crosses out of the share into the host filesystem. **v1 limitation, documented and tested**: on those platforms the agent can theoretically read/write outside `/work` via a pre-existing symlink in the host cwd; the structured tool path is unaffected. v1.1 adds a guest-side resolve-beneath wrapper around bash on macOS/Windows; until then, operators on those platforms should not microvm-sandbox sessions where the host cwd contains adversarially-placed symlinks.
 - **Resource exhaustion.** `VmCeiling` (per-VM, set at boot) and `CallLimits` (per-call, derived from `ToolContext`) cap memory, vCPUs, disk, wall time, and per-call output bytes — `VmCeiling` is the partition key on the warm pool.
 
 `microvm` does **not** defend against:
@@ -1893,10 +1902,10 @@ Nine commits across four phases. Realistic LoC estimates (calibrated against aeg
 
 The user-facing surface lands in stages so the maintainer's primary use case (Linux + Firecracker) ships without waiting on macOS + Windows runners:
 
-- **Stage 1 (after Commit D merges):** `--sandbox-provider=microvm:firecracker` (explicit pin) goes live. Documented as "Linux only, beta." `pi sandbox doctor` works for the firecracker path. Maintainer dogfoods on Manjaro.
+- **Stage 1 (after Commits D + G merge):** `--sandbox-provider=microvm:firecracker` (explicit pin) goes live. The CLI flag and `MicroVmProvider` itself land in Commit G; Commit D ships only the `FirecrackerLauncher` + warm pool that G then wires up. Documented as "Linux only, beta." `pi sandbox doctor` works for the firecracker path. Maintainer dogfoods on Manjaro.
 - **Stage 2 (after Commit E merges):** `--sandbox-provider=microvm:vfkit` (explicit pin) goes live. macOS users can dogfood.
 - **Stage 3 (after Commit F merges):** `--sandbox-provider=microvm:cloud-hypervisor` goes live on Windows.
-- **Stage 4 (Commit G + post-impl follow-ups):** `--sandbox-provider=microvm` (auto-pick) goes live with the cross-OS coverage promise. **Gating bar**: not just "all three launchers exist" — also requires symlink-resolve-beneath parity on macOS/vfkit and Windows/cloud-hypervisor (per §6 threat model: those launchers' v1 host-side path resolution does not check beneath-root for symlinks pre-placed in `/work`). Until that parity ships:
+- **Stage 4 (Commit G + post-impl follow-ups):** `--sandbox-provider=microvm` (auto-pick) goes live with the cross-OS coverage promise. **Gating bar**: not just "all three launchers exist" — also requires guest-side symlink-resolve-beneath parity on macOS/vfkit and Windows/cloud-hypervisor when bash dereferences a pre-existing in-`/work` symlink (per §6 threat model item 2). The structured-tool path is host-side `resolve_beneath` and is already cross-OS uniform; the gap is bash-on-virtio-fs only. Until that parity ships:
   - Linux/Firecracker `--sandbox-provider=microvm` and `microvm:firecracker` are GA.
   - macOS/vfkit and Windows/cloud-hypervisor remain **explicit-pin beta** (`--sandbox-provider=microvm:vfkit` / `:cloud-hypervisor`) with a stderr banner on first use noting the symlink-escape limitation. Plain `--sandbox-provider=microvm` on those OSes errors with a remediation message pointing to the explicit pin or RFD 0026 remote backends.
   - The auto-pick promise unlocks platform-by-platform once each platform's resolve-beneath lands. v1.1 (per `rfd/0023-sandbox-microvm.md` §6) closes the gap on vfkit; v1.2 on cloud-hypervisor.
@@ -1963,6 +1972,39 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.27 (2026-05-04):** rfd-critic v0.26 pass: 1 critical
+  (filesystem-reset implementation details) + 4 small. All real,
+  all closed. (1) §"Post-call hygiene" item 3 was vague on
+  ownership and on which paths get exercised. v0.27 makes the
+  reset **launcher-owned** (not worker — a worker can't unmount
+  its own running root): launcher attaches rootfs as RO block;
+  guest `/init` mounts overlay (`lowerdir=ro-rootfs, upperdir/
+  workdir=tmpfs`); after each call the launcher issues a host-side
+  reset RPC over a separate vsock control port (5002) to a tiny
+  in-guest agent (`/sbin/pi-vm-reset`, ~50 LoC, statically
+  compiled) that swaps the upperdir/workdir tmpfs instances.
+  Fallback: reset RPC failure / agent missing → destroy VM
+  (never silent best-effort). Negative tests strengthened to
+  three cases including a system-path copy-up
+  (`install -m755 ... /usr/local/bin/poison && exec it`) and an
+  `/etc/passwd` mutation, with explicit harness assertion that
+  the next acquire **hit the warm pool ring** (not cold-booted).
+  (2) §3.5.9 readiness sentinel was writing `/work/.cfs-ready` on
+  every boot, mutating the host's session cwd. Now uses
+  `statfs(/work) == FUSE_SUPER_MAGIC` + control-plane health RPC
+  to contextfsd; sentinel moved to `/run/pi-cfs/.ready` on the
+  guest's private tmpfs. Added explicit normative rule:
+  "boot/readiness MUST NOT write `/work`". (3) Stage 1 ordering
+  fixed: was "after Commit D"; the CLI flag and `MicroVmProvider`
+  itself live in Commit G, so Stage 1 is "after Commits D + G".
+  (4) §6 threat model symlink-escape language untangled into two
+  separate boundaries: structured file tools protected by
+  host-side `resolve_beneath` (cross-OS uniform), bash-followed
+  pre-existing in-`/work` symlinks protected only on
+  Linux/Firecracker via contextfs `cfs-fs-server --backend-root`;
+  macOS/vfkit + Windows/cloud-hypervisor virtio-fs has no
+  equivalent in v1 (documented gap). Stage 4 GA-bar wording
+  updated to scope the gap precisely to bash-on-virtio-fs.
 - **v0.26 (2026-05-04):** rfd-critic v0.25 pass: 1 critical
   (filesystem reset between pool reuses) + small. Critical was
   real and substantive. v0.25's post-call hygiene only covered
