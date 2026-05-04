@@ -80,6 +80,15 @@ pub(crate) fn read_stdin_if_piped() -> Option<String> {
     if atty_stdin() {
         return None;
     }
+    // is_terminal() returns false for both real pipes (`echo x | pi -p`)
+    // AND for socketpair-stdin from shells nested under tmux/screen/sshd.
+    // In the second case nobody ever closes the write end and
+    // read_to_string blocks forever. Pre-flight stdin with a 50ms poll;
+    // bail out if no bytes are pending, since by the time pi-coding-agent
+    // has finished init any genuinely-piped bytes are already buffered.
+    if !stdin_has_pending_data(50) {
+        return None;
+    }
     let mut buf = String::new();
     if std::io::stdin().read_to_string(&mut buf).is_ok() && !buf.trim().is_empty() {
         Some(buf)
@@ -94,6 +103,24 @@ fn atty_stdin() -> bool {
     // skip stdin slurping. Use IsTerminal from std (1.70+).
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
+}
+
+#[cfg(unix)]
+fn stdin_has_pending_data(timeout_ms: i32) -> bool {
+    let mut pfd = libc::pollfd {
+        fd: 0,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let r = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    r > 0 && (pfd.revents & (libc::POLLIN | libc::POLLHUP)) != 0
+}
+
+#[cfg(not(unix))]
+fn stdin_has_pending_data(_timeout_ms: i32) -> bool {
+    // On Windows we keep the legacy behavior — pipes there don't exhibit
+    // the same socketpair-no-EOF foot-gun under typical shells.
+    true
 }
 
 /// Expand a leading slash command in the user prompt for non-TUI modes.
