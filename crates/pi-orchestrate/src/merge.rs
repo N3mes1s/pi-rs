@@ -264,6 +264,18 @@ pub fn cherry_pick_to_target(
     branch_sha: &str,
 ) -> MergeOutcome {
     // 1. Switch to target_branch.
+    //
+    // In isolated-worktree runs the parent repo keeps `target_branch`
+    // checked out, so `git checkout <target_branch>` in the linked
+    // worktree will fail with "already used by worktree …". We detect
+    // that and fall back to a detached-HEAD checkout of the same SHA:
+    //   a. `git checkout --detach <target_head_at_review>` — succeeds even
+    //      when the branch is locked by another worktree because we
+    //      reference the commit object, not the branch name.
+    //   b. cherry-pick as normal.
+    //   c. `git branch -f <target_branch> HEAD` — advance the branch ref
+    //      to the post-cherry-pick HEAD in this worktree; the parent repo
+    //      will see the new commits when it next reads the branch.
     let checkout = Command::new("git")
         .args(["checkout", target_branch])
         .current_dir(repo_root)
@@ -271,12 +283,37 @@ pub fn cherry_pick_to_target(
     let Ok(co) = checkout else {
         return MergeOutcome::GitError(format!("git checkout {target_branch}: spawn failed"));
     };
-    if !co.status.success() {
-        return MergeOutcome::GitError(format!(
-            "git checkout {target_branch} failed: {}",
-            String::from_utf8_lossy(&co.stderr).trim()
-        ));
-    }
+    let detach_mode = if co.status.success() {
+        false
+    } else {
+        // If the failure is specifically because the branch is locked by
+        // another worktree, try detached fallback.
+        let stderr = String::from_utf8_lossy(&co.stderr);
+        if stderr.contains("already used by worktree") || stderr.contains("already checked out") {
+            // Detach at the exact SHA the staleness check approved.
+            let det = Command::new("git")
+                .args(["checkout", "--detach", target_head_at_review])
+                .current_dir(repo_root)
+                .output();
+            let Ok(d) = det else {
+                return MergeOutcome::GitError(format!(
+                    "git checkout --detach {target_head_at_review}: spawn failed"
+                ));
+            };
+            if !d.status.success() {
+                return MergeOutcome::GitError(format!(
+                    "git checkout --detach {target_head_at_review} failed: {}",
+                    String::from_utf8_lossy(&d.stderr).trim()
+                ));
+            }
+            true // need `git branch -f` after cherry-pick succeeds
+        } else {
+            return MergeOutcome::GitError(format!(
+                "git checkout {target_branch} failed: {}",
+                stderr.trim()
+            ));
+        }
+    };
 
     // 2. Cherry-pick the range. `target_head..branch_sha` expands to
     //    every commit reachable from branch_sha but not from target,
@@ -291,6 +328,55 @@ pub fn cherry_pick_to_target(
         return MergeOutcome::GitError("git cherry-pick: spawn failed".into());
     };
     if cp.status.success() {
+        // 2a. In detach-mode (branch was locked by another worktree), advance
+        //     the branch ref to the post-cherry-pick HEAD so the parent repo
+        //     sees the new commits on `target_branch`.
+        //
+        //     `git branch -f <target_branch> HEAD` is rejected by git when
+        //     the branch is checked out by another worktree ("cannot force
+        //     update the branch … used by worktree"). `git update-ref` writes
+        //     the ref object directly and is not subject to that guard.
+        if detach_mode {
+            let new_head = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo_root)
+                .output();
+            let new_sha = match new_head {
+                Ok(o) if o.status.success() => {
+                    String::from_utf8_lossy(&o.stdout).trim().to_string()
+                }
+                Ok(o) => {
+                    return MergeOutcome::GitError(format!(
+                        "cherry-pick succeeded but rev-parse HEAD failed: {}",
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    ));
+                }
+                Err(e) => {
+                    return MergeOutcome::GitError(format!(
+                        "cherry-pick succeeded but rev-parse HEAD could not be spawned: {e}"
+                    ));
+                }
+            };
+            let ref_path = format!("refs/heads/{target_branch}");
+            let ur = Command::new("git")
+                .args(["update-ref", &ref_path, &new_sha])
+                .current_dir(repo_root)
+                .output();
+            match ur {
+                Ok(r) if r.status.success() => {}
+                Ok(r) => {
+                    return MergeOutcome::GitError(format!(
+                        "cherry-pick succeeded but `git update-ref {ref_path} {new_sha}` failed: {}",
+                        String::from_utf8_lossy(&r.stderr).trim()
+                    ));
+                }
+                Err(e) => {
+                    return MergeOutcome::GitError(format!(
+                        "cherry-pick succeeded but `git update-ref {ref_path} {new_sha}` could not be spawned: {e}"
+                    ));
+                }
+            }
+        }
         return MergeOutcome::Merged;
     }
 

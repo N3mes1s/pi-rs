@@ -5,11 +5,12 @@
 //!   2. The worktree is removed after the run (no leftover `pi-orch-*` dir).
 //!   3. The campaign's MERGED commit is visible on `main` in the parent repo.
 //!
-//! We exercise the worktree-allocation contract directly (rather than spawning
-//! a real `pi` subprocess that would require live LLM credentials) by
-//! reproducing the exact git commands that `pi.rs` runs and feeding the runner
-//! a `FakeDispatch`. This is the same pattern used in
-//! `crates/pi-orchestrate/tests/runner_v1.rs`.
+//! Two levels of coverage:
+//!   a. Library-level: exercises `run_with` via a `FakeDispatch` — verifies
+//!      merge.rs handles the detached-worktree checkout path correctly.
+//!   b. CLI-level: spawns the real `pi` binary with `--orchestrate-isolate`
+//!      and verifies worktree cleanup even when the campaign fails (no LLM
+//!      credentials needed; we just need the flag to be wired end-to-end).
 
 use pi_orchestrate::dispatch::{Dispatch, DispatchOutcome, DispatchRole};
 use pi_orchestrate::{parse_campaign, replay, run_with, validate};
@@ -96,9 +97,9 @@ fn git_output(p: &Path, args: &[&str]) -> String {
 
 /// Create a tempdir git repo with `main` branch + one commit +
 /// a `feat/m1` branch that adds one file.  The parent working tree
-/// is left in **detached-HEAD** mode so that linked worktrees can
-/// `git checkout main` without hitting the "branch is already used by
-/// another worktree" error.  Returns the TempDir.
+/// stays on `main` (normal checkout, NOT detached) — the merge.rs fix
+/// handles the "already used by worktree" error that linked worktrees
+/// hit when they try to `git checkout main` while the parent has it.
 fn make_repo() -> tempfile::TempDir {
     let dir = tempdir().unwrap();
     let p = dir.path();
@@ -115,11 +116,8 @@ fn make_repo() -> tempfile::TempDir {
     std::fs::write(p.join("feat.txt"), "milestone 1\n").unwrap();
     git(p, &["add", "feat.txt"]);
     git(p, &["commit", "-q", "-m", "feat: m1"]);
+    // Return to main — parent stays on main (realistic scenario).
     git(p, &["checkout", "-q", "main"]);
-    // Detach the parent HEAD so that linked worktrees (created by
-    // `git worktree add --detach`) are free to `git checkout main`
-    // during cherry-pick without hitting "already used by worktree".
-    git(p, &["checkout", "--detach", "HEAD"]);
     dir
 }
 
@@ -167,8 +165,14 @@ fn worktree_remove(repo: &Path, wt_path: &Path) -> bool {
 
 // ─── tests ───────────────────────────────────────────────────────────────────
 
-/// The happy path: run a one-milestone campaign inside an isolated worktree,
-/// verify the worktree is cleaned up and the commit lands on `main`.
+/// Library-level happy path: run a one-milestone campaign inside an isolated
+/// worktree (parent stays on `main`), verify the worktree is cleaned up and
+/// the commit lands on `main`.
+///
+/// This specifically validates the merge.rs fix: the linked worktree is
+/// detached; when cherry_pick_to_target tries `git checkout main` and gets
+/// "already used by worktree", it must fall back to detached-HEAD mode and
+/// advance the branch ref via `git branch -f`.
 #[test]
 fn orchestrate_isolate_cleans_up_worktree_and_merges_to_main() {
     let repo = make_repo();
@@ -210,6 +214,7 @@ fn orchestrate_isolate_cleans_up_worktree_and_merges_to_main() {
     );
 
     // Assertion 2: the MERGED commit is on main in the parent repo.
+    // (The cherry_pick_to_target detach-mode fix must advance the branch ref.)
     let log = git_output(repo_path, &["log", "--oneline", "main"]);
     assert!(
         log.contains("feat: m1"),
@@ -220,6 +225,107 @@ fn orchestrate_isolate_cleans_up_worktree_and_merges_to_main() {
     let events = replay(&summary.state_path).unwrap();
     let has_merged = events.iter().any(|e| e.to == "MERGED");
     assert!(has_merged, "state.jsonl should contain a MERGED event");
+}
+
+/// CLI-level test: spawn the real `pi` binary with `--orchestrate-isolate`.
+///
+/// The campaign references agents that don't exist on disk, so `RealDispatch`
+/// will return a FAILED outcome quickly (no LLM credentials needed). The key
+/// assertions are:
+///   1. `pi` exits without panicking (exit code 2 or similar, not a crash).
+///   2. No `pi-orch-*` directory survives in `std::env::temp_dir()` after the
+///      run — the cleanup path in `src/bin/pi.rs` runs even on campaign failure.
+///
+/// This exercises the `--orchestrate-isolate` wiring in `src/bin/pi.rs`
+/// end-to-end: flag parsing → worktree add → run_with → worktree remove.
+#[test]
+fn cli_orchestrate_isolate_cleans_up_worktree_on_failure() {
+    let repo = make_repo();
+    let repo_path = repo.path();
+
+    // Use a unique campaign name to avoid collisions with pi-orch-* directories
+    // created by other tests running concurrently in the same test binary.
+    let unique_suffix = {
+        let uid = uuid::Uuid::new_v4().simple().to_string();
+        uid[..8].to_string()
+    };
+    let campaign_name = format!("cli-isolate-test-{unique_suffix}");
+    let safe_campaign_name = campaign_name.replace('/', "_");
+
+    // Write a campaign TOML with the unique name.
+    let campaign_toml = format!(
+        r#"
+name = "{campaign_name}"
+target_branch = "main"
+
+[defaults]
+reviewer    = "code-reviewer"
+fix_loop_max = 1
+
+[[milestones]]
+id          = "m1"
+branch      = "feat/m1"
+implementer = "halo-implementer"
+assignment  = "implement m1"
+"#
+    );
+    let toml_path = repo_path.join("campaign.toml");
+    std::fs::write(&toml_path, &campaign_toml).unwrap();
+
+    let state_root = tempdir().unwrap();
+
+    // The expected pi-orch-* prefix for this campaign.
+    let expected_prefix = format!("pi-orch-{safe_campaign_name}-");
+
+    // Spawn `pi --orchestrate campaign.toml --orchestrate-isolate`.
+    let out = Command::new(env!("CARGO_BIN_EXE_pi"))
+        .args([
+            "--orchestrate",
+            toml_path.to_str().unwrap(),
+            "--orchestrate-isolate",
+            "--orchestrate-state-root",
+            state_root.path().to_str().unwrap(),
+        ])
+        .current_dir(repo_path)
+        // Prevent pi from reading real API keys that might trigger LLM calls;
+        // the campaign will still fail quickly when agent files are missing.
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("PI_PROVIDER")
+        .output()
+        .expect("pi binary should spawn");
+
+    // The campaign has no agent .md files → RealDispatch returns FAILED;
+    // we expect exit code 2 (at least one FAILED milestone). The binary
+    // must NOT exit 0 but also must NOT crash (signal / panic → code 101).
+    let exit_code = out.status.code().unwrap_or(-1);
+    assert_ne!(
+        exit_code, 0,
+        "campaign with missing agents should not exit 0"
+    );
+    // 101 would be an unwrap/panic; -1 means killed by signal.
+    assert!(
+        exit_code > 0 && exit_code < 100,
+        "expected a normal non-zero exit (got {exit_code}); stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Assert cleanup: no pi-orch-<campaign_name>-* directory should remain.
+    // We filter by the specific expected prefix for this campaign to avoid
+    // interference from other tests running in parallel.
+    let tmpdir = std::env::temp_dir();
+    let leaked: Vec<String> = std::fs::read_dir(&tmpdir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&expected_prefix))
+        .collect();
+
+    assert!(
+        leaked.is_empty(),
+        "pi-orch-* worktree dir(s) for this campaign leaked after --orchestrate-isolate: {:?}",
+        leaked
+    );
 }
 
 /// The CLI flag is parsed correctly by clap.
