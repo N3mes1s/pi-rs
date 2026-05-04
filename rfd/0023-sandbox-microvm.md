@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.21)
+- **Status:** Discussion (v0.22)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -624,6 +624,45 @@ pub struct MicroVmProvider {
     /// Per-tool overrides. `bash` typically wants a longer timeout
     /// than `read`/`ls`. Looked up by tool name.
     per_tool_call_limits: BTreeMap<String, CallLimits>,
+    /// In-process dispatcher for host-bound tools (web_search in v1).
+    /// `MicroVmProvider::execute_tool` first asks
+    /// `host_tools.is_host_bound(tool_name)` and short-circuits the
+    /// VM acquire when true. Inherited unchanged across subagents
+    /// (same Arc); the dispatcher carries provider config / API
+    /// credentials for any host-side tool the operator opted into.
+    /// v1 ships exactly one impl, `BuiltinHostTools`, that hardcodes
+    /// `web_search` against `pi-tools-net`. Deliberately not extensible
+    /// from operator config in v1 — widening the host-trust boundary
+    /// before the default path is dogfooded is premature.
+    host_tools: Arc<dyn HostBoundToolDispatcher>,
+}
+
+/// In-process executor for tools that bypass the guest microVM. Used
+/// for tools that must execute on the host (network egress, the
+/// caller's filesystem outside `<host_cwd>`, …) — currently only
+/// `web_search`. Returns the same shape the guest path returns so
+/// telemetry stays uniform.
+#[async_trait]
+pub trait HostBoundToolDispatcher: Send + Sync {
+    /// Plan-time check: would `execute()` accept this tool?
+    fn is_host_bound(&self, tool_name: &str) -> bool;
+
+    /// Execute the tool in-process on the host. Returns
+    /// `(tool_result, execution)` so the caller can build a
+    /// `SandboxOutcome` with `dispatch_path: "host-direct"`. Errors
+    /// surface as `SandboxError` with the same taxonomy as guest
+    /// dispatch (Acquire / Execute) where applicable.
+    async fn execute(
+        &self,
+        ctx: &pi_tools::ToolContext,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+    ) -> Result<HostExecOutcome, SandboxError>;
+}
+
+pub struct HostExecOutcome {
+    pub tool_result: ToolResult,
+    pub execution: SandboxExecution,
 }
 
 impl MicroVmProvider {
@@ -662,12 +701,13 @@ impl SandboxProvider for MicroVmProvider {
         // Runtime-native orchestration tools (task / subagent — anything
         // that drives the agent's outer loop, per RFD 0005) bypass
         // SandboxProvider entirely BEFORE we get here. The runtime
-        // dispatcher checks `tool.is_runtime_native()` first and never
-        // calls SandboxProvider::execute_tool for those. We assert
-        // it as a defense-in-depth invariant; reaching this branch is
-        // a runtime bug, not a sandbox concern.
-        debug_assert!(!is_runtime_native_tool(tool_name),
-            "runtime-native {tool_name} should never reach SandboxProvider");
+        // dispatcher checks `tool.dispatch_class()` first and never
+        // calls SandboxProvider::execute_tool for `RuntimeNative`
+        // tools (task/subagent/etc.). We assert it as a defense-in-
+        // depth invariant; reaching this branch is a runtime bug,
+        // not a sandbox concern.
+        debug_assert!(tool_dispatch_class(tool_name) != ToolDispatchClass::RuntimeNative,
+            "RuntimeNative tool {tool_name} should never reach SandboxProvider");
         // monitor: incompatible with one-shot RPC, see §"Tool availability".
         if tool_name == "monitor" {
             return Err(SandboxError::ToolUnavailable {
@@ -904,6 +944,23 @@ pub struct ToolRequest {
     pub tool_input: serde_json::Value,
     pub max_output_bytes: u32,
     pub timeout_ms: u32,
+    /// Host-side cwd this call originated from (already canonicalised
+    /// by `MicroVmProvider`). The worker keeps the value opaque, with
+    /// two narrow uses:
+    ///   1. Inject `PWD=<host_cwd>` into bash's environment so shell
+    ///      builtins (`pwd`, `echo $PWD`) print the host path —
+    ///      best-effort per the path-virtualization contract;
+    ///      `pwd -P`, `realpath .`, `readlink /proc/self/cwd` still
+    ///      see `/work`.
+    ///   2. Provide the inverse-rewrite anchor when the worker emits
+    ///      `model_output` / `display`: literal `/work` prefixes are
+    ///      rewritten back to `host_cwd` BEFORE the response is sent,
+    ///      so the host receives already-natural paths and only has
+    ///      to rewrite the JSON keys it doesn't trust the worker to
+    ///      handle.
+    /// The host re-validates inverse-rewrites on receipt — guest
+    /// output is not trusted to be rewriting-correct.
+    pub host_cwd: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -968,7 +1025,9 @@ Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 | `display`          | `ToolResponse.display` after inverse path rewrite of any string field whose JSON path matches the per-tool path-key list (e.g. `path`, `paths[*]`, `matches[*].path`). Image `read` carries `{kind: "image", path: <abs>, base64: <b64>}` — `path` is rewritten, `base64` is passed through verbatim. | Preserves UI parity with `LocalProcessProvider`. |
 | `is_error`         | `ToolResponse.is_error`                            | Direct copy. |
 
-`SandboxOutcome.execution: SandboxExecution` (defined in §2) is populated from the raw fields: `execution.stdout = ToolResponse.stdout` (path-rewritten for telemetry parity), `execution.stderr = ToolResponse.stderr` (rewritten), `execution.exit_status = ToolResponse.exit_status`. `guest_duration_ms` goes into the `SandboxAction` telemetry row alongside the existing `duration_ms`. There is **no** `SandboxAction.stderr` field — earlier drafts referenced one; it does not exist in the schema in §2 and is not added.
+`SandboxOutcome.execution: SandboxExecution` (defined in §2) is populated from the raw wire fields **without rewriting**: `execution.stdout = ToolResponse.stdout`, `execution.stderr = ToolResponse.stderr`, `execution.exit_status = ToolResponse.exit_status`. Path rewriting applies **only** to `model_output` and `display`; `execution` stays guest-truthful so post-mortem debugging shows what the guest process actually saw (`/work/...` paths included). Operators who want a host-flavored execution view can derive it from `model_output` (which IS rewritten); the raw stream is kept for fidelity. `guest_duration_ms` goes into the `SandboxAction` telemetry row alongside the existing `duration_ms`. There is **no** `SandboxAction.stderr` field — earlier drafts referenced one; it does not exist in the schema in §2 and is not added.
+
+**Timeout hygiene before pool return.** When `ExecuteError::CallLimit { wall_timeout }` fires, the worker MUST: (1) send `SIGTERM` to the spawned tool process group; (2) drain stdin/stdout/stderr pipes to EOF or a 250 ms hard cutoff, whichever is first; (3) on cutoff, send `SIGKILL` and continue draining; (4) emit the resulting `ToolResponse` with `is_error = true`, `model_output` set to a short timeout marker, and `exit_status = 124` (GNU `timeout` convention). Only after step (4) is the worker considered idle — and only then is the host allowed to mark the VM as `ExecuteOutcomeHint::Clean` and return it to the pool. The host's `release()` waits for `vm.execute()`'s future to resolve with the `CallLimit` error before reading the hint, which gives the worker the natural signal it has finished cleanup. If the worker itself hangs past `wall_timeout + 1s`, the launcher escalates to a hard VM kill and reports `ExecuteOutcomeHint::SuspectGuestState`.
 
 This mapping is what `RemoteSession::execute()` in RFD 0026 must also implement so that local + remote sandboxes produce indistinguishable `ToolResult` shapes downstream of the agent loop.
 
@@ -988,16 +1047,19 @@ diff hunks stay coherent across providers). The provider performs
 the translation; the model never sees `/work` in tool inputs or
 outputs.
 
-**Per-tool rewriting**: the table below is the **specification**; the
-**source of truth** is `crates/pi-sandbox/src/path_rewrite/registry.rs`,
-a normative const map of per-tool input/output path keys
-(`InputKey::Single("path")`, `OutputKey::DisplayJsonPath("path")`,
-`OutputKey::ModelOutputSubstring`, etc.). A unit test
-(`crates/pi-sandbox/tests/path_rewrite_registry.rs`) iterates the
-registry against fixtures derived from real `LocalProcessProvider`
-results and asserts host↔guest parity for each tool. Adding a new
-guest-bound tool requires extending the registry + adding a fixture;
-the parity test fails closed otherwise.
+**Per-tool rewriting**: the table below is the **normative
+specification** today. Commit G adds
+`crates/pi-sandbox/src/path_rewrite/registry.rs` — a const map of
+per-tool input/output path keys (`InputKey::Single("path")`,
+`OutputKey::DisplayJsonPath("path")`,
+`OutputKey::ModelOutputSubstring`, etc.) plus a parity test at
+`crates/pi-sandbox/tests/path_rewrite_registry.rs` that iterates the
+registry against fixtures captured from `LocalProcessProvider`
+results and asserts host↔guest parity for each tool. From Commit G
+onward the registry, not this table, is the source of truth; the
+table stays as documentation and is updated lockstep with the
+registry. Adding a new guest-bound tool requires extending the
+registry + adding a fixture; the parity test fails closed otherwise.
 
 | Tool          | Inputs rewritten host→guest                          | Outputs rewritten guest→host (in `model_output` AND `display`)            |
 | ------------- | ---------------------------------------------------- | ------------------------------------------------------- |
@@ -1616,7 +1678,7 @@ A real probe takes 50–200ms, not 10ms — the time accounts for the actual fil
 
 - **Malicious model output executing arbitrary host commands.** A model that is jailbroken or prompt-injected emits `bash` calls; the guest contains the blast radius (no host fs outside `/work`, no network, killed on timeout).
 - **Tool input crafted to escape the sandbox.** Path traversal via absolute paths or `..` segments in `read`/`write`/`edit` is rejected by the guest worker. Host-side cwd boundary enforcement is **strong on Linux/Firecracker** (`cfs-fs-server --backend-root` does symlink-resolve-beneath: every path operation is canonicalised under the backend root, and a symlink whose target escapes the root is rejected). On **macOS/vfkit** and **Windows/cloud-hypervisor** v1, virtio-fs's mount-rooted scope only blocks paths that escape via the FUSE namespace; a symlink already inside `/work` that points outside (e.g. `/work/escape -> /etc`) is followed by virtio-fs without a beneath-root check. **v1 limitation, documented**: on those platforms the agent can theoretically read/write outside `/work` via a pre-existing symlink in the host cwd. v1.1 adds explicit resolve-beneath in the worker on those platforms; until then, operators on macOS/Windows should not microvm-sandbox sessions where the host cwd contains adversarially-placed symlinks.
-- **Resource exhaustion.** `ResourceLimits` caps memory, vCPUs, disk, wall time.
+- **Resource exhaustion.** `VmCeiling` (per-VM, set at boot) and `CallLimits` (per-call, derived from `ToolContext`) cap memory, vCPUs, disk, wall time, and per-call output bytes — `VmCeiling` is the partition key on the warm pool.
 
 `microvm` does **not** defend against:
 
@@ -1688,7 +1750,7 @@ Per-tool-call overhead targets, measured as `host_observed_total_ms - guest_dura
 
 A 20-tool-call coding turn under Linux+pool should add ≤ 600ms total vs `local-process`. If telemetry shows worse than 1.5× the SLO sustained, follow-up optimization is required before declaring v1.0 GA.
 
-The `boot_ms` + `cold_boot` telemetry fields make the pool-hit-rate visible.
+The `acquire_to_ready_ms` + `cold_boot` telemetry fields make the pool-hit-rate visible.
 
 ## Implementation schedule
 
@@ -1713,7 +1775,7 @@ Nine commits across four phases. Realistic LoC estimates (calibrated against aeg
 
 | # | Commit | Est. LoC |
 |---|---|---|
-| **C** | `MicroVmLauncher` trait, `VmHandle`, `VmSpec`, `ResourceLimits`, `NetworkPolicy`, errors | 200 |
+| **C** | `MicroVmLauncher` trait, `VmHandle`, `VmSpec`, `VmCeiling`, `CallLimits`, `NetworkPolicy`, errors | 200 |
 | **D** | `FirecrackerLauncher` + warm pool + integration test (gated on `PI_SANDBOX_FC_TEST`) | 1700 |
 | **E** | `VfkitLauncher` (macOS) + integration test (gated on `PI_SANDBOX_VFKIT_TEST`) | 800 |
 | **F** | `CloudHypervisorLauncher` (Windows) + integration test (gated on `PI_SANDBOX_CHV_TEST`) | 1000 |
@@ -1794,12 +1856,44 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ### Dogfood (per phase)
 
-- After Phase 3 + G: `pi --sandbox-provider=microvm:firecracker "ls + read + edit a marker file"` on Manjaro. Confirm session JSONL has the expected `transport`, `boot_ms`, `cold_boot` fields, and the host file actually changed.
+- After Phase 3 + G: `pi --sandbox-provider=microvm:firecracker "ls + read + edit a marker file"` on Manjaro. Confirm session JSONL has the expected `provider="microvm"`, `launcher="firecracker"`, `dispatch_path="guest"`, `acquire_to_ready_ms`, and `cold_boot` telemetry fields, and the host file actually changed.
 - Same dogfood on macos-14 + windows runner once D and F have landed.
 - `pi --stats sandbox-actions` must show non-zero rows with the new `transport` column populated.
 
 ## Revision history
 
+- **v0.22 (2026-05-04):** rfd-critic v0.21 pass found 2 critical +
+  3 underspec + stale-name sweep. Both criticals were real, not
+  bikeshedding. (1) `ToolRequest` lacked any host-cwd field, so the
+  worker couldn't actually inject `PWD=<host_cwd>` for bash even
+  though §"Path virtualization" promised it. Added explicit
+  `host_cwd: String` to `ToolRequest`, with documented uses (PWD
+  injection + inverse-rewrite anchor; host re-validates on receipt).
+  (2) `MicroVmProvider` pseudocode called `self.host_tools.is_host_bound(...)`
+  / `.execute(...)` but the struct definition omitted the field and
+  no trait existed. Added `host_tools: Arc<dyn HostBoundToolDispatcher>`
+  to the struct, defined the `HostBoundToolDispatcher` trait
+  (`is_host_bound` / `execute`) and `HostExecOutcome` shape; v1
+  ships exactly one impl (`BuiltinHostTools`, `web_search` only).
+  Underspec items (a–c) closed: (a) `SandboxExecution` is now
+  guest-truthful (raw `/work` paths, NOT rewritten) — only
+  `model_output` and `display` get inverse-rewritten; documented
+  why this asymmetry is the right one (post-mortem fidelity vs
+  model coherence). (b) Timeout hygiene before pool return: worker
+  contract pinned — `SIGTERM` → 250ms drain → `SIGKILL` → emit
+  `is_error=true, exit_status=124` ToolResponse → only then
+  `Clean`-eligible; launcher escalates to hard-VM-kill +
+  `SuspectGuestState` if the worker itself misses
+  `wall_timeout + 1s`. (c) Path-rewrite registry tense corrected:
+  RFD table is the normative spec **today**; Commit G adds
+  `crates/pi-sandbox/src/path_rewrite/registry.rs` and from then on
+  the registry is the source of truth. Stale-name sweep: §"Threat
+  model" `ResourceLimits` → `VmCeiling`/`CallLimits`; §SLO/Dogfood
+  `boot_ms` → `acquire_to_ready_ms`; §Dogfood `transport` →
+  `provider`/`launcher`/`dispatch_path`; schedule §"Phase 3 commit C"
+  `ResourceLimits` → `VmCeiling`/`CallLimits`; pseudocode
+  `tool.is_runtime_native()` / `is_runtime_native_tool(...)` →
+  `tool.dispatch_class()` / `tool_dispatch_class(...) != RuntimeNative`.
 - **v0.21 (2026-05-04):** rfd-critic v0.20 pass found 1 critical +
   3 small. Critical: §2 (`VmExecution`) and §3 (wire `ToolResponse`)
   disagreed on what crosses the wire — §2 said the worker
