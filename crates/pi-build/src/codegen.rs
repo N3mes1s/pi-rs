@@ -244,16 +244,44 @@ fn read_prompt_from_args_or_stdin() -> String {{
     std::process::exit(64);
 }}
 
+/// Map a `RuntimeError` variant to an exit code per RFD 0028 §Cross-cutting #5:
+///   1 — internal runtime errors
+///   2 — usage / config errors (bad credentials, unknown model, …)
+///   3 — budget / cap exhausted
+///
+/// `RuntimeError` is `#[non_exhaustive]`, so an exhaustive match is
+/// impossible without a catch-all arm.  Every variant known at codegen
+/// time is listed explicitly; the `_` fallback exists *only* to satisfy
+/// the non-exhaustive constraint and logs a warning so operators notice
+/// any future gap.
 fn map_runtime_error_to_exit(e: pi_sdk::RuntimeError) -> u8 {{
     use pi_sdk::RuntimeError::*;
     match e {{
+        // ── budget / cap (exit 3) ──────────────────────────────────
         BudgetExhausted {{ .. }}        => 3,
         InvocationCapExceeded {{ .. }}  => 3,
-        DepthExceeded {{ .. }}          => 1,
+        // ── config / usage errors (exit 2) ────────────────────────
+        UnknownModel(_)                 => 2,
+        // ── internal runtime errors (exit 1) ──────────────────────
+        Aborted                         => 1,
+        Unsupported(_)                  => 1,
+        Provider(_)                     => 1,
+        Io(_)                           => 1,
         EmptyTurn                       => 1,
         ToolPanicked {{ .. }}           => 1,
         ToolUseFinishWithoutCalls       => 1,
-        _                               => 1,
+        DepthExceeded {{ .. }}          => 1,
+        // ── forward-compatibility fallback ────────────────────────
+        // RuntimeError is #[non_exhaustive]; a new variant added to
+        // pi-agent-core falls here until this generated match is
+        // updated.  The warning lets operators see the gap.
+        _ => {{
+            eprintln!(
+                "pi-agent: unhandled RuntimeError variant {{:?}}, mapping to exit 1",
+                e
+            );
+            1
+        }}
     }}
 }}
 "#
@@ -569,5 +597,74 @@ mod tests {
             r.main_rs.contains("ANTHROPIC_API_KEY"),
             "error message must name the missing env var"
         );
+    }
+
+    /// Verify that every `RuntimeError` variant known at codegen time is
+    /// listed explicitly in the emitted `map_runtime_error_to_exit` match.
+    ///
+    /// `RuntimeError` is `#[non_exhaustive]`, so a catch-all arm is
+    /// unavoidable, but the set of *named* arms must cover every variant
+    /// that exists in pi-agent-core at the time pi-build was written.
+    /// If a new variant is added to `RuntimeError` and this test starts
+    /// failing, update both `runtime.rs` *and* the emitted match in
+    /// `render_main_rs` (the literal string above).
+    #[test]
+    fn emitted_error_map_covers_all_known_runtime_error_variants() {
+        let m = fixture_manifest();
+        let r = render(&m, "schema_version = 1\n", "0.1.0");
+        let src = &r.main_rs;
+
+        // Every variant name that existed in pi_agent_core::RuntimeError
+        // when this codegen was last audited (RFD 0028 §Cross-cutting #5).
+        let expected_variants = &[
+            "BudgetExhausted",
+            "InvocationCapExceeded",
+            "UnknownModel",
+            "Aborted",
+            "Unsupported",
+            "Provider",
+            "Io",
+            "EmptyTurn",
+            "ToolPanicked",
+            "ToolUseFinishWithoutCalls",
+            "DepthExceeded",
+        ];
+        for variant in expected_variants {
+            assert!(
+                src.contains(variant),
+                "emitted map_runtime_error_to_exit is missing variant `{variant}`;\
+                 add it to the match arm in render_main_rs and re-run tests"
+            );
+        }
+
+        // Confirm the emitted fallback logs a warning rather than being
+        // a silent black-hole `_ => 1`.
+        assert!(
+            src.contains("unhandled RuntimeError variant"),
+            "the catch-all `_` arm must log a warning to stderr"
+        );
+
+        // UnknownModel is a config/usage error → exit 2, NOT exit 1.
+        // Find the line that names UnknownModel and confirm 2 is nearby.
+        let unknown_model_line = src
+            .lines()
+            .find(|l| l.contains("UnknownModel"))
+            .unwrap_or_else(|| panic!("UnknownModel arm not found in emitted src"));
+        assert!(
+            unknown_model_line.contains("=> 2"),
+            "UnknownModel is a config/usage error; expected `=> 2`, got: {unknown_model_line}"
+        );
+
+        // Budget/cap variants → exit 3.
+        for cap_variant in &["BudgetExhausted", "InvocationCapExceeded"] {
+            let line = src
+                .lines()
+                .find(|l| l.contains(cap_variant))
+                .unwrap_or_else(|| panic!("{cap_variant} arm not found"));
+            assert!(
+                line.contains("=> 3"),
+                "{cap_variant} is a budget/cap error; expected `=> 3`, got: {line}"
+            );
+        }
     }
 }
