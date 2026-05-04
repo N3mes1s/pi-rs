@@ -68,29 +68,56 @@ Estimated impact: ~600 LoC moved, no behavior change. Fully reversible.
 
 This decision is upstream of Commit A3 (the protocol crate). It must land here, not deferred.
 
-#### `web_search` exclusion (decided)
+#### `web_search` host-dispatch (decided)
 
-`web_search` is a network-egress tool that contacts external search
-engines / LLM-as-search backends. The microVM has **no network**
-(intentional, per §1 architecture and §6 threat model). `web_search`
-under `microvm` cannot succeed by construction.
+`web_search` is a network-egress query — it contacts external search
+engines / LLM-as-search backends and returns text. It does NOT execute
+untrusted code on the host; it queries data. The microVM boundary
+exists to contain *code execution* (untrusted bash, file mutation,
+process spawn), not data queries.
 
-Two options, parallel to the `monitor` decision:
+Excluding `web_search` would lose real capability — agents lose the
+ability to look up library docs, search for known issues, or fetch
+external references mid-task. Three options:
 
-(a) Hide `web_search` from the model's advertised tool list when
-running under `microvm`.
-(b) Keep it advertised; reject calls with a typed `ToolUnavailable`
-error pointing the user at `--sandbox-provider=local-process` or
-RFD 0026 remote backends.
+(a) Hide `web_search` from the advertised tool list under `microvm`.
+(b) Reject calls with `ToolUnavailable`; user must switch providers.
+(c) Keep `web_search` available; **route it to a host-side dispatch
+path** instead of the guest worker. The `MicroVmProvider` partitions
+tools into "guest-bound" (read/write/edit/bash/grep/find/ls — anything
+touching `/work` or spawning processes) and "host-bound"
+(web_search — network-only, no host fs side effects). Host-bound
+tools run on the host through the existing `pi-tools-net`
+implementation; guest-bound tools route through the vsock RPC to the
+guest worker.
 
-**Decision: (b).** Same rationale as `monitor`: hiding tools from
-the model breaks symmetry with the `local-process` and remote-backend
-providers (where the same model sees the same tool list); the typed
-error path keeps the model's mental model consistent and gives the
-user actionable advice. The `MicroVmProvider::execute_tool()` arm
-(§2 sample) returns `SandboxError::ToolUnavailable` for both
-`monitor` and `web_search`. v1.1 may revisit if telemetry shows
-high friction.
+**Decision: (c).** Rationale:
+
+- The microVM's job is to contain *code execution*. `web_search`
+  doesn't execute code; it returns text. Running it on the host
+  doesn't widen the host's blast radius beyond what host-side tooling
+  already does.
+- The host already has the network credentials and provider config;
+  proxying egress through the guest would require giving the guest
+  net access (which IS what we are explicitly preventing).
+- The agent's mental model stays consistent across providers
+  (`local-process`, `microvm:local`, `microvm:managed`,
+  remote-backend) — the same tool name behaves the same way from the
+  model's perspective.
+- Auto-approve policy (RFD 0027 H4) governs `web_search` calls
+  identically regardless of provider.
+
+Threat-model note: search-result content can include prompt-injection
+material. That's a content-injection concern that the microVM does
+not address either way (a model on `local-process` reads the same
+results); it's an orthogonal hardening track (per-result content
+filter / quarantine, separate RFD).
+
+§2's `MicroVmProvider::execute_tool()` sample reflects this routing:
+`monitor` returns `ToolUnavailable`; `web_search` dispatches to the
+host registry; everything else routes through the guest. The
+telemetry row gets `transport = "host-direct"` for host-bound tools
+so operators can see which path each call took.
 
 ### Inspiration: aegis
 
@@ -341,15 +368,35 @@ impl SandboxProvider for MicroVmProvider {
         tool_name: &str,
         tool_input: &serde_json::Value,
     ) -> Result<SandboxOutcome, SandboxError> {
-        // monitor + web_search are excluded under microvm — see §"Tool availability under microvm".
-        if matches!(tool_name, "monitor" | "web_search") {
+        // monitor: incompatible with one-shot RPC, see §"Tool availability".
+        if tool_name == "monitor" {
             return Err(SandboxError::ToolUnavailable {
                 tool: tool_name.into(),
-                reason: format!("tool {} not available under --sandbox-provider=microvm; \
-                         use --sandbox-provider=local-process or RFD 0026 remote backends",
-                                tool_name),
+                reason: "monitor is unavailable under --sandbox-provider=microvm \
+                         (one-shot RPC; use --sandbox-provider=local-process)",
             });
         }
+        // web_search: network-egress query, runs on the host (the guest
+        // has no network by design). See §"web_search host-dispatch".
+        if self.host_tools.is_host_bound(tool_name) {
+            let started = Instant::now();
+            let result = self.host_tools.execute(ctx, tool_name, tool_input).await?;
+            return Ok(SandboxOutcome {
+                execution: SandboxExecution {
+                    stdout: result.model_output,
+                    stderr: result.stderr.unwrap_or_default(),
+                    exit_status: result.exit_status.unwrap_or(if result.is_error { 1 } else { 0 }),
+                },
+                telemetry: SandboxTelemetry {
+                    transport: "host-direct",
+                    acquire_to_ready_ms: None,
+                    guest_duration_ms: Some(started.elapsed().as_millis() as u32),
+                    cold_boot: None,
+                    cost_usd: None,
+                },
+            });
+        }
+        // Everything else routes through the guest microVM.
         let spec = self.spec_for(ctx);
         let limits = self.build_call_limits(ctx, tool_name);
         let vm = self.launcher.acquire(&spec).await?;
@@ -371,6 +418,15 @@ impl SandboxProvider for MicroVmProvider {
         })
     }
 }
+
+// `host_tools` is an `Arc<HostToolRegistry>` held by the
+// MicroVmProvider; it knows which tools are host-bound (default:
+// web_search) and dispatches them through the existing pi-tools-net
+// implementation. Operators can extend the registry with custom
+// host-bound tools if their threat model permits (e.g. an internal
+// metric query). Guest-bound tools (read/write/edit/bash/grep/find/ls)
+// always route through the launcher and never appear in the host
+// registry.
 
 // New return type — combines what RFD 0022 returned with the §2
 // VmExecution telemetry. RFD 0022's SandboxProvider trait gains a
