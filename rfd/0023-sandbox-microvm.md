@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.7)
+- **Status:** Discussion (v0.8)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -32,11 +32,12 @@ Remote sandbox vendors (E2B, Sprites, Daytona) are split into a sister RFD — s
 
 ### What RFD 0022 left vapor
 
-`crates/pi-sandbox/src/local.rs:62-67`:
-
-> the LocalProcessProvider does not create a tmpdir in the MVP (all file tools operate on the same cwd as the inline path). This is intentional: tmpdir isolation is deferred to the subprocess variant (future commit).
-
-That subprocess variant never landed. Today every "sandboxed" tool call is a function call in the agent's own address space. Time to ship the substance.
+RFD 0022's `LocalProcessProvider` (in `crates/pi-sandbox/src/local.rs`)
+deferred tmpdir isolation, sub-process spawning, and resource caps to
+"a future commit." That commit never landed. Today every "sandboxed"
+tool call under `--sandbox-provider=local-process` is still a function
+call in the agent's own address space. The substance — process or VM
+boundary — is what RFD 0023 ships.
 
 ### The pi-tools dependency problem (the silent killer)
 
@@ -54,7 +55,9 @@ Estimated impact: ~600 LoC moved, no behavior change. Fully reversible.
 
 **`pi-tool-types` becomes a stable public ABI** by virtue of being on the wire protocol AND in the host-side tool API. Field additions to `ToolResult`/`ToolSpec` after Commit A1 are breaking changes that must bump the crate's MAJOR version and the wire-protocol version in lockstep. Acknowledged here so future-us doesn't blunder.
 
-### The `monitor` tool exclusion (decided)
+### Tool availability under `microvm` — `monitor` AND `web_search` excluded
+
+#### `monitor` exclusion (decided)
 
 `pi-tools::monitor` spawns a long-running observer that streams partial output to the agent. The v1 wire protocol in §3 is one `ToolRequest` → one `ToolResponse`, JSON-line-framed, single round trip. **Streaming is incompatible with the v1 protocol shape.** Two paths considered:
 
@@ -64,6 +67,30 @@ Estimated impact: ~600 LoC moved, no behavior change. Fully reversible.
 **Decision: (b).** Telemetry from existing pi sessions can quantify monitor usage; if it's > 5% of tool calls in real coding sessions, v1.1 of this RFD adds streaming responses. Until then, the protocol stays one-shot.
 
 This decision is upstream of Commit A3 (the protocol crate). It must land here, not deferred.
+
+#### `web_search` exclusion (decided)
+
+`web_search` is a network-egress tool that contacts external search
+engines / LLM-as-search backends. The microVM has **no network**
+(intentional, per §1 architecture and §6 threat model). `web_search`
+under `microvm` cannot succeed by construction.
+
+Two options, parallel to the `monitor` decision:
+
+(a) Hide `web_search` from the model's advertised tool list when
+running under `microvm`.
+(b) Keep it advertised; reject calls with a typed `ToolUnavailable`
+error pointing the user at `--sandbox-provider=local-process` or
+RFD 0026 remote backends.
+
+**Decision: (b).** Same rationale as `monitor`: hiding tools from
+the model breaks symmetry with the `local-process` and remote-backend
+providers (where the same model sees the same tool list); the typed
+error path keeps the model's mental model consistent and gives the
+user actionable advice. The `MicroVmProvider::execute_tool()` arm
+(§2 sample) returns `SandboxError::ToolUnavailable` for both
+`monitor` and `web_search`. v1.1 may revisit if telemetry shows
+high friction.
 
 ### Inspiration: aegis
 
@@ -149,13 +176,33 @@ pub enum NetworkPolicy {
 }
 
 /// VM-level ceiling. Set at acquire(); cannot change without
-/// rebooting the VM. Pool partitioning is keyed by this so a
-/// pool acquire returns a VM whose ceiling matches the request.
+/// rebooting the VM. One component of the pool key (see
+/// `BootSpec` below).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VmCeiling {
     pub mem_mib: u32,        // default 512 (host budget per VM)
     pub vcpus: u8,           // default 2
     pub disk_mib: u32,       // ephemeral overlay; default 256
+}
+
+/// Pool partition key. Two acquire() calls share a warm VM iff
+/// their `BootSpec`s are equal — every field listed here is
+/// boot-time state that cannot change without a reboot, and a
+/// mismatch silently reusing a VM would breach worktree isolation
+/// (RFD 0006), env-allowlist policy, or network-policy guarantees.
+///
+/// Per-call concerns (timeout, output cap) live on `CallLimits` and
+/// vary against the same warm VM. `host_cwd` MUST be canonicalised
+/// (symlink-resolved + absolute) before keying so two callers
+/// pointing at the same directory by different paths share a VM.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BootSpec {
+    pub canonical_host_cwd: PathBuf,    // RFD 0006 worktree boundary
+    pub env_hash: [u8; 32],             // SHA-256 of allowlisted env names+values
+    pub network_policy: NetworkPolicy,
+    pub vm_ceiling: VmCeiling,
+    pub rootfs_version: String,         // forces cold boot on rootfs upgrade
+    pub transport_mode: TransportMode,  // local | managed (§3.5)
 }
 
 /// Per-CALL limits. Evaluated against the VM's `VmCeiling` and
@@ -293,13 +340,14 @@ impl SandboxProvider for MicroVmProvider {
         ctx: &ToolContext,
         tool_name: &str,
         tool_input: &serde_json::Value,
-    ) -> Result<SandboxExecution, SandboxError> {
-        // monitor is excluded under microvm — see §"The monitor tool exclusion".
-        if tool_name == "monitor" {
+    ) -> Result<SandboxOutcome, SandboxError> {
+        // monitor + web_search are excluded under microvm — see §"Tool availability under microvm".
+        if matches!(tool_name, "monitor" | "web_search") {
             return Err(SandboxError::ToolUnavailable {
                 tool: tool_name.into(),
-                reason: "tool not available under --sandbox-provider=microvm; \
+                reason: format!("tool {} not available under --sandbox-provider=microvm; \
                          use --sandbox-provider=local-process or RFD 0026 remote backends",
+                                tool_name),
             });
         }
         let spec = self.spec_for(ctx);
@@ -307,12 +355,40 @@ impl SandboxProvider for MicroVmProvider {
         let vm = self.launcher.acquire(&spec).await?;
         let exec = vm.execute(ctx, &limits, tool_name, tool_input).await?;
         vm.release().await.ok();
-        Ok(SandboxExecution {
-            stdout: exec.result.model_output,
-            stderr: String::new(),
-            exit_status: if exec.result.is_error { 1 } else { 0 },
+        Ok(SandboxOutcome {
+            execution: SandboxExecution {
+                stdout: exec.result.model_output,
+                stderr: exec.result.stderr.unwrap_or_default(),
+                exit_status: exec.result.exit_status.unwrap_or(if exec.result.is_error { 1 } else { 0 }),
+            },
+            telemetry: SandboxTelemetry {
+                transport: "microvm",
+                acquire_to_ready_ms: Some(exec.acquire_to_ready_ms),
+                guest_duration_ms: Some(exec.guest_duration_ms),
+                cold_boot: Some(exec.cold_boot),
+                cost_usd: None,            // local microvm has no per-call $; remote backends do
+            },
         })
     }
+}
+
+// New return type — combines what RFD 0022 returned with the §2
+// VmExecution telemetry. RFD 0022's SandboxProvider trait gains a
+// version bump (associated `type Outcome = SandboxOutcome` with a
+// default of `SandboxExecution` for back-compat) so existing
+// LocalProcessProvider can still return the bare execution while
+// MicroVmProvider returns the richer outcome.
+pub struct SandboxOutcome {
+    pub execution: SandboxExecution,    // unchanged stdout/stderr/exit
+    pub telemetry: SandboxTelemetry,
+}
+
+pub struct SandboxTelemetry {
+    pub transport: &'static str,         // "microvm" | "local-process" | "e2b" | ...
+    pub acquire_to_ready_ms: Option<u32>,// None for local-process, Some for microvm/remote
+    pub guest_duration_ms: Option<u32>,
+    pub cold_boot: Option<bool>,
+    pub cost_usd: Option<f64>,           // remote-backend per-call billing
 }
 ```
 
@@ -465,32 +541,47 @@ What RFD 0026 owns:
 What RFD 0023 owns (this RFD):
 - The worker binary, the wire protocol, the `ToolResponse↔ToolResult` mapping, and the local microVM transport.
 
-### 3.5. ContextFS integration (Linux/Firecracker Stage 1 only)
+### 3.5. ContextFS integration (opt-in operator-managed mode)
 
-ContextFS RFD-0023 (their numbering — the embedder profile, state:
-published, broker `>= v0.3.0`) is the contextfs-side spec that ships
-the library entry, transport-generic mesh, vsock subcommands, per-VM
-tenant secret derivation, OIDC handoff, and audit-ping stub. Pi-rs
-Commit G integrates against that surface for **Linux/Firecracker
-Stage 1 only**: contextfs's vsock transport is explicitly Linux-only
-(see contextfs RFD-0023 "Goals/non-goals: Windows/macOS embedders").
-macOS/Windows microVM provisioning **does not bring up contextfsd in
-v1.0** — those launchers continue to use the §3 virtio-fs RW share at
-`/work` as the agent's workspace path, and a follow-up pi-rs RFD will
-bring contextfs to those platforms once contextfs supports a non-vsock
-embedder transport.
+`microvm` ships **two deployment modes**, chosen at MicroVmProvider
+construction (and exposed on the CLI as `--sandbox-microvm-mode={local,managed}`,
+default `local`):
 
-**Workspace transport on Linux Stage 1.** ContextFS supersedes the §3
-virtio-fs RW share for the agent's workspace path. The worker's cwd
-becomes `/work`, but `/work` is now a `cfs-fs-server` FUSE mount over
-a `cfs-mesh` Noise-IK channel to the host broker (rather than a direct
-virtio-fs share). This is the explicit choice: write-mediation is the
-whole reason contextfs exists. The §3 virtio-fs `/work` claim applies
-on macOS/Windows v1.0 and is what Linux Stage 1 replaces.
+- **`local` mode (default — single-user CLI)**: no broker, no OIDC,
+  no per-tenant master material, no contextfs daemon. The agent's
+  workspace `/work` is a direct file share from the launcher (virtio-fs
+  on macOS/Windows, virtio-fs OR a simpler in-rootfs FUSE-over-vsock
+  bridge on Linux per §4.1). This is what an `ordinary local Linux
+  user typing `pi --sandbox-provider=microvm` gets. No contextfs at
+  all. §3.5 is non-applicable in this mode.
+- **`managed` mode (opt-in, operator-deployed)**: brings up an
+  in-guest `contextfsd` daemon that mediates `/work` writes through a
+  host-side broker. Adds policy-as-code (Cedar PDP), per-VM tenant
+  secret derivation, OIDC validation against host workload-identity
+  tokens, and audit-chain plumbing. This is the deployment shape
+  pi-rs ships for hostile-tenancy / compliance-graded / multi-user
+  environments (the platform shape RFD 0021 anticipated).
 
-Sub-sections 3.5.1–3.5.8 below describe the operator-side
-responsibilities at VM provisioning time. 3.5.9 is the guest boot
-contract (rootfs additions + readiness ordering) Commit G owns.
+This RFD originally specified one path; v0.8 splits the modes
+explicitly so a single-user CLI runner does not pay the operator-
+managed cost.
+
+**Linux/Firecracker is the only OS that supports `managed` in v1.**
+ContextFS's vsock transport is explicitly Linux-only (contextfs
+RFD-0023 "Goals/non-goals: Windows/macOS embedders"). macOS/Windows
+ship `local` mode only; a follow-up pi-rs RFD brings `managed` to
+those platforms once contextfs ships a non-vsock embedder transport.
+
+`local` mode for `pi sandbox doctor`: the doctor in `local` mode does
+NOT probe contextfs binaries; it probes only the platform launcher
+(firecracker / vfkit / cloud-hypervisor) + virtio-fs prerequisites.
+
+The remainder of §3.5 (3.5.1 through 3.5.9) describes the `managed`
+mode contract. None of it applies in `local` mode. Operator-managed
+deployments invoke pi with `--sandbox-microvm-mode=managed` plus the
+fields documented below; misconfiguration (e.g. `mode=managed` but
+no `broker.socket_path` configured) is a hard error at provider
+construction, not at first request.
 
 #### 3.5.1 — `vm_id` source
 
@@ -808,13 +899,17 @@ build time, and `pi sandbox doctor` re-checks at host provisioning):
    sentinel exists. This is the existing worker; no changes beyond
    the cwd.
 6. Acts as PID 1 / re-aps zombies from the daemon side; if `contextfsd`
-   exits, `pi-cfs-init` writes `/work/.cfs-failed` with the contextfsd
-   exit code and panics the guest (the host-side launcher reads this
-   sentinel from a separate read-only virtio-fs share at
-   `/var/run/pi-fail` so it survives the panic).
+   exits, `pi-cfs-init` writes a single-line failure record to the
+   guest's serial console (`/dev/ttyS0`) of the form
+   `PI_FAIL: contextfsd exited with code <N>` and panics the guest.
+   The host-side `FirecrackerLauncher` is already wired to capture
+   the guest's serial-console stdout (per §4.1's `firecracker
+   --boot-args "console=ttyS0"`) and parses the `PI_FAIL:` prefix.
+   Firecracker does NOT support virtio-fs (per `rfd/0023-known-issues.md`);
+   we deliberately do not use a virtio-fs sentinel path.
 7. If steps 2-4 fail to complete within `boot_timeout` (default 10s),
-   `pi-cfs-init` writes `/var/run/pi-fail/timeout` and exits non-zero.
-   The `MicroVmLauncher` surfaces this as a typed
+   `pi-cfs-init` writes `PI_FAIL: ready-timeout` to the serial console
+   and exits non-zero. The `MicroVmLauncher` surfaces this as a typed
    `AcquireError::ReadyTimeout { boot_timeout, last_dmesg }`.
 
 The readiness sentinel lives in `/work` (the FUSE mount itself); its
@@ -1086,6 +1181,34 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.8 (2026-05-04):** rfd-critic v0.7 pass found 5 critical issues +
+  1 citation rot. Closed all of them. (1) §3.5 split into two
+  deployment modes: **`local`** (default, single-user CLI, no
+  contextfs/broker/OIDC) and **`managed`** (opt-in, operator-deployed).
+  Ordinary local-CLI users typing `pi --sandbox-provider=microvm`
+  get `local` mode; the contextfs stack is now opt-in via
+  `--sandbox-microvm-mode=managed`. (2) §2 introduced explicit
+  `BootSpec` pool partition key (`canonical_host_cwd` + `env_hash` +
+  `network_policy` + `vm_ceiling` + `rootfs_version` +
+  `transport_mode`), preserving RFD 0006 worktree isolation —
+  previously a warm VM could be reused across different `host_cwd`s,
+  silently sharing one subagent's workspace with another. (3) §2
+  provider contract now returns `SandboxOutcome { execution,
+  telemetry }` so `acquire_to_ready_ms` / `cold_boot` / `transport` /
+  real `stderr` + `exit_status` actually reach the
+  `SessionEntryKind::SandboxAction` row. (4) §3.5.9 failure-sentinel
+  path moved off the (non-existent) Firecracker virtio-fs share onto
+  the serial console (`/dev/ttyS0`) — `pi-cfs-init` writes
+  `PI_FAIL: <reason>` lines that the host parses from the captured
+  serial-console stdout. (5) New §"Tool availability under microvm"
+  adds an explicit `web_search` exclusion decision parallel to the
+  existing `monitor` decision (both return typed `ToolUnavailable`,
+  not silently hidden). Citation fix: dropped the wrong
+  `local.rs:62-67` quote (replaced with a non-citing description of
+  the same behavior). The contextfs integration sub-sections
+  (3.5.1-3.5.9) are now scoped under `managed` mode and their
+  applicability is conditional, addressing the v0.7 finding that
+  "Linux v1 is no longer self-contained."
 - **v0.7 (2026-05-04):** rfd-critic v0.6 pass found 3 critical issues +
   1 citation rot. Closed all of them. (1) §3.5.5 now documents both
   control-plane (broker) AND data-plane (cfs-fs-server) channels with
