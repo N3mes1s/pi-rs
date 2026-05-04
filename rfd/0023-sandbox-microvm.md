@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.8)
+- **Status:** Discussion (v0.9)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -264,7 +264,15 @@ pub trait VmHandle: Send + Sync {
 }
 
 pub struct VmExecution {
-    pub result: ToolResult,        // shape compatible with inline path
+    /// Model-facing tool result (matches the inline path's shape;
+    /// `ToolResult.model_output` is what gets fed back to the model).
+    pub tool_result: ToolResult,
+    /// Raw stdout/stderr/exit_status from the guest worker, for
+    /// telemetry and operator debugging. `tool_result.model_output`
+    /// is what the model sees; `execution.stdout/stderr` are the
+    /// raw streams the worker captured. They diverge whenever the
+    /// worker post-processes (e.g. truncation, formatting).
+    pub execution: SandboxExecution,
     pub guest_duration_ms: u32,    // measured INSIDE the guest
     /// Time from `acquire()` to the moment the host's vsock
     /// connection to the guest succeeded. NOT pure boot time —
@@ -380,15 +388,16 @@ impl SandboxProvider for MicroVmProvider {
         // has no network by design). See §"web_search host-dispatch".
         if self.host_tools.is_host_bound(tool_name) {
             let started = Instant::now();
-            let result = self.host_tools.execute(ctx, tool_name, tool_input).await?;
+            let host_outcome = self.host_tools.execute(ctx, tool_name, tool_input).await?;
+            // host_outcome is itself a (ToolResult, SandboxExecution) pair —
+            // pi-tools-net's executor returns both.
             return Ok(SandboxOutcome {
-                execution: SandboxExecution {
-                    stdout: result.model_output,
-                    stderr: result.stderr.unwrap_or_default(),
-                    exit_status: result.exit_status.unwrap_or(if result.is_error { 1 } else { 0 }),
-                },
+                tool_result: host_outcome.tool_result,
+                execution: host_outcome.execution,
                 telemetry: SandboxTelemetry {
-                    transport: "host-direct",
+                    provider: "microvm",
+                    launcher: None,                   // no VM involved
+                    dispatch_path: Some("host-direct"),
                     acquire_to_ready_ms: None,
                     guest_duration_ms: Some(started.elapsed().as_millis() as u32),
                     cold_boot: None,
@@ -403,20 +412,29 @@ impl SandboxProvider for MicroVmProvider {
         let exec = vm.execute(ctx, &limits, tool_name, tool_input).await?;
         vm.release().await.ok();
         Ok(SandboxOutcome {
-            execution: SandboxExecution {
-                stdout: exec.result.model_output,
-                stderr: exec.result.stderr.unwrap_or_default(),
-                exit_status: exec.result.exit_status.unwrap_or(if exec.result.is_error { 1 } else { 0 }),
-            },
+            tool_result: exec.tool_result,
+            execution: exec.execution,        // raw stdout/stderr/exit_status, separate from model_output
             telemetry: SandboxTelemetry {
-                transport: "microvm",
+                provider: "microvm",
+                launcher: Some(self.launcher_name()),  // "firecracker" | "vfkit" | "cloud-hypervisor"
+                dispatch_path: Some("guest"),
                 acquire_to_ready_ms: Some(exec.acquire_to_ready_ms),
                 guest_duration_ms: Some(exec.guest_duration_ms),
                 cold_boot: Some(exec.cold_boot),
-                cost_usd: None,            // local microvm has no per-call $; remote backends do
+                cost_usd: None,
             },
         })
     }
+}
+
+// SandboxOutcome now carries BOTH the model-facing tool result AND the
+// raw execution streams. RFD 0022's existing SandboxExecution is the
+// raw shape; ToolResult is what feeds back to the model. They differ
+// when the worker post-processes (truncation, header injection, etc.).
+pub struct SandboxOutcome {
+    pub tool_result: ToolResult,        // model-facing; what the agent sees
+    pub execution: SandboxExecution,    // raw stdout/stderr/exit_status, for telemetry/debugging
+    pub telemetry: SandboxTelemetry,
 }
 
 // `host_tools` is an `Arc<HostToolRegistry>` held by the
@@ -440,8 +458,15 @@ pub struct SandboxOutcome {
 }
 
 pub struct SandboxTelemetry {
-    pub transport: &'static str,         // "microvm" | "local-process" | "e2b" | ...
-    pub acquire_to_ready_ms: Option<u32>,// None for local-process, Some for microvm/remote
+    /// Which `SandboxProvider` impl handled this call.
+    pub provider: &'static str,          // "microvm" | "local-process" | "e2b" | "sprites" | "daytona"
+    /// For microvm only: which launcher backend booted the VM.
+    pub launcher: Option<&'static str>,  // "firecracker" | "vfkit" | "cloud-hypervisor"
+    /// For microvm only: which leg of the partition handled the
+    /// tool — guest microVM vs the host-bound dispatch path
+    /// (web_search, future host-bound tools per §"Tool availability").
+    pub dispatch_path: Option<&'static str>, // "guest" | "host-direct"
+    pub acquire_to_ready_ms: Option<u32>,// None for local-process or host-direct, Some for microvm-guest/remote
     pub guest_duration_ms: Option<u32>,
     pub cold_boot: Option<bool>,
     pub cost_usd: Option<f64>,           // remote-backend per-call billing
@@ -597,46 +622,79 @@ What RFD 0026 owns:
 What RFD 0023 owns (this RFD):
 - The worker binary, the wire protocol, the `ToolResponse↔ToolResult` mapping, and the local microVM transport.
 
-### 3.5. ContextFS integration (opt-in operator-managed mode)
+### 3.5. Deployment-mode matrix and ContextFS integration
 
-`microvm` ships **two deployment modes**, chosen at MicroVmProvider
-construction (and exposed on the CLI as `--sandbox-microvm-mode={local,managed}`,
-default `local`):
+`microvm` ships two deployment modes, but **availability per OS is
+not symmetric**. The matrix:
 
-- **`local` mode (default — single-user CLI)**: no broker, no OIDC,
-  no per-tenant master material, no contextfs daemon. The agent's
-  workspace `/work` is a direct file share from the launcher (virtio-fs
-  on macOS/Windows, virtio-fs OR a simpler in-rootfs FUSE-over-vsock
-  bridge on Linux per §4.1). This is what an `ordinary local Linux
-  user typing `pi --sandbox-provider=microvm` gets. No contextfs at
-  all. §3.5 is non-applicable in this mode.
-- **`managed` mode (opt-in, operator-deployed)**: brings up an
-  in-guest `contextfsd` daemon that mediates `/work` writes through a
-  host-side broker. Adds policy-as-code (Cedar PDP), per-VM tenant
-  secret derivation, OIDC validation against host workload-identity
-  tokens, and audit-chain plumbing. This is the deployment shape
-  pi-rs ships for hostile-tenancy / compliance-graded / multi-user
-  environments (the platform shape RFD 0021 anticipated).
+| OS / Launcher                  | `local` | `managed` | `/work` transport in v1                              |
+| ------------------------------ | :-----: | :-------: | ---------------------------------------------------- |
+| Linux / Firecracker            |   ✗ v1  |    ✓     | contextfs FUSE over Noise-IK (§3.5.1–§3.5.9)         |
+| macOS / vfkit                  |    ✓    |   ✗ v1   | virtio-fs RW (Hypervisor.framework, vfkit ≥ 0.5)     |
+| Windows / cloud-hypervisor     |    ✓    |   ✗ v1   | virtio-fs RW (WHPX, cloud-hypervisor)                |
 
-This RFD originally specified one path; v0.8 splits the modes
-explicitly so a single-user CLI runner does not pay the operator-
-managed cost.
+The CLI flag is `--sandbox-microvm-mode={local,managed,auto}`, default
+`auto`. `auto` resolves per-OS to the only column with a checkmark
+(the matrix above). Explicit pins fail loud on unsupported
+combinations:
 
-**Linux/Firecracker is the only OS that supports `managed` in v1.**
-ContextFS's vsock transport is explicitly Linux-only (contextfs
-RFD-0023 "Goals/non-goals: Windows/macOS embedders"). macOS/Windows
-ship `local` mode only; a follow-up pi-rs RFD brings `managed` to
-those platforms once contextfs ships a non-vsock embedder transport.
+- `--sandbox-provider=microvm:firecracker --sandbox-microvm-mode=local`
+  → hard error at provider construction:
+  `unsupported: Linux/Firecracker v1 has no `local`-mode workspace
+  transport. Firecracker does not support virtio-fs (RFD
+  0023-known-issues). Use --sandbox-microvm-mode=managed (requires
+  contextfs broker config) or --sandbox-provider=local-process.`
+- `--sandbox-provider=microvm:vfkit --sandbox-microvm-mode=managed`
+  → hard error: contextfs's vsock embedder transport is Linux-only
+  per contextfs RFD-0023 §"Goals/non-goals: Windows/macOS embedders".
 
-`local` mode for `pi sandbox doctor`: the doctor in `local` mode does
-NOT probe contextfs binaries; it probes only the platform launcher
-(firecracker / vfkit / cloud-hypervisor) + virtio-fs prerequisites.
+**Why Linux/Firecracker has no `local` mode in v1.** Firecracker
+ships no virtio-fs support (its public stance, captured in
+`rfd/0023-known-issues.md`). A "no contextfs, but still RW workspace"
+path on Firecracker would require a custom FUSE-over-vsock bridge
+that pi-rs does not currently have specced. Designing that bridge
+is a separate RFD; until it lands, Linux microVM users either bring
+contextfs (use `managed`) or use `--sandbox-provider=local-process`.
+
+**Why macOS/Windows have no `managed` in v1.** ContextFS's vsock
+transport is Linux-only. A non-vsock embedder transport for those
+platforms is a contextfs follow-up.
+
+The two **modes** describe what's mounted at `/work` and what
+authentication the agent's writes go through:
+
+- **`local` mode (macOS/Windows v1)**: no broker, no OIDC, no
+  per-tenant master material, no contextfs daemon. `/work` is a
+  direct virtio-fs RW share from the launcher to the host's session
+  cwd. The agent's writes hit the host filesystem unmediated by any
+  PDP or audit chain. This is the single-user-CLI shape and matches
+  the v1.0 promise of `pi --sandbox-provider=microvm` for ordinary
+  local users on Mac/Windows.
+- **`managed` mode (Linux/Firecracker v1)**: brings up an in-guest
+  `contextfsd` daemon that mediates `/work` writes through a host-side
+  broker. Adds policy-as-code (Cedar PDP), per-VM tenant secret
+  derivation, OIDC validation against host workload-identity tokens,
+  and audit-chain plumbing. This is the deployment shape pi-rs ships
+  for hostile-tenancy / compliance-graded / multi-user environments
+  (the platform shape RFD 0021 anticipated). For the maintainer's
+  own dogfood, `managed` mode is what runs.
+
+`pi sandbox doctor` per OS:
+
+- macOS/Windows (`local`): probes the platform launcher
+  (vfkit / cloud-hypervisor), virtio-fs prerequisites, and the rootfs
+  cache.
+- Linux (`managed`): probes Firecracker + KVM + vsock module + the
+  contextfs binaries (contextfs-broker, cfs-fs-server, cfs-mesh,
+  contextfs-cli) + the rootfs cache. Does NOT probe virtio-fs (not
+  needed on this path).
 
 The remainder of §3.5 (3.5.1 through 3.5.9) describes the `managed`
-mode contract. None of it applies in `local` mode. Operator-managed
-deployments invoke pi with `--sandbox-microvm-mode=managed` plus the
-fields documented below; misconfiguration (e.g. `mode=managed` but
-no `broker.socket_path` configured) is a hard error at provider
+mode contract — Linux/Firecracker only. macOS/Windows in `local`
+mode have no contextfs surface at all. Operator-managed deployments
+invoke pi with `--sandbox-microvm-mode=managed` plus the fields
+documented below; misconfiguration (e.g. `mode=managed` but no
+`broker.socket_path` configured) is a hard error at provider
 construction, not at first request.
 
 #### 3.5.1 — `vm_id` source
@@ -1237,6 +1295,30 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.9 (2026-05-04):** rfd-critic v0.8 pass found 2 critical issues
+  remaining + naming-overload + stale text. Closed all of them.
+  (1) §3.5 now opens with an **availability matrix** (OS × launcher ×
+  mode × `/work` transport) that makes the asymmetry explicit:
+  Linux/Firecracker is `managed`-only in v1; macOS/vfkit and
+  Windows/cloud-hypervisor are `local`-only in v1. Linux/Firecracker
+  has no `local`-mode `/work` transport in v1 because Firecracker
+  ships no virtio-fs (per `rfd/0023-known-issues.md`). Operators
+  who explicit-pin `--sandbox-microvm-mode=local` on Linux get a
+  hard-error at provider construction with a concrete remediation
+  message. macOS/Windows are `local`-only because contextfs's vsock
+  is Linux-only. (2) §2 `VmExecution` now carries BOTH `tool_result`
+  (model-facing) AND `execution` (raw stdout/stderr/exit_status);
+  earlier the sample provider code read `result.stderr` /
+  `exit_status` from a `ToolResult` that had no such fields. The
+  host-bound dispatch path returns the same pair. (3) Telemetry
+  field `transport` was overloaded across three meanings; split into
+  `provider` (`microvm` | `local-process` | remote backend names),
+  `launcher` (`firecracker` | `vfkit` | `cloud-hypervisor`), and
+  `dispatch_path` (`guest` | `host-direct`). The `SessionEntryKind::SandboxAction`
+  schema gets the same three fields. Sample provider code updated.
+  (4) `SandboxOutcome` extended to carry both the model-facing
+  `tool_result` and the raw `execution`. The trait return is now
+  `Result<SandboxOutcome, SandboxError>`.
 - **v0.8 (2026-05-04):** rfd-critic v0.7 pass found 5 critical issues +
   1 citation rot. Closed all of them. (1) §3.5 split into two
   deployment modes: **`local`** (default, single-user CLI, no
