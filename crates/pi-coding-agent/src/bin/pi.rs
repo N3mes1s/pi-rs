@@ -229,8 +229,28 @@ fn main() -> anyhow::Result<()> {
             // When running inside an isolated worktree, agent definitions
             // live in the original repo (gitignored/untracked files are
             // absent from the linked worktree). Lock agent lookup to the
-            // original cwd so `.pi/agents/` is always reachable.
-            dispatcher.agent_root = Some(std::env::current_dir()?);
+            // git repository root so `.pi/agents/` is always reachable
+            // regardless of which subdirectory the operator invoked `pi`
+            // from (e.g. `cd repo/subdir && pi --orchestrate ...`).
+            //
+            // We resolve the toplevel via `git rev-parse --show-toplevel`
+            // rather than `std::env::current_dir()` so operators who run
+            // from a sub-directory of the repo still find their agents.
+            let repo_root = {
+                let out = std::process::Command::new("git")
+                    .args(["rev-parse", "--show-toplevel"])
+                    .output()
+                    .map_err(|e| anyhow::anyhow!("git rev-parse --show-toplevel: {e}"))?;
+                if out.status.success() {
+                    std::path::PathBuf::from(
+                        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+                    )
+                } else {
+                    // Not a git repo or git unavailable — fall back to cwd.
+                    std::env::current_dir()?
+                }
+            };
+            dispatcher.agent_root = Some(repo_root);
             let result = pi_orchestrate::run_with(&campaign, &state_root, &dispatcher, &wt_path)
                 .map_err(|e| anyhow::anyhow!("orchestrate run failed: {e}"));
 

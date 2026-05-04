@@ -526,3 +526,105 @@ fn worktree_naming_convention_uses_safe_campaign_name_and_8char_uuid_suffix() {
     worktree_remove(repo_path, &wt_path);
     assert!(!wt_path.exists());
 }
+
+/// CLI success-path from a **subdirectory** of the repo.
+///
+/// Verifies the `git rev-parse --show-toplevel` fix in `src/bin/pi.rs`:
+/// when an operator runs `pi --orchestrate ... --orchestrate-isolate` from
+/// `<repo>/subdir/`, the agent definitions at `<repo>/.pi/agents/` must
+/// still be found (not at `<repo>/subdir/.pi/agents/`).
+///
+/// This is the regression test the reviewer asked for in the latest NEEDS_FIX.
+#[test]
+fn cli_orchestrate_isolate_from_subdirectory_finds_agents() {
+    let repo = make_repo();
+    let repo_path = repo.path();
+
+    // Write agents in the repo root (where `.pi/agents/` lives — NOT in subdir).
+    write_agent_files(repo_path);
+
+    // Create a sub-directory inside the repo that has no `.pi/agents/` of its own.
+    let subdir = repo_path.join("src");
+    std::fs::create_dir_all(&subdir).unwrap();
+
+    // Write the mock pi script.
+    let script_dir = tempdir().unwrap();
+    let mock_pi = write_mock_pi_script(script_dir.path());
+
+    let unique_suffix = {
+        let uid = uuid::Uuid::new_v4().simple().to_string();
+        uid[..8].to_string()
+    };
+    let campaign_name = format!("subdir-isolate-{unique_suffix}");
+    let safe_campaign_name = campaign_name.replace('/', "_");
+
+    let campaign_toml = format!(
+        r#"
+name = "{campaign_name}"
+target_branch = "main"
+
+[defaults]
+reviewer    = "code-reviewer"
+fix_loop_max = 1
+
+[[milestones]]
+id          = "m1"
+branch      = "feat/m1"
+implementer = "halo-implementer"
+assignment  = "implement m1"
+"#
+    );
+    let toml_path = repo_path.join("campaign.toml");
+    std::fs::write(&toml_path, &campaign_toml).unwrap();
+    let state_root = tempdir().unwrap();
+
+    let expected_prefix = format!("pi-orch-{safe_campaign_name}-");
+
+    // Invoke `pi` from the **subdirectory** — this is the key difference
+    // from `cli_orchestrate_isolate_success_merges_to_main_and_cleans_up`.
+    let out = Command::new(env!("CARGO_BIN_EXE_pi"))
+        .args([
+            "--orchestrate",
+            toml_path.to_str().unwrap(),
+            "--orchestrate-isolate",
+            "--orchestrate-state-root",
+            state_root.path().to_str().unwrap(),
+        ])
+        .current_dir(&subdir) // <-- invoked from subdir, not repo root
+        .env("PI_PI_BINARY", mock_pi.to_str().unwrap())
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("PI_PROVIDER")
+        .output()
+        .expect("pi binary should spawn");
+
+    let exit_code = out.status.code().unwrap_or(-1);
+    assert_eq!(
+        exit_code, 0,
+        "subdir invocation should exit 0 (agents found via git toplevel);\
+         \nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Cleanup assertion: no lingering pi-orch-* dir.
+    let tmpdir = std::env::temp_dir();
+    let leaked: Vec<String> = std::fs::read_dir(&tmpdir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&expected_prefix))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "pi-orch-* dir(s) leaked in subdir-invocation test: {:?}",
+        leaked
+    );
+
+    // The MERGED commit must land on main.
+    let log = git_output(repo_path, &["log", "--oneline", "main"]);
+    assert!(
+        log.contains("feat: m1"),
+        "feat/m1 commit should be on main after subdir-invocation isolated merge, log={log:?}"
+    );
+}
