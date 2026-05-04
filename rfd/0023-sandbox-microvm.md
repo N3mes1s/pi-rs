@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.15)
+- **Status:** Discussion (v0.16)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -146,13 +146,31 @@ pub enum SandboxToolDisposition {
 
 trait SandboxProvider {
     /// Plan-time capability query: which tools does this provider
-    /// support? Default impl returns `Guest` for everything (the
-    /// LocalProcessProvider behavior — every tool runs inline).
-    /// MicroVmProvider overrides to return `Unavailable` for
-    /// `monitor` and `lsp`, `HostDirect` for `web_search`, `Guest`
-    /// for everything else.
+    /// support? **The default is `Unavailable`** — a safe default
+    /// that prevents the "model planned against a lie" class of
+    /// bug for newly added tools that no provider has been updated
+    /// to handle. Every concrete provider MUST override and
+    /// classify its supported tools explicitly:
+    ///
+    ///   - `LocalProcessProvider::tool_disposition()` returns
+    ///     `Guest` if the tool exists in its `ToolRegistry` (the
+    ///     `with_defaults`/`with_readonly_defaults`/etc.
+    ///     constructors gate which tools count), else
+    ///     `Unavailable`.
+    ///   - `MicroVmProvider::tool_disposition()` uses an explicit
+    ///     match: `Guest` for `read`/`write`/`edit`/`bash`/
+    ///     `grep`/`find`/`ls`; `HostDirect` for `web_search`;
+    ///     `Unavailable` for everything else (including future
+    ///     tools that haven't been classified yet).
+    ///
+    /// Adding a new tool to pi-rs that should be reachable under
+    /// `microvm` is therefore a two-touch change: register it in
+    /// the relevant tool registry AND extend
+    /// `MicroVmProvider::tool_disposition()`. The compiler doesn't
+    /// enforce this (the trait method is a free function), but the
+    /// safe-default + matrix-test below catches drift.
     fn tool_disposition(&self, tool_name: &str) -> SandboxToolDisposition {
-        SandboxToolDisposition::Guest
+        SandboxToolDisposition::Unavailable
     }
 
     // ... existing execute_tool, etc. ...
@@ -1476,6 +1494,19 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.16 (2026-05-04):** rfd-critic v0.15 pass: closed the one
+  substantive remaining issue (safety default contradiction). The
+  trait `tool_disposition()` default is now `Unavailable`, not
+  `Guest` — the safe choice. `LocalProcessProvider` overrides to
+  return `Guest` iff the tool is in its `ToolRegistry`;
+  `MicroVmProvider` overrides with an explicit whitelist. Future
+  tools that no provider has been updated to handle are silently
+  hidden from the model rather than silently advertised-and-broken.
+  Citation-pinning (replace sibling-repo absolute paths with
+  commit-pinned permalinks) is acknowledged as a publish-readiness
+  task — those references currently work for the maintainer's local
+  cross-team review but need pinning before the RFD bumps state to
+  `published`.
 - **v0.15 (2026-05-04):** rfd-critic v0.14 pass found 1 critical
   issue (transport error mid-output truncated the rest, but the
   surfaced finding was substantive). Closed it. (1) Plan-time tool
