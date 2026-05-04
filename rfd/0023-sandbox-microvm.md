@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.29)
+- **Status:** Discussion (v0.30)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -629,9 +629,15 @@ pub enum ExecuteOutcomeHint {
 pub struct ReleaseOutcome {
     /// Did this VM survive into the warm pool, or was it destroyed?
     pub pool_disposition: PoolDisposition,
-    /// Outcome of the per-call filesystem-reset choreography. `NotApplicable`
-    /// for destroy-only paths (macOS/Windows v1, suspect/cancelled
-    /// releases — those don't try to reset, they just kill the VM).
+    /// Outcome of the per-call filesystem-reset choreography.
+    /// `NotApplicable` for any guest-VM path that skipped reset
+    /// (macOS/Windows v1 destroy-only; suspect/cancelled releases
+    /// — those kill the VM without attempting reset). On the
+    /// `SandboxTelemetry` row this maps to
+    /// `Some(ResetStatus::NotApplicable)` so operators can
+    /// distinguish "VM existed but no reset was attempted" from
+    /// "no VM at all" (host-direct / local-process — those rows
+    /// carry `reset_status = None`).
     pub reset_status: ResetStatus,
     /// Short human-readable reason; populated only when the
     /// disposition was non-default. Surfaces in `pi sandbox doctor
@@ -837,6 +843,9 @@ impl SandboxProvider for MicroVmProvider {
                     guest_duration_ms: None,                  // host-direct: no guest involved; use duration_ms
                     cold_boot: None,
                     cost_usd: None,
+                    pool_disposition: None,           // no VM existed
+                    reset_status: None,               // no VM existed
+                    release_reason: None,
                 },
             });
         }
@@ -921,9 +930,17 @@ pub struct ReleaseGuard {
 impl ReleaseGuard {
     pub fn new(vm: Box<dyn VmHandle>) -> Self { Self { vm: Some(vm) } }
     pub fn vm_mut(&mut self) -> &mut dyn VmHandle { self.vm.as_mut().unwrap().as_mut() }
-    pub async fn release(mut self, hint: ExecuteOutcomeHint) {
-        if let Some(vm) = self.vm.take() {
-            vm.release(hint).await;
+    pub async fn release(mut self, hint: ExecuteOutcomeHint) -> ReleaseOutcome {
+        match self.vm.take() {
+            Some(vm) => vm.release(hint).await,
+            None => ReleaseOutcome {
+                // Should never reach here on the happy path — taken
+                // only if the guard was already disarmed. Treat as
+                // destroyed-with-no-reset for telemetry honesty.
+                pool_disposition: PoolDisposition::Destroyed,
+                reset_status: ResetStatus::NotApplicable,
+                reason: Some("release-guard-double-take".into()),
+            },
         }
     }
 }
@@ -1010,8 +1027,12 @@ pub struct SandboxTelemetry {
     pub pool_disposition: Option<PoolDisposition>,
     /// Outcome of the per-call filesystem-reset choreography
     /// (§"Post-call hygiene"). Set from `ReleaseOutcome.reset_status`.
-    /// None for host-direct, local-process, and macOS/Windows v1
-    /// (destroy-only paths skip reset entirely).
+    /// `None` only when no VM existed at all (host-direct,
+    /// local-process). Guest-VM paths populate this even when no
+    /// reset was attempted: macOS/Windows v1 destroy-only +
+    /// suspect/cancelled releases set `Some(NotApplicable)`. This
+    /// asymmetry lets operators distinguish "no VM" from "VM, no
+    /// reset" without inspecting other fields.
     pub reset_status: Option<ResetStatus>,
     /// Short human-readable reason; populated only when the
     /// disposition was non-default (destroy due to suspect state,
@@ -1067,7 +1088,7 @@ The new fields are added as an **amendment to RFD 0022** (which is currently mar
 
 **JSONL backward compatibility** — pre-amendment rows lack the new fields; `#[serde(default)]` makes them deserialize as `None`, and `pi-stats::ingest` writes `NULL` to the new columns. **Migration ordering**: schema migration (`ALTER TABLE sandbox_actions ADD COLUMN ...` × 10 new) MUST run before any pi binary speaking the new fields ingests rows; otherwise the binary will refuse to start with `schema_migration_required`. v1 ships an integration test (`tests/sandbox_action_compat.rs`) that loads a fixture of pre-amendment rows and asserts both the old binary's rows are still readable AND the new binary's rows have the new fields populated. The `provider` field already exists on the struct in RFD 0022 and is not new here.
 
-**Public API impact.** Every consumer of `SandboxProvider` (the in-tree CLI; `pi-sdk` mocks, examples, and tests; downstream embedders against `pi-sdk`) needs to update for the new `release()` return type and `SandboxTelemetry` fields. A1's stable wire/ABI lift forecast accommodates exactly this: the trait change rides the next minor of `pi-sdk` (additive shape; matches `#[non_exhaustive]` already on the relevant types), and `pi-sdk`'s `MockSandboxProvider` returns a synthetic `ReleaseOutcome { pool_disposition: ReturnedToPool, reset_status: NotApplicable, reason: None }` so existing test code keeps compiling without touching call sites. RFD 0027 §H7's "additive only between minors" policy applies.
+**Public API impact.** Every consumer of `SandboxProvider` (the in-tree CLI; `pi-sdk` mocks, examples, and tests; downstream embedders against `pi-sdk`) needs to update for the new `release()` return type and `SandboxTelemetry` fields. To be honest about the change: changing `release()`'s signature on a publicly-implementable trait IS source-breaking for downstream `impl SandboxProvider for ...`. **The change is sealed-trait-friendly only.** RFD 0027 ships `SandboxProvider` as `#[non_exhaustive]` on its method set is not enforceable — the practical mitigation is that v1 of `pi-sdk` lists `SandboxProvider` as **unstable / sealed-by-convention** in the docs (only `LocalProcessProvider`, `MicroVmProvider`, and `MockSandboxProvider` are blessed implementers; other downstream impls run at their own risk until the trait stabilises). When `pi-sdk` cuts its 1.0, the RFD-0023 trait shape is what stabilises. In the meantime: bump pi-sdk MINOR (still 0.x), update `MockSandboxProvider` to return a synthetic `ReleaseOutcome { pool_disposition: ReturnedToPool, reset_status: NotApplicable, reason: None }`, and changelog the breaking change clearly in the release notes.
 
 ### 3. The local microVM contract
 
@@ -1229,13 +1250,13 @@ Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 
    Any `bash` write to `/root/poison`, `/usr/local/bin/poison`, `/etc/passwd`, or any path outside `/work`/`/run/contextfs` lived in the old overlay's upperdir tmpfs and is gone after step 4. The ONLY surviving mutation is what the tool wrote to `/work` (host-mediated workspace) — the `read`/`write`/`edit` contract.
 
-   **Reset-failure observability + fallback.** If any of steps 1–5 fails (control-plane RPC times out, `pivot_root` returns `EBUSY`, agent absent in older rootfs versions, the new worker doesn't reconnect within `reset_timeout_ms` default 2000 ms), the launcher (a) writes `PI_FAIL: reset-failed step=<N> errno=<E>` to the guest's serial console (mirrors the boot-failure path in §3.5.9), (b) records `SandboxAction.outcome = "reset-failed"`, and (c) destroys the VM. The pool is replenished asynchronously. There is no "best-effort partial reset" path — silent fall-through would re-introduce the leak.
+   **Reset-failure observability + fallback.** If any of steps 1–5 fails (control-plane RPC times out, `pivot_root` returns `EBUSY`, agent absent in older rootfs versions, the new worker doesn't reconnect within `reset_timeout_ms` default 2000 ms), the launcher (a) writes `PI_FAIL: reset-failed step=<N> errno=<E>` to the guest's serial console (mirrors the boot-failure path in §3.5.9), (b) records `SandboxAction.pool_disposition = "destroyed"`, `reset_status = "failed"`, `release_reason = "reset-failed step=<N> errno=<E>"`, and (c) destroys the VM. The pool is replenished asynchronously. There is no "best-effort partial reset" path — silent fall-through would re-introduce the leak.
 
    **Required negative tests** (Commit D integration suite):
    - `bash 'echo poison > /root/marker'` → next acquire on the same `BootSpec` ring (harness asserts `cold_boot=false` and that the launcher reused a specific warm-pool VM ID) finds no `/root/marker`.
    - `bash 'install -m755 /usr/bin/true /usr/local/bin/poison && /usr/local/bin/poison'` (forces upperdir copy-up of a system path; running it proves the file existed) → next acquire's `ls /usr/local/bin/` does NOT contain `poison`.
    - `bash 'echo bad >> /etc/passwd'` → next acquire's `cat /etc/passwd` matches the baseline image bit-for-bit.
-   - Reset-failure path: simulate by stubbing the in-guest agent to return `EBUSY` → harness asserts the VM is destroyed, telemetry row has `outcome="reset-failed"`, and the next acquire is a cold boot.
+   - Reset-failure path: simulate by stubbing the in-guest agent to return `EBUSY` → harness asserts the VM is destroyed, telemetry row has `pool_disposition="destroyed"` + `reset_status="failed"` + `release_reason` containing `"reset-failed"`, and the next acquire is a cold boot.
 
    macOS/Windows v1 inherit this guarantee transitively from the destroy-on-release rule (no overlay reset choreography needed; the VM itself is gone).
 
@@ -1243,7 +1264,7 @@ The worker reports the verdict on the wire as `ToolResponse.post_call_state` (`C
 
 **macOS / Windows v1: destroy-on-release, no pooling.** The cgroup-based probe is Linux-only. macOS and Windows launchers in v1 have a coarser `process-group orphan` check that does NOT detect `setsid()` / fully-detached daemons. Rather than ship a known false-`Clean`, the v1 normative rule for `VfkitLauncher` and `CloudHypervisorLauncher` is **always destroy on release**: the launcher's `release()` ignores `ExecuteOutcomeHint::Clean` and tears the VM down unconditionally. This costs the warm-pool latency benefit on those OSes; an `--sandbox-microvm-pool=force` override is available for operators who accept the daemonization risk for their own workloads. The Linux/Firecracker path keeps the cgroup-based pool. A future RFD lifts the macOS/Windows restriction once each launcher has a proven-clean per-call container/cgroup analog.
 
-**Tested cases.** The Commit D integration suite includes negative tests for: `bash 'sleep 999 &'`, `bash 'nohup foo &'`, `bash '(sleep 5; touch /work/marker) &'`, `bash 'mkdir -p /tmp/x && touch /tmp/x/leftover'`, plus the timeout path (`bash 'sleep 60'` with `timeout_ms=1000`). Each test asserts that (a) the affected VM does **not** return to the pool, (b) the next acquire on the same `BootSpec` does NOT see the leftover process or `/tmp` residue, and (c) telemetry records `outcome=SuspectGuestState`.
+**Tested cases.** The Commit D integration suite includes negative tests for: `bash 'sleep 999 &'`, `bash 'nohup foo &'`, `bash '(sleep 5; touch /work/marker) &'`, `bash 'mkdir -p /tmp/x && touch /tmp/x/leftover'`, plus the timeout path (`bash 'sleep 60'` with `timeout_ms=1000`). Each test asserts that (a) the affected VM does **not** return to the pool (telemetry row has `pool_disposition="destroyed"`), (b) the next acquire on the same `BootSpec` does NOT see the leftover process or `/tmp` residue, and (c) the row's `release_reason` contains a short rationale (e.g. `"post-call-hygiene-failed: descendant pid <N> alive in cgroup"`).
 
 **Timeout hygiene before pool return.** Two distinct timeouts:
 
@@ -2058,7 +2079,7 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 ## Open questions
 
 1. **Cloud-hypervisor as unified launcher across all three OSes?** It supports KVM/Hypervisor.framework/WHPX in one binary. v1.0 picks best-of-breed (Firecracker on Linux, vfkit on macOS, cloud-hypervisor on Windows); revisit after one quarter of telemetry.
-2. **Pool size default.** N=4 host-side, N=1 per subagent. Memory: 4 × 256MB = 1GB resident. Negotiable if users complain.
+2. ~~**Pool size default.**~~ **DECIDED, v0.3.** N=2 per `BootSpec` ring on Linux/Firecracker (memory: 2 × 256MB = 512MB resident; covers one parallel subagent burst). macOS/Windows v1 are destroy-on-release (no pool; v0.24). Operators can override with `--sandbox-microvm-pool-size=N`. The earlier draft's "N=4 host-side" line is superseded.
 3. ~~**Tool selection for `pi-tools-core` (the guest-buildable subset).**~~ **DECIDED, v0.8/v0.9.** Guest-bound tools (route through the launcher → vsock → guest worker → pi-tools-core): `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Host-bound (run on the host directly via pi-tools-net): `web_search`. Unavailable under microvm: `monitor` (one-shot RPC vs. streaming mismatch). The split is the §"Tool availability under `microvm`" matrix, not a per-crate question.
 4. **Default `--sandbox-provider` value after `microvm` ships GA.** Stays at `local-process` (no breaking change for existing users). Migration: docs + release notes + a one-shot first-run prompt suggesting `microvm` if all probes pass.
 5. **Rootfs upgrade UX on pi binary upgrade.** Auto-download with progress bar (default) or refuse + prompt? **Auto-download** is the answer for v1.0; users on offline systems set `PI_SANDBOX_OFFLINE=1` to disable it (and the binary then refuses to use `microvm` until a manual `pi sandbox update`).
@@ -2094,6 +2115,29 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.30 (2026-05-04):** rfd-critic v0.29 cleanup pass found
+  cascading staleness from v0.29's `release()` API change. (1)
+  §"Post-call hygiene" still wrote
+  `SandboxAction.outcome = "reset-failed"` and tests asserted
+  `outcome=SuspectGuestState`; updated to assert
+  `pool_disposition` / `reset_status` / `release_reason` instead.
+  (2) Host-direct branch's `SandboxTelemetry` literal omitted
+  the new fields; now explicitly sets `pool_disposition: None`,
+  `reset_status: None`, `release_reason: None`. (3)
+  `ReleaseGuard::release()` was still `-> ()`; now returns
+  `ReleaseOutcome` (with a sane fallback for the
+  guard-already-disarmed case). (4) `reset_status` representation
+  fixed: `Some(NotApplicable)` for guest-VM destroy paths;
+  `None` only for host-direct/local-process where no VM
+  existed. Documented the asymmetry on both `ReleaseOutcome` and
+  `SandboxTelemetry`. (5) Open Question #2 (pool size) closed —
+  N=2 per BootSpec ring on Linux/Firecracker; macOS/Windows v1
+  destroy-only. The earlier "N=4 host-side" was superseded in
+  v0.3 but the OQ still listed it. (6) Public-API impact
+  paragraph corrected: changing `release()` return type IS
+  source-breaking; `SandboxProvider` is documented as
+  unstable/sealed-by-convention pre-pi-sdk-1.0; this rides a
+  pi-sdk MINOR with changelog mention.
 - **v0.29 (2026-05-04):** rfd-critic v0.28 pass: 1 critical
   (release/reset telemetry not implementable as written) +
   3 underspec. All real, all closed. Critical: §"Post-call
