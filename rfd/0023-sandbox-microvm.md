@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.19)
+- **Status:** Discussion (v0.20)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -679,18 +679,22 @@ impl SandboxProvider for MicroVmProvider {
         let limits = self.build_call_limits(ctx, tool_name);
         let vm = self.launcher.acquire(&spec).await
             .map_err(SandboxError::Acquire)?;
-        // Always release; pool-vs-destroy is decided by the outcome
-        // hint. A clean execution returns to the warm pool; a tool
-        // panic / mid-RPC failure / timeout destroys the VM (the
-        // guest may be in an inconsistent state). Cancellation
-        // (parent task drop) destroys for the same reason.
-        let exec_result = vm.execute(ctx, &limits, tool_name, tool_input).await;
+        // Cancel-safe release. Wrap the VM in a guard whose Drop
+        // releases with `Cancelled` if the future is dropped between
+        // acquire and explicit release. A normal completion calls
+        // `guard.release(hint)` which disarms the Drop. A panic in
+        // `vm.execute` unwinds through the guard and releases as
+        // `SuspectGuestState`. Cancellation (parent task drop)
+        // releases as `Cancelled` so the launcher can choose its own
+        // policy (today: destroy, since we cannot prove guest state).
+        let mut guard = ReleaseGuard::new(vm);
+        let exec_result = guard.vm_mut().execute(ctx, &limits, tool_name, tool_input).await;
         let outcome_hint = match &exec_result {
             Ok(_) => ExecuteOutcomeHint::Clean,
             Err(ExecuteError::CallLimit { .. }) => ExecuteOutcomeHint::Clean,    // guest is fine; just timed out
             Err(_) => ExecuteOutcomeHint::SuspectGuestState,
         };
-        vm.release(outcome_hint).await;
+        guard.release(outcome_hint).await;  // disarms Drop; awaits the actual release
         let exec = exec_result.map_err(SandboxError::Execute)?;
         Ok(SandboxOutcome {
             tool_result: exec.tool_result,
@@ -705,6 +709,37 @@ impl SandboxProvider for MicroVmProvider {
                 cost_usd: None,
             },
         })
+    }
+}
+
+/// Cancel-safe wrapper that ensures `release` always fires.
+///
+/// `ReleaseGuard` owns the `VmHandle` between acquire and execute. The
+/// happy path calls `guard.release(hint).await` which disarms the
+/// Drop; the cancel path (future dropped) hits Drop, which spawns a
+/// detached release task with `ExecuteOutcomeHint::Cancelled`. The
+/// detached task runs on the launcher's runtime so Drop itself stays
+/// synchronous (Rust requirement).
+pub struct ReleaseGuard {
+    vm: Option<Box<dyn VmHandle>>,
+}
+
+impl ReleaseGuard {
+    pub fn new(vm: Box<dyn VmHandle>) -> Self { Self { vm: Some(vm) } }
+    pub fn vm_mut(&mut self) -> &mut dyn VmHandle { self.vm.as_mut().unwrap().as_mut() }
+    pub async fn release(mut self, hint: ExecuteOutcomeHint) {
+        if let Some(vm) = self.vm.take() {
+            vm.release(hint).await;
+        }
+    }
+}
+impl Drop for ReleaseGuard {
+    fn drop(&mut self) {
+        if let Some(vm) = self.vm.take() {
+            // Cannot await in Drop. Spawn detached on the current runtime;
+            // the launcher's release path is bounded (no unbounded await).
+            tokio::spawn(async move { vm.release(ExecuteOutcomeHint::Cancelled).await; });
+        }
     }
 }
 
@@ -849,15 +884,32 @@ pub struct ToolResult {
 }
 ```
 
-`display` is `Option<serde_json::Value>` — host-side tools like `task` populate it (`Some(<json object>)` for child-session pointers); microvm guest tools have no UI hints to surface and emit **`display = None`** in v1.
+`display` is `Option<serde_json::Value>` — host-side tools like `task` populate it for child-session pointers; **most pi-tools-core tools also populate `display`** (verified at `crates/pi-tools-core/src/{read,write,edit,grep,find,ls,bash,monitor}.rs`). v1 must therefore carry `display` across the wire (or have the worker return a full `ToolResult`), not drop it.
+
+**Wire shape revision (v1):** `ToolResponse` carries an explicit `display: Option<serde_json::Value>` field (set by the in-guest worker from each tool's native `ToolResult.display`). The host-side mapping is then a near-direct copy after path-rewriting.
+
+```rust
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolResponse {
+    pub call_id: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_status: i32,
+    pub guest_duration_ms: u32,
+    pub is_error: bool,
+    #[serde(default)]
+    pub display: Option<serde_json::Value>,
+}
+```
 
 Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 
 | `ToolResult` field | Sourced from                                       | Note |
 |--------------------|----------------------------------------------------|------|
 | `tool_use_id`      | Threaded **explicitly** as a parameter to `SandboxProvider::execute_tool(ctx, tool_use_id, tool_name, tool_input)` from the runtime. The runtime passes the outer `ToolCall.call_id` (the LLM-facing id) here; the provider stores it on the resulting `ToolResult` so the LLM can correlate. NOT the wire `ToolRequest.call_id` (which is host-allocated for guest-side dedup and lives only on the wire). | RFD 0022's trait gains a `tool_use_id: &str` parameter on `execute_tool` as a non-default change; LocalProcessProvider, MicroVmProvider, and remote-backend providers all accept it. |
-| `model_output`     | `ToolResponse.stdout`                              | Direct copy. Stderr is dropped on the model-facing path; preserved only in `SandboxAction.stderr` telemetry (future addition). |
-| `display`          | `None` in v1.0                                     | The wire protocol doesn't carry a `display` channel. Tools that today produce a `display` value (none of pi-tools-core do — only `monitor`) lose it under microvm. Documented; not a regression. |
+| `model_output`     | `ToolResponse.stdout` after inverse path rewrite (`/work` → `<host_cwd>`) | Stderr is dropped on the model-facing path; preserved in `SandboxAction.stderr` telemetry. |
+| `display`          | `ToolResponse.display` after inverse path rewrite of any string field whose JSON path matches the per-tool path-key list (e.g. `path`, `paths[*]`, `matches[*].path`). Image `read` carries `{kind: "image", path: <abs>, base64: <b64>}` — `path` is rewritten, `base64` is passed through verbatim. | Preserves UI parity with `LocalProcessProvider`. |
 | `is_error`         | `ToolResponse.is_error`                            | Direct copy. |
 
 `ToolResponse.exit_status` and `guest_duration_ms` go into the `SandboxAction` telemetry row, not into `ToolResult`. `ToolResponse.stderr` is currently dropped on the model-facing path; a future v1.x can add `stderr_tail: Option<String>` to `ToolResult` if telemetry shows it's load-bearing for debugging.
@@ -882,21 +934,42 @@ outputs.
 
 **Per-tool rewriting**:
 
-| Tool          | Inputs rewritten host→guest                          | Outputs rewritten guest→host                            |
+| Tool          | Inputs rewritten host→guest                          | Outputs rewritten guest→host (in `model_output` AND `display`)            |
 | ------------- | ---------------------------------------------------- | ------------------------------------------------------- |
-| `read`        | `path` field (`<host_cwd>/<rel>` → `/work/<rel>`)    | none (output is file content)                            |
-| `write`       | `path` field, identical to read                      | none                                                     |
-| `edit`        | `path` field, identical to read                      | error messages with paths get the inverse rewrite        |
-| `grep`        | `path` field (search root)                           | each matching line's path prefix gets the inverse rewrite |
-| `find`        | `path` field                                         | each result path gets the inverse rewrite                |
-| `ls`          | `path` field                                         | none (output is filenames, no directory prefix)          |
-| `bash`        | `cwd` field (and best-effort substring rewrite of the command if it literally contains `<host_cwd>`); see below | best-effort substring rewrite of stdout/stderr if `<host_cwd>` appears literally |
+| `read`        | `path` field (`<host_cwd>/<rel>` → `/work/<rel>`); leaf must exist (`allow_missing_leaf=false`)    | text reads: `display.path`. Image reads: `display.path` (binary `display.base64` passed through verbatim).  |
+| `write`       | `path` field; leaf may not exist (`allow_missing_leaf=true`) | success message in `model_output` (`"wrote N bytes to <path>"`); `display.path`.                                                     |
+| `edit`        | `path` field; leaf must exist (`allow_missing_leaf=false`) | success message in `model_output`; `display.path` for both success and `edit-error` displays.        |
+| `grep`        | `path` field (search root); leaf must exist          | each matching line's path prefix in `model_output`; no per-match path field in current `display` (count summary only). |
+| `find`        | `path` field; leaf must exist                        | each result path in `model_output`; `display` carries glob/match-count summary only (no per-path list to rewrite). |
+| `ls`          | `path` field; leaf must exist                        | `model_output` is filenames only (no directory prefix); `display.path` (the listed dir) is rewritten. |
+| `bash`        | `cwd` field; leaf must exist; command string best-effort substring-rewritten (see below) | stdout/stderr in `model_output`: literal `/work` prefixes (with word boundaries) rewritten back to `<host_cwd>`. `display.command` and `display.cwd` rewritten. |
 
-**Canonicalization**: the provider canonicalises the input host path
-(symlink-resolve, absolute) before checking it lives beneath
-`<host_cwd>`. Paths outside the cwd are rejected with
-`ToolError::InvalidPath` BEFORE any rewriting — the rewrite logic
-never gets to see escape attempts.
+**Canonicalization (`resolve_beneath`)**: the provider does not run a
+plain `canonicalize` on the requested path — that breaks `write` to
+new files because the leaf doesn't exist yet. Instead each input path
+goes through:
+
+```rust
+fn resolve_beneath(
+    host_cwd: &Path,        // canonicalised once at session start
+    requested: &Path,       // tool input
+    allow_missing_leaf: bool, // true for write only in v1
+) -> Result<PathBuf, ToolError>
+```
+
+Algorithm:
+1. If `requested` is relative, treat it as relative to `host_cwd`.
+2. Walk from `host_cwd` toward `requested` lexically, popping `..`
+   without ever escaping above `host_cwd`. (Strict lexical jail; no
+   filesystem touch.)
+3. Find the deepest *existing* ancestor of the resulting path and
+   `canonicalize` it (symlink-resolve). Then re-attach the remaining
+   non-existing tail lexically.
+4. Verify the canonicalised root is still beneath the canonicalised
+   `host_cwd`; if not, reject.
+5. If `allow_missing_leaf=false` and the final path doesn't exist,
+   reject (the per-tool semantic — read/edit need an existing file).
+6. Reject any escape with `ToolError::InvalidInput("path escapes session cwd: <requested>")`. v1 does not add a new `ToolError` variant; the existing `InvalidInput` carries enough context for the agent loop and avoids a wire/semver bump on `pi-tool-types`.
 
 **`bash` contract**: shell commands are free-form, so the provider
 can't fully translate paths embedded inside them. The contract is:
@@ -912,10 +985,15 @@ can't fully translate paths embedded inside them. The contract is:
   paths to files inside the project resolve, but absolute paths
   outside the project don't. (Same constraint as virtio-fs `local`
   mode + the cfs-fs-server `--backend-root` jail in `managed` mode.)
-- `pwd` inside bash returns the host-side path (the worker injects
-  `PWD=<host_cwd>` into the bash environment) so the model's mental
-  model of cwd stays correct. Anyone running `realpath` on a relative
-  path gets the host path back.
+- `pwd` inside bash returns the host-side path: the worker injects
+  `PWD=<host_cwd>` into the bash environment, which makes shell
+  builtins `pwd` (without `-P`) and `echo $PWD` print the host path.
+  This is **best-effort, not a complete illusion** — anything that
+  resolves the kernel cwd directly (`pwd -P`, `readlink /proc/self/cwd`,
+  `getcwd(3)`, `realpath .`) bypasses `$PWD` and shows `/work`. Output
+  rewriting (`/work` → `<host_cwd>` substring substitution) catches
+  most of those leaks in stdout/stderr but is not airtight; this is
+  documented for users running scripts that compare paths byte-for-byte.
 
 **Why not just expose `/work` to the model**: tested empirically
 on local-process: when the model sees `/work/src/lib.rs` instead of
@@ -1657,6 +1735,38 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.20 (2026-05-04):** rfd-critic v0.19 pass found 2 critical
+  issues, both real, both closed. (1) **Path-validation primitive
+  was wrong**: spec said `ToolError::InvalidPath` (which doesn't
+  exist on `main` — `pi-tool-types` only has `NotFound`,
+  `InvalidInput`, `Io`, `Other`) and used full `canonicalize`,
+  which breaks `write` to new files. Replaced with
+  `resolve_beneath(host_cwd, requested, allow_missing_leaf)`:
+  lexical jail walk, deepest-existing-ancestor canonicalisation,
+  optional missing-leaf for `write`. Errors raised via existing
+  `ToolError::InvalidInput` (no semver/wire bump). (2)
+  **`ToolResponse ↔ ToolResult` mapping was lossy**: spec said
+  `display = None` in v1 and that "no pi-tools-core produces
+  display"; verified false (read/write/edit/grep/find/ls/bash all
+  emit `display: Some(...)` at `crates/pi-tools-core/src/*.rs`).
+  Wire `ToolResponse` now carries `display: Option<serde_json::Value>`;
+  host-side mapping inverse-rewrites paths in **both** `model_output`
+  and `display` (per-tool key list); image `read` `display.path`
+  is rewritten while `display.base64` is passed verbatim. Per-tool
+  rewrite table updated: `write`/`edit` success messages get
+  inverse rewrite; bash output rewrite direction corrected
+  (`/work` → `<host_cwd>`, not the reverse). Two underspec items
+  also closed: (a) `Cancelled` outcome is now reachable —
+  `ReleaseGuard::Drop` spawns a detached release with
+  `ExecuteOutcomeHint::Cancelled` if the future is dropped between
+  acquire and explicit release; (b) `PWD=<host_cwd>` claim
+  downgraded from "makes pwd/realpath behave host-style" to
+  "best-effort: shell builtins read $PWD, but `pwd -P`,
+  `readlink /proc/self/cwd`, `realpath .` bypass it; output
+  rewriting catches most leaks but isn't airtight". `6 calls`
+  finding from critic was a misread of the prompt's tool-call
+  cap; body still says 50 calls / 5 min and is internally
+  consistent.
 - **v0.19 (2026-05-04):** rfd-critic v0.18 pass found 2 critical
   issues. (1) Genuinely substantive missing piece: **path
   virtualization**. The agent's tools accept absolute host paths
