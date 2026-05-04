@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.13)
+- **Status:** Discussion (v0.14)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -55,30 +55,74 @@ Estimated impact: ~600 LoC moved, no behavior change. Fully reversible.
 
 **`pi-tool-types` becomes a stable public ABI** by virtue of being on the wire protocol AND in the host-side tool API. Field additions to `ToolResult`/`ToolSpec` after Commit A1 are breaking changes that must bump the crate's MAJOR version and the wire-protocol version in lockstep. Acknowledged here so future-us doesn't blunder.
 
-### Tool dispatch boundary — runtime-native tools bypass `SandboxProvider`
+### Tool dispatch boundary — `ToolDispatchClass` (NEW API, Commit G)
 
-`SandboxProvider::execute_tool()` mediates **guest-buildable tools**
-only — the `pi-tools-core` set (`read`, `write`, `edit`, `bash`,
-`grep`, `find`, `ls`) plus host-direct exceptions (`web_search`).
-Runtime-native orchestration tools that drive the agent's outer
-loop never reach the SandboxProvider layer at all:
+Today (`crates/pi-agent-core/src/runtime.rs:1677-1681, 1790-1803`)
+the runtime sends every tool through `SandboxProvider::execute_tool`
+when a provider is configured; there is no first-class notion of
+"runtime-native vs sandbox-managed". `task` is just another tool
+(`crates/pi-coding-agent/src/native/task/tool.rs`). That works for
+the inline `LocalProcessProvider` path because the provider is a
+function call, but it would break under microvm — `task` would try
+to spawn a subagent inside the guest, which has no agent loop.
 
-- **`task`** (RFD 0005) — dispatches a subagent. The runtime owns
-  this; the spawned subagent is a fresh agent loop with its own
-  `SandboxProvider` (typically inheriting the parent's `Arc`).
-- Future runtime-native tools that compose multi-tool workflows
-  (e.g. an `apply_plan` tool, an `evolve_tick` tool) similarly
-  bypass.
+Commit G adds a first-class `ToolDispatchClass` to the tool registry
+metadata:
 
-The runtime dispatcher checks `tool.is_runtime_native()` BEFORE
-calling `SandboxProvider::execute_tool`. The provider's
-`execute_tool` body asserts this with a `debug_assert!` for
-defense-in-depth; any runtime-native tool reaching the provider is a
-runtime bug, not a sandbox concern.
+```rust
+// in pi-tool-types (after RFD 0023 Commit A1)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolDispatchClass {
+    /// Runtime-owned: bypasses SandboxProvider entirely. Examples:
+    /// `task` (RFD 0005), future `apply_plan` / `evolve_tick`.
+    RuntimeNative,
+    /// Sandbox-managed: routed through the active SandboxProvider.
+    /// SandboxProvider further partitions these into `guest` /
+    /// `host-direct` / `unavailable` (the §"Tool availability under
+    /// microvm" matrix).
+    SandboxManaged,
+}
+
+pub trait Tool {
+    // ... existing fields ...
+    fn dispatch_class(&self) -> ToolDispatchClass {
+        ToolDispatchClass::SandboxManaged   // safe default
+    }
+}
+```
+
+The runtime's tool dispatch site (`runtime.rs:1677` today) becomes:
+
+```rust
+match tool.dispatch_class() {
+    ToolDispatchClass::RuntimeNative =>
+        tool.invoke(ctx, input).await,    // bypass sandbox
+    ToolDispatchClass::SandboxManaged =>
+        match &self.sandbox_provider {
+            Some(p) => p.execute_tool(ctx, &call_id, name, input).await,
+            None    => tool.invoke(ctx, input).await,
+        },
+}
+```
+
+`task` overrides `dispatch_class()` to return `RuntimeNative`. Future
+runtime-native tools do the same. `MicroVmProvider::execute_tool`
+adds a `debug_assert!` that the tool isn't `RuntimeNative` — a
+defense-in-depth check; reaching that branch would be a runtime
+bug.
+
+This is a **NEW API** Commit G ships; it does not exist in the
+codebase today. The same change benefits `LocalProcessProvider`
+(which currently fakes `task` execution by relying on the in-process
+side effects). The RFD 0022 trait gains `tool_use_id` (§3 mapping
+table); the tool trait gains `dispatch_class()`. Both are non-default
+trait changes that ripple through provider impls.
 
 The §"Tool availability under `microvm`" matrix below covers only
-the tools a `SandboxProvider` actually sees: `monitor`, `web_search`,
-and the seven `pi-tools-core` guest tools.
+the `SandboxManaged` slice of the tool surface: the `pi-tools-core`
+guest tools, `web_search` (host-direct), `monitor` (unavailable),
+`lsp` (unavailable in v1). `task` is `RuntimeNative` and never
+appears in that matrix.
 
 ### Tool availability under `microvm` — full matrix
 
@@ -96,12 +140,12 @@ its v1 disposition:
 | `ls`                | guest        | Directory listing; busybox provides it. pi-tools-core.                    |
 | `web_search`        | host-direct  | Network query, no host fs side effects; runs on host (§"web_search host-dispatch"). |
 | `monitor`           | unavailable  | One-shot RPC vs. streaming mismatch; returns `ToolUnavailable` (§"monitor exclusion"). |
-| `lsp`               | host-direct  | LSP servers run on the host (large, glibc-heavy, talk over stdio to a separate process). The agent's lsp-write-hooks use the host's installed language servers; running them inside the guest's busybox userland is impractical and shaving the rootfs to fit `rust-analyzer`/`gopls`/etc. is out of v1 scope. The `lsp` tool routes host-direct via `pi-tools-net`'s LSP backend (RFD 0007); guest-side files are reached over the same FUSE/contextfs mount that `/work` exposes, so LSP queries see the same workspace state. |
+| `lsp`               | unavailable  | The current `lsp` tool lives in `crates/pi-coding-agent/src/native/lsp/tool.rs`, ABOVE `pi-sandbox` in the dependency graph — `pi-sandbox` cannot dispatch to it without a circular dep or a lower-layer rewrite. **v1 microvm marks `lsp` unavailable** (returns `ToolUnavailable` with a startup-time stderr banner if the user has LSP integration enabled). The `LspWriteTool` write-decoration path is similarly unavailable: under microvm, `write` runs guest-side without LSP post-processing. Operators who need LSP under sandbox use `--sandbox-provider=local-process`. A future RFD can re-home `lsp` into a lower crate and reclassify it as `host-direct`; that's not in Commit G's scope. |
 | Future tools        | TBD per RFD  | Each new tool RFD MUST classify into one of `guest` / `host-direct` / `unavailable`. The default (if a tool RFD forgets) is `unavailable`. |
 
-The host-direct registry in `MicroVmProvider` hardcodes `web_search`
-and `lsp` for v1 — no operator-extensible registration to keep the
-trust boundary tight (§"web_search host-dispatch" rationale).
+The host-direct registry in `MicroVmProvider` hardcodes **`web_search`
+only** in v1 — no operator-extensible registration, no `lsp`, to keep
+the trust boundary tight and the cross-crate dep graph clean.
 
 #### `monitor` exclusion (decided)
 
@@ -1367,6 +1411,24 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.14 (2026-05-04):** rfd-critic v0.13 pass found 2 critical
+  issues. Both real (and a class I'd been hand-waving). Closed both.
+  (1) `lsp` was claimed host-direct via "pi-tools-net's LSP backend
+  (RFD 0007)" — that backend doesn't exist and the actual `lsp` tool
+  lives ABOVE `pi-sandbox` in the dep graph (`crates/pi-coding-agent/
+  src/native/lsp/tool.rs`). Reclassified as **`unavailable` in
+  microvm v1**: returns `ToolUnavailable` with a startup-time stderr
+  banner, `LspWriteTool` write-decoration is similarly unavailable
+  under microvm. A future RFD can re-home `lsp` into a lower crate
+  and reclassify; not in Commit G's scope. The host-direct registry
+  hardcodes `web_search` only. (2) `tool.is_runtime_native()` was
+  cited as if it existed — it doesn't. Replaced with a normative
+  `ToolDispatchClass` API that Commit G adds: `RuntimeNative` vs
+  `SandboxManaged`, with the runtime branch at `runtime.rs:1677`
+  spelled out. `task` overrides `dispatch_class()` to return
+  `RuntimeNative`. The §"Tool dispatch boundary" subsection now
+  explicitly marks itself a NEW API (Commit G) rather than describing
+  an existing primitive.
 - **v0.13 (2026-05-04):** rfd-critic v0.12 pass found 3 critical
   issues. Closed all of them. (1) `tool_use_id` is now an explicit
   parameter on `SandboxProvider::execute_tool(ctx, tool_use_id,
