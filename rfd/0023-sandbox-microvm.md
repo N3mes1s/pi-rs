@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.17)
+- **Status:** Discussion (v0.18)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -446,10 +446,22 @@ pub struct VmSpec {
     pub rootfs_version: RootfsVersion,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NetworkPolicy {
     Deny,
     // Future: AllowList(Vec<DomainPattern>), AllowAll
+}
+
+/// `BootSpec.transport_mode` — `local` vs `managed` per the §3.5
+/// deployment-mode matrix. Different modes mean different rootfs
+/// init paths (managed brings up contextfsd; local doesn't), so
+/// they MUST partition the warm pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransportMode {
+    /// virtio-fs RW direct mount (macOS/vfkit, Windows/cloud-hypervisor).
+    Local,
+    /// contextfs FUSE over Noise-IK (Linux/Firecracker only).
+    Managed,
 }
 
 /// VM-level ceiling. Set at acquire(); cannot change without
@@ -506,11 +518,22 @@ pub trait VmHandle: Send + Sync {
         limits: &CallLimits,
         tool_name: &str,
         tool_input: &serde_json::Value,
-    ) -> Result<VmExecution, SandboxError>;
+    ) -> Result<VmExecution, ExecuteError>;
 
     /// Release the VM. v1.0 in pooled mode = return to pool;
-    /// non-pooled = shutdown.
-    async fn release(self: Box<Self>) -> Result<(), SandboxError>;
+    /// non-pooled = shutdown. Best-effort: errors are logged but
+    /// do not propagate. Pool hygiene rule: VMs released after a
+    /// non-trivial `ExecuteError` (e.g. tool panic, RPC failure)
+    /// are **destroyed** rather than returned to the pool, to
+    /// bound the leak from corrupt guest state.
+    async fn release(self: Box<Self>, exec_outcome: ExecuteOutcomeHint);
+}
+
+/// Hint to `release()` so the launcher can decide pool-vs-destroy.
+pub enum ExecuteOutcomeHint {
+    Clean,                              // success or benign error → return to pool
+    SuspectGuestState,                  // tool panic / RPC midstream → destroy
+    Cancelled,                          // ctx cancellation → destroy (state unknown)
 }
 
 pub struct VmExecution {
@@ -800,18 +823,21 @@ One JSON line per direction, `\n`-framed. Carried over a vsock connection on `VS
 
 #### `ToolResponse` ↔ `ToolResult` field mapping
 
-The host needs to reconstruct a `pi_tool_types::ToolResult` from the wire `ToolResponse` so the rest of the agent loop sees a uniform shape regardless of sandbox. `ToolResult` (the actual shape on `main` post-A1, copied verbatim from `crates/pi-tool-types/src/lib.rs`):
+The host needs to reconstruct a `pi_tool_types::ToolResult` from the wire `ToolResponse` so the rest of the agent loop sees a uniform shape regardless of sandbox. `ToolResult` on `main` (`crates/pi-tool-types/src/lib.rs:21-31`, post-A1):
 
 ```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
-    pub tool_use_id: String,            // matches the LLM's tool_use id
-    pub model_output: String,           // text fed back to the LLM
-    pub display: serde_json::Value,     // structured UI hint (Null when none)
+    pub tool_use_id: String,
+    pub model_output: String,                 // text fed back to the LLM
+    #[serde(default)]
+    pub display: Option<serde_json::Value>,   // structured UI hint, None when no hint
+    #[serde(default)]
     pub is_error: bool,
 }
 ```
 
-Note: `display` is `serde_json::Value`, not `Option<String>` — host-side tools like `task` populate it with structured JSON (a child-session pointer object). Microvm guest tools have no UI hints to surface; they emit `display: serde_json::Value::Null` in v1.
+`display` is `Option<serde_json::Value>` — host-side tools like `task` populate it (`Some(<json object>)` for child-session pointers); microvm guest tools have no UI hints to surface and emit **`display = None`** in v1.
 
 Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 
@@ -1559,6 +1585,19 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.18 (2026-05-04):** rfd-critic v0.17 pass found 3 critical
+  issues. All small, all closed. (1) `ToolResult.display` corrected
+  to `Option<serde_json::Value>` (the actual shape on `main`,
+  `crates/pi-tool-types/src/lib.rs:21-31`); microvm guest tools
+  emit `display = None` in v1. (2) `VmHandle::execute()` now
+  returns `Result<_, ExecuteError>` (consistent with the typed
+  taxonomy introduced v0.17, no longer collapses into `SandboxError`
+  one layer too early). `release()` is best-effort + takes an
+  `ExecuteOutcomeHint` so the launcher can route Clean →
+  return-to-pool, SuspectGuestState → destroy (pool hygiene rule).
+  (3) `NetworkPolicy` gains `PartialEq, Eq, Hash` derives so
+  `BootSpec` actually compiles; `TransportMode` (referenced in the
+  `BootSpec` key) is now defined inline (`Local` / `Managed`).
 - **v0.17 (2026-05-04):** rfd-critic v0.16 pass found 4 critical
   issues. All real, all closed. (1) Background §"pi-tools dependency
   problem" updated: A1 + A2 are MERGED on main (per task list #33,
