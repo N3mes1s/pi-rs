@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.23)
+- **Status:** Discussion (v0.24)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -9,7 +9,7 @@
 
 RFD 0022 shipped the `SandboxProvider` trait but only a passthrough `LocalProcessProvider` whose own docstring admits it doesn't isolate anything: `tool.invoke()` runs inline, same fs / same UID / same network. The wiring is correct, the contents are vapor. End-to-end dogfood produced `duration_ms: 0` per call — proof nothing forks.
 
-This RFD ships the first **real isolation backend**: a `MicroVmProvider` that runs each tool call inside a Linux microVM, with one rootfs and one wire protocol shared by per-OS launchers (Firecracker on Linux, vfkit on macOS, cloud-hypervisor+WHPX on Windows). The user-facing CLI flag (`--sandbox-provider=microvm`) does **not** ship until all three OS paths work in the same release.
+This RFD ships the first **real isolation backend**: a `MicroVmProvider` that runs each tool call inside a Linux microVM, with one rootfs and one wire protocol shared by per-OS launchers (Firecracker on Linux, vfkit on macOS, cloud-hypervisor+WHPX on Windows). **Phased rollout:** explicit launcher pins (`--sandbox-provider=microvm:firecracker`, `…:vfkit`, `…:cloud-hypervisor`) ship per platform as each launcher lands and dogfoods clean. The unqualified `--sandbox-provider=microvm` *auto-pick* form ships only after all three OS paths meet the cross-platform GA bar (probe, dogfood, parity tests green on each).
 
 Remote sandbox vendors (E2B, Sprites, Daytona) are split into a sister RFD — see **RFD 0026** — because they share only the `SandboxProvider` surface, none of the rootfs/protocol/launcher infrastructure.
 
@@ -302,7 +302,7 @@ filter / quarantine, separate RFD).
 §2's `MicroVmProvider::execute_tool()` sample reflects this routing:
 `monitor` returns `ToolUnavailable`; `web_search` dispatches to the
 host registry; everything else routes through the guest. The
-telemetry row gets `transport = "host-direct"` for host-bound tools
+telemetry row gets `dispatch_path = "host-direct"` for host-bound tools
 so operators can see which path each call took.
 
 ### Inspiration: aegis
@@ -578,11 +578,13 @@ pub struct VmExecution {
     pub acquire_to_ready_ms: u32,
     /// True when this acquire required a cold boot (pool miss).
     pub cold_boot: bool,
+    /// Worker's post-call hygiene verdict; mirrors `ToolResponse.post_call_state`.
+    pub post_call_state: PostCallState,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProbeReport {
-    pub transport: &'static str,
+    pub launcher: &'static str,         // "firecracker" | "vfkit" | "cloud-hypervisor"
     pub available: bool,
     pub version: Option<String>,        // e.g. "Firecracker v1.15.0"
     pub probe_duration_ms: u32,
@@ -765,22 +767,27 @@ impl SandboxProvider for MicroVmProvider {
         // policy (today: destroy, since we cannot prove guest state).
         let mut guard = ReleaseGuard::new(vm);
         let exec_result = guard.vm_mut().execute(ctx, &limits, tool_name, tool_input).await;
-        // The hint is the host's preference; the launcher then runs a
-        // **post-call hygiene probe** before actually returning the VM
-        // to the pool (see §"Post-call hygiene", below). Successful
-        // execution by itself is NOT proof the VM is reusable: a
-        // `bash` tool call that runs `sleep 999 &`, `nohup ... &`,
-        // or starts a background daemon leaves descendants alive in
-        // the guest after `tool.invoke()` returns. The probe MUST
-        // verify (a) no descendant processes remain in the per-call
-        // process subtree/cgroup; (b) the worker's transient working
-        // dirs are cleared. Failure of either downgrades the outcome
-        // to `SuspectGuestState` regardless of the host's hint.
-        let outcome_hint = match &exec_result {
+        // The host's tentative hint. The wire-borne
+        // `post_call_state` from the worker (set after the per-call
+        // hygiene probe — see §"Post-call hygiene") composes with
+        // this hint to produce the final value passed to release().
+        // Successful tool execution by itself is NOT proof the VM is
+        // reusable: a `bash 'sleep 999 &'` leaves a daemon alive
+        // after `tool.invoke()` returns; only the worker's probe
+        // can detect that.
+        let host_hint = match &exec_result {
             Ok(_) => ExecuteOutcomeHint::Clean,
-            Err(ExecuteError::CallLimit { .. }) => ExecuteOutcomeHint::Clean,    // worker has already drained per §"Timeout hygiene"
+            Err(ExecuteError::CallLimit { .. }) => ExecuteOutcomeHint::Clean,
             Err(_) => ExecuteOutcomeHint::SuspectGuestState,
         };
+        let post_call = exec_result
+            .as_ref()
+            .map(|exec| exec.post_call_state)
+            .unwrap_or(PostCallState::SuspectGuestState);
+        let outcome_hint = compose_outcome(host_hint, post_call);
+        // compose_outcome: Clean iff BOTH inputs are Clean; otherwise
+        // SuspectGuestState. Cancelled propagates separately via
+        // ReleaseGuard::Drop.
         guard.release(outcome_hint).await;  // disarms Drop; awaits the actual release
         let exec = exec_result.map_err(SandboxError::Execute)?;
         Ok(SandboxOutcome {
@@ -1027,7 +1034,28 @@ pub struct ToolResponse {
     /// registry below).
     #[serde(default)]
     pub display: Option<serde_json::Value>,
+    /// Worker's post-call hygiene verdict. Set by the worker AFTER
+    /// the tool returns and AFTER the worker has run the per-call
+    /// process-subtree probe (cgroup-empty on Linux; pgrp-orphan
+    /// fallback elsewhere) + temp-dir scrub described in §"Post-call
+    /// hygiene". `Clean` means the VM is provably idle and may be
+    /// returned to the pool. `SuspectGuestState` means at least one
+    /// post-call check failed (lingering descendant, residual temp
+    /// state, …) — the host MUST destroy this VM regardless of the
+    /// tool's success bit. The host's `outcome_hint` derivation
+    /// composes WITH this field: `final = min(host_hint,
+    /// post_call_state)` where `Clean < SuspectGuestState`. Defaults
+    /// to `SuspectGuestState` on a missing field — workers are
+    /// trusted to *prove* cleanliness, not to skip the field.
+    #[serde(default = "default_post_call_state")]
+    pub post_call_state: PostCallState,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PostCallState { Clean, SuspectGuestState }
+
+fn default_post_call_state() -> PostCallState { PostCallState::SuspectGuestState }
 ```
 
 One JSON line per direction, `\n`-framed. Carried over a vsock connection on `VSOCK_DEFAULT_PORT`. **Guest-initiated**: the guest worker listens on the vsock port; the host's `acquire()` blocks until the guest signals "ready" by accepting a connection. This dodges known macOS host-listen quirks under vfkit and matches aegis's working pattern under Firecracker.
@@ -1068,7 +1096,9 @@ Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 1. **Process subtree empty.** Every descendant the per-call tool spawned (the `bash` shell, anything it forked) is gone. Implementation: bash runs as the leader of a fresh process group; the worker reaps it, then `kill(-pgid, 0)` returns `ESRCH`. On Linux the worker additionally consults a per-call cgroup v2 (`cgroup.procs` empty) — the cgroup is the authoritative test because a daemonized child reparented to PID 1 still appears in the cgroup. macOS/Windows use process-group reparenting detection as a coarser fallback (a known v1 gap; documented).
 2. **Worker transient state cleared.** Per-call temp dirs (`$TMPDIR`/<call_id>) removed; per-call open file descriptors closed; `$PWD`/env scrubbed.
 
-If either check fails, the worker emits a `ToolResponse` with `is_error = true` and the `model_output` carries a `[background-daemon-detected]` marker; the host downgrades the outcome to `ExecuteOutcomeHint::SuspectGuestState` regardless of the tool's success bit, and the launcher destroys the VM rather than returning it to the pool. This is by design: a leaked `sleep 999 &` would otherwise contaminate the next call (or worse, the next subagent on the same `BootSpec` partition).
+The worker reports the verdict on the wire as `ToolResponse.post_call_state` (`Clean` | `SuspectGuestState`). The tool itself may have succeeded; the post-call probe is what decides pool reuse. The host composes `final_hint = min(host_outcome_hint, post_call_state)` (`Clean < SuspectGuestState`) before calling `release(final_hint)`, so a daemonization leak forces destroy regardless of the tool's success bit. A missing `post_call_state` field defaults to `SuspectGuestState` — workers must *prove* cleanliness rather than implicitly assert it. The verdict is not surfaced to the model (the tool's `model_output` is unchanged); it's strictly a host/launcher signal.
+
+**macOS / Windows v1: destroy-on-release, no pooling.** The cgroup-based probe is Linux-only. macOS and Windows launchers in v1 have a coarser `process-group orphan` check that does NOT detect `setsid()` / fully-detached daemons. Rather than ship a known false-`Clean`, the v1 normative rule for `VfkitLauncher` and `CloudHypervisorLauncher` is **always destroy on release**: the launcher's `release()` ignores `ExecuteOutcomeHint::Clean` and tears the VM down unconditionally. This costs the warm-pool latency benefit on those OSes; an `--sandbox-microvm-pool=force` override is available for operators who accept the daemonization risk for their own workloads. The Linux/Firecracker path keeps the cgroup-based pool. A future RFD lifts the macOS/Windows restriction once each launcher has a proven-clean per-call container/cgroup analog.
 
 **Tested cases.** The Commit D integration suite includes negative tests for: `bash 'sleep 999 &'`, `bash 'nohup foo &'`, `bash '(sleep 5; touch /work/marker) &'`, `bash 'mkdir -p /tmp/x && touch /tmp/x/leftover'`, plus the timeout path (`bash 'sleep 60'` with `timeout_ms=1000`). Each test asserts that (a) the affected VM does **not** return to the pool, (b) the next acquire on the same `BootSpec` does NOT see the leftover process or `/tmp` residue, and (c) telemetry records `outcome=SuspectGuestState`.
 
@@ -1907,6 +1937,35 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.24 (2026-05-04):** rfd-critic v0.23 pass: 3 criticals, 3
+  underspec. Real ones closed. (1) Post-call hygiene mechanism
+  promoted from "marker text in model_output" to first-class
+  `ToolResponse.post_call_state: PostCallState` (`Clean` |
+  `SuspectGuestState`); host composes
+  `final_hint = min(host_hint, post_call_state)` before calling
+  release. Missing field defaults to `SuspectGuestState` —
+  workers must *prove* clean. `VmExecution` carries it through to
+  the host. The verdict is a host/launcher signal, not surfaced
+  to the model. (2) macOS / Windows v1: `VfkitLauncher` and
+  `CloudHypervisorLauncher` are now normatively
+  **destroy-on-release, no pooling**; the cgroup-based probe is
+  Linux-only and pgrp-orphan can't catch `setsid()` daemonization
+  reliably. Operators who accept the risk on those OSes can use
+  `--sandbox-microvm-pool=force`; default is destroy. Future RFD
+  lifts the restriction once each launcher has a proven-clean
+  per-call container/cgroup analog. Linux/Firecracker keeps the
+  pool. (3) Stale `transport` sweep round 2: `ProbeReport.transport`
+  → `ProbeReport.launcher`; §"Tool availability" final paragraph
+  `transport = "host-direct"` → `dispatch_path = "host-direct"`.
+  Underspec items: (a) `VmExecution` now carries
+  `post_call_state` so the runtime can propagate it; (b)
+  cross-platform GA gate softened from "doesn't ship until all 3
+  OS work" → "explicit launcher pins ship per-platform as each
+  lands; unqualified auto-pick ships only after all three meet
+  the GA bar"; (c) the critic's claim that
+  `crates/pi-tools-core/src/monitor.rs` doesn't exist was a
+  **review-environment false negative** — the file is on `main`
+  (verified via `ls`); citation kept.
 - **v0.23 (2026-05-04):** rfd-critic v0.22 pass found 2 critical
   + 3 underspec + a real citation. Both criticals real and closed.
   (1) **Pool hygiene proof.** v0.22 marked every `Ok(_)` and
