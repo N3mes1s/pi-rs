@@ -185,6 +185,21 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
             system.push_str(&s);
         }
     }
+    // If --system-prompt-file is set, read it and replace the entire
+    // system prompt. This is used by orchestrator-driven dispatch where
+    // the per-agent prompt lives in `.pi/agents/<name>.md` and is passed
+    // via a tempfile to avoid concatenation into the user turn.
+    if let Some(ref prompt_file) = cli.system_prompt_file {
+        match std::fs::read_to_string(prompt_file) {
+            Ok(contents) => system = contents,
+            Err(e) => {
+                tracing::warn!(
+                    "failed to read --system-prompt-file {}: {e}",
+                    prompt_file.display()
+                );
+            }
+        }
+    }
     // (skill manifest gets appended after skills are loaded — see step 10)
 
     // 7. context files (AGENTS.md / CLAUDE.md).

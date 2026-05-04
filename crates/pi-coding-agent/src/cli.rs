@@ -346,6 +346,13 @@ pub struct Cli {
     /// Write stop.req — supervisor finishes current cycle then exits cleanly.
     #[arg(long = "halo-stop", action = ArgAction::SetTrue)]
     pub halo_stop: bool,
+
+    /// Read the runtime system prompt from a file. Mutually exclusive
+    /// with --system-prompt (if both, file wins) and overrides the
+    /// default system prompt. Useful for orchestrator-driven dispatch
+    /// where the per-agent prompt lives in `.pi/agents/<name>.md`.
+    #[arg(long = "system-prompt-file", value_name = "PATH")]
+    pub system_prompt_file: Option<PathBuf>,
 }
 
 impl Cli {

@@ -26,6 +26,12 @@
 //!     `git checkout` before calling `dispatch`); v1 does NOT use a
 //!     per-milestone worktree (RFD 0021 §"Concurrency" punts that to
 //!     parallel mode, which v1 doesn't support).
+//!
+//!   * The agent body (from `.pi/agents/<name>.md`) is written to a
+//!     NamedTempFile and passed to the spawned pi via
+//!     `--system-prompt-file`. The assignment is fed on stdin
+//!     unchanged, so the model sees a clean separation between the
+//!     system prompt and the task description.
 
 use crate::schema::Milestone;
 use std::path::{Path, PathBuf};
@@ -48,9 +54,10 @@ use std::time::Instant;
 ///   <system prompt body>
 ///
 /// We extract `model`, `thinking`, and the body. The body becomes the
-/// system prompt; pi v1 has no `--system-prompt-file` flag, so we
-/// prepend it to the assignment at dispatch time. v2 should add
-/// `--system-prompt-file` and stop concatenating.
+/// system prompt; it is written to a NamedTempFile and passed to the
+/// spawned pi via `--system-prompt-file <path>`, which lets the
+/// spawned pi set it as the true system prompt rather than
+/// concatenating it into the user turn.
 #[derive(Debug, Clone, Default)]
 pub struct AgentSpec {
     pub model: Option<String>,
@@ -221,26 +228,29 @@ impl Dispatch for RealDispatch {
         // under the user's default agent regardless of the campaign
         // TOML's `implementer` / `reviewer` fields.
         //
-        // pi v1 has no `--system-prompt-file` flag, so we prepend
-        // the agent's body to the assignment (under a clear marker)
-        // and let the spawned pi treat the whole thing as one user
-        // prompt. v2 should add `--system-prompt-file` and stop
-        // concatenating.
+        // The agent body is written to a NamedTempFile and passed
+        // via `--system-prompt-file` so the spawned pi sets it as
+        // the true runtime system prompt. The tempfile is kept alive
+        // across the entire wait_with_output() call.
         let agent = load_agent_spec(cwd, agent_name).map_err(|e| {
             std::io::Error::new(
                 e.kind(),
                 format!("dispatch role={} agent={agent_name}: {e}", role.label()),
             )
         })?;
-        let injected_prompt = if agent.system_prompt.is_empty() {
-            assignment.to_string()
-        } else {
-            format!(
-                "# Agent: {agent_name} (role: {role})\n\n{}\n\n---\n\n# Assignment\n\n{assignment}",
-                agent.system_prompt.trim_end(),
-                role = role.label(),
-            )
-        };
+
+        // Write the system prompt to a tempfile (kept alive until
+        // wait_with_output returns so the spawned pi can read it).
+        let system_prompt_tempfile: Option<tempfile::NamedTempFile> =
+            if agent.system_prompt.is_empty() {
+                None
+            } else {
+                use std::io::Write;
+                let mut tf = tempfile::NamedTempFile::new()?;
+                tf.write_all(agent.system_prompt.as_bytes())?;
+                tf.flush()?;
+                Some(tf)
+            };
 
         let mut cmd = Command::new(&self.pi_binary);
         cmd.arg("-p")
@@ -278,13 +288,22 @@ impl Dispatch for RealDispatch {
         if let Some(route) = &agent.route {
             cmd.arg("--route").arg(route);
         }
+        // Pass the system prompt via --system-prompt-file so it
+        // becomes the true runtime system prompt rather than being
+        // prepended to the user turn.
+        if let Some(ref tf) = system_prompt_tempfile {
+            cmd.arg("--system-prompt-file").arg(tf.path());
+        }
 
         let mut child = cmd.spawn()?;
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
-            stdin.write_all(injected_prompt.as_bytes())?;
+            stdin.write_all(assignment.as_bytes())?;
         }
         let output = child.wait_with_output()?;
+        // system_prompt_tempfile is still alive here; it drops at the
+        // end of this scope, which is after wait_with_output returns.
+        drop(system_prompt_tempfile);
         let exit_code = output.status.code().unwrap_or(-1);
         Ok(DispatchOutcome {
             agent: agent_name.to_string(),
