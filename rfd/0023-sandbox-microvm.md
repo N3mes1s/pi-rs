@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.27)
+- **Status:** Discussion (v0.28)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -155,10 +155,14 @@ appears in that matrix.
 Runtime-only rejection isn't enough. The model plans against the
 advertised tool list at conversation start; if `monitor` and `lsp`
 appear there, a model under microvm will plan to use them and fail
-at execution. Worse, RFD 0005 subagents like `code-reviewer` and
-`halo-implementer` are configured with explicit tool allowlists; if
-their allowlist includes `lsp` and the operator runs them under
-microvm, they fail mid-task in a confusing way.
+at execution. Worse, RFD 0005 subagents (project-local or bundled
+agent definitions at `.pi/agents/<name>.md` or
+`crates/pi-coding-agent/agents/<name>.md`) **may** carry explicit
+tool allowlists in their frontmatter; when an allowlist includes
+`lsp`, running the subagent under microvm fails mid-task in a
+confusing way. The bundled agents in tree today do not always
+declare such an allowlist — but the pattern is supported and
+must work correctly when operators do declare one.
 
 Commit G adds a **plan-time capability-query API**:
 
@@ -432,7 +436,16 @@ pub enum ExecuteError {
     GuestToolFailed(#[source] anyhow::Error),
     #[error("vsock RPC failure: {0}")]
     Rpc(#[source] anyhow::Error),
-    #[error("call exceeded ceiling: {detail}")]
+    /// Host-side wall-timeout overrun: the **worker itself** missed
+    /// the deadline. Tool-level timeouts are NOT this error — they
+    /// are returned as `Ok(VmExecution)` with
+    /// `tool_result.is_error = true` (the worker drained the child
+    /// per §"Timeout hygiene", reported `[exit 124]` in
+    /// `model_output`, and is idle). `CallLimit` only fires when
+    /// `wall_timeout + 1s` elapses without any worker response —
+    /// the worker is unresponsive, the VM is suspect, the host
+    /// hard-kills it. Always paired with destroy.
+    #[error("worker missed wall_timeout + 1s: {detail}")]
     CallLimit { detail: String },
 }
 
@@ -798,9 +811,18 @@ impl SandboxProvider for MicroVmProvider {
         // reusable: a `bash 'sleep 999 &'` leaves a daemon alive
         // after `tool.invoke()` returns; only the worker's probe
         // can detect that.
+        // Tool-level timeouts (worker drained the child, returned a
+        // 124-style ToolResult) come back as Ok(VmExecution) with
+        // tool_result.is_error = true. Pool-vs-destroy is then a
+        // function of the worker's post_call_state (the per-call
+        // hygiene + filesystem reset proof).
+        //
+        // Worker-level timeouts (worker itself missed
+        // wall_timeout + 1s) are Err(CallLimit) → always destroy:
+        // the VM is unresponsive and we cannot prove guest state.
+        // RPC errors → destroy for the same reason.
         let host_hint = match &exec_result {
             Ok(_) => ExecuteOutcomeHint::Clean,
-            Err(ExecuteError::CallLimit { .. }) => ExecuteOutcomeHint::Clean,
             Err(_) => ExecuteOutcomeHint::SuspectGuestState,
         };
         let post_call = exec_result
@@ -1120,7 +1142,25 @@ Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 
 1. **Process subtree empty.** Every descendant the per-call tool spawned (the `bash` shell, anything it forked) is gone. Implementation: bash runs as the leader of a fresh process group; the worker reaps it, then `kill(-pgid, 0)` returns `ESRCH`. On Linux the worker additionally consults a per-call cgroup v2 (`cgroup.procs` empty) — the cgroup is the authoritative test because a daemonized child reparented to PID 1 still appears in the cgroup. macOS/Windows use process-group reparenting detection as a coarser fallback (a known v1 gap; documented).
 2. **Worker transient state cleared.** Per-call temp dirs (`$TMPDIR`/<call_id>) removed; per-call open file descriptors closed; `$PWD`/env scrubbed.
-3. **Guest-local filesystem reset to baseline (launcher-owned).** The rootfs image is attached as a **read-only** block device by the launcher. The guest's `/init` mounts an overlayfs union: `lowerdir=<read-only-rootfs>`, `upperdir=<launcher-supplied tmpfs>`, `workdir=<launcher-supplied tmpfs>`. Crucially, **the launcher owns the reset, not the worker**: the worker cannot reliably unmount its own running root. After every tool call, the worker reports `post_call_state` over the wire and the **launcher** then performs the reset by issuing a host-side reset RPC over a separate vsock control port (port `5002`) that triggers a guest-side `pivot_root`-style remount: the in-guest reset agent (a tiny static helper at `/sbin/pi-vm-reset`, ~50 LoC) unmounts the current overlay tmpfs upperdir/workdir and replaces them with fresh tmpfs instances, leaving the read-only lowerdir untouched. Any `bash` write to `/root/poison`, `/usr/local/bin/poison`, `/etc/passwd`, or any other path outside `/work` evaporates because those writes were upperdir-only. The ONLY guest mutation that survives a tool call is what the tool wrote to `/work` (which is the host's session cwd) — the contract `read`/`write`/`edit` semantics depend on. **Fallback rule:** if the reset RPC fails or the in-guest reset agent isn't present in the rootfs (older rootfs version), the launcher MUST destroy the VM rather than return it to the pool — never silently fall back to "best effort", which would re-introduce the leak. **Required negative tests:** (a) `bash 'echo poison > /root/marker'` then verify next acquire on the same `BootSpec` ring (the harness must assert it hit the warm pool and reused, not cold-booted) finds no `/root/marker`; (b) `bash 'install -m755 /usr/bin/true /usr/local/bin/poison && /usr/local/bin/poison'` (forces an upperdir copy-up of a system path) — next acquire's `ls /usr/local/bin/` must NOT show `poison`; (c) `bash 'echo bad >> /etc/passwd'` — next acquire's `cat /etc/passwd` must equal the baseline. macOS/Windows v1 inherit this guarantee transitively from the destroy-on-release rule (the VM itself is gone).
+3. **Guest-local filesystem reset to baseline (launcher-owned via `pivot_root`).** The rootfs image is attached as a **read-only** block device by the launcher. The guest's `/init` mounts an initial overlay union for `/`: `lowerdir=<read-only-rootfs>`, `upperdir=/run/pi-overlay/upper`, `workdir=/run/pi-overlay/work`, both on a launcher-supplied tmpfs. **The reset cannot mutate the upperdir/workdir of a live overlay underneath it** — overlayfs's metadata cache makes that unsafe. Instead the reset performs a full root switch:
+
+   1. After the worker reports `post_call_state` over the data-plane vsock (port 5001), the launcher issues a reset RPC on the **separate control-plane vsock port 5002**.
+   2. The in-guest reset agent (`/sbin/pi-vm-reset`, statically compiled, owned by Commit B) creates `/run/pi-newroot` on a fresh tmpfs, mounts a brand-new overlay there with the same read-only lowerdir and a new pair of tmpfs upperdir/workdir, then bind-moves the mounts that MUST survive (`/proc`, `/sys`, `/dev`, `/dev/vsock`, `/work`, `/run/contextfs`) into the new root via `move_mount`/`mount --move`.
+   3. `pivot_root /run/pi-newroot /run/pi-newroot/.old-root` switches the kernel's view of `/`.
+   4. The agent re-execs the worker (the new `pi-sandbox-worker` PID is parented to PID 1 of the new root), then `umount -l /.old-root` lazy-unmounts the old overlay so its upperdir/workdir tmpfs instances are reaped after the kernel finishes its references.
+   5. The new worker connects back to the host on port 5001; only after the host sees that connection is the VM marked `Clean` and eligible for pool return. Until then `release()` blocks.
+
+   Any `bash` write to `/root/poison`, `/usr/local/bin/poison`, `/etc/passwd`, or any path outside `/work`/`/run/contextfs` lived in the old overlay's upperdir tmpfs and is gone after step 4. The ONLY surviving mutation is what the tool wrote to `/work` (host-mediated workspace) — the `read`/`write`/`edit` contract.
+
+   **Reset-failure observability + fallback.** If any of steps 1–5 fails (control-plane RPC times out, `pivot_root` returns `EBUSY`, agent absent in older rootfs versions, the new worker doesn't reconnect within `reset_timeout_ms` default 2000 ms), the launcher (a) writes `PI_FAIL: reset-failed step=<N> errno=<E>` to the guest's serial console (mirrors the boot-failure path in §3.5.9), (b) records `SandboxAction.outcome = "reset-failed"`, and (c) destroys the VM. The pool is replenished asynchronously. There is no "best-effort partial reset" path — silent fall-through would re-introduce the leak.
+
+   **Required negative tests** (Commit D integration suite):
+   - `bash 'echo poison > /root/marker'` → next acquire on the same `BootSpec` ring (harness asserts `cold_boot=false` and that the launcher reused a specific warm-pool VM ID) finds no `/root/marker`.
+   - `bash 'install -m755 /usr/bin/true /usr/local/bin/poison && /usr/local/bin/poison'` (forces upperdir copy-up of a system path; running it proves the file existed) → next acquire's `ls /usr/local/bin/` does NOT contain `poison`.
+   - `bash 'echo bad >> /etc/passwd'` → next acquire's `cat /etc/passwd` matches the baseline image bit-for-bit.
+   - Reset-failure path: simulate by stubbing the in-guest agent to return `EBUSY` → harness asserts the VM is destroyed, telemetry row has `outcome="reset-failed"`, and the next acquire is a cold boot.
+
+   macOS/Windows v1 inherit this guarantee transitively from the destroy-on-release rule (no overlay reset choreography needed; the VM itself is gone).
 
 The worker reports the verdict on the wire as `ToolResponse.post_call_state` (`Clean` | `SuspectGuestState`). The tool itself may have succeeded; the post-call probe is what decides pool reuse. The host composes `final_hint = min(host_outcome_hint, post_call_state)` (`Clean < SuspectGuestState`) before calling `release(final_hint)`, so a daemonization leak forces destroy regardless of the tool's success bit. A missing `post_call_state` field defaults to `SuspectGuestState` — workers must *prove* cleanliness rather than implicitly assert it. The verdict is not surfaced to the model (the tool's `model_output` is unchanged); it's strictly a host/launcher signal.
 
@@ -1128,7 +1168,12 @@ The worker reports the verdict on the wire as `ToolResponse.post_call_state` (`C
 
 **Tested cases.** The Commit D integration suite includes negative tests for: `bash 'sleep 999 &'`, `bash 'nohup foo &'`, `bash '(sleep 5; touch /work/marker) &'`, `bash 'mkdir -p /tmp/x && touch /tmp/x/leftover'`, plus the timeout path (`bash 'sleep 60'` with `timeout_ms=1000`). Each test asserts that (a) the affected VM does **not** return to the pool, (b) the next acquire on the same `BootSpec` does NOT see the leftover process or `/tmp` residue, and (c) telemetry records `outcome=SuspectGuestState`.
 
-**Timeout hygiene before pool return.** When `ExecuteError::CallLimit { wall_timeout }` fires, the worker MUST: (1) send `SIGTERM` to the spawned tool process group; (2) drain stdin/stdout/stderr pipes to EOF or a 250 ms hard cutoff, whichever is first; (3) on cutoff, send `SIGKILL` and continue draining; (4) emit the resulting `ToolResponse` with `is_error = true`, `model_output` set to a short timeout marker, and `exit_status = 124` (GNU `timeout` convention). Only after step (4) is the worker considered idle — and only then is the host allowed to mark the VM as `ExecuteOutcomeHint::Clean` and return it to the pool. The host's `release()` waits for `vm.execute()`'s future to resolve with the `CallLimit` error before reading the hint, which gives the worker the natural signal it has finished cleanup. If the worker itself hangs past `wall_timeout + 1s`, the launcher escalates to a hard VM kill and reports `ExecuteOutcomeHint::SuspectGuestState`.
+**Timeout hygiene before pool return.** Two distinct timeouts:
+
+- **Tool-level timeout** (`tool_input.timeout_ms` exceeded). The **worker** handles cleanup in-guest: (1) `SIGTERM` to the spawned tool's process group; (2) drain stdin/stdout/stderr pipes to EOF or a 250 ms hard cutoff, whichever is first; (3) on cutoff, `SIGKILL` and continue draining; (4) emit a normal `ToolResponse` with `is_error = true`, `model_output` containing a short timeout marker, `exit_status = 124` (GNU `timeout` convention), and the post-call hygiene probe + filesystem reset already run. From the host's perspective this is `Ok(VmExecution { tool_result.is_error=true, post_call_state })` — pool reuse depends only on `post_call_state`, exactly like a normal call. **Tool-level timeouts do NOT raise `ExecuteError::CallLimit`.**
+- **Worker-level timeout** (worker missed `wall_timeout + 1s`). The host has heard nothing from the worker — process probably wedged, kernel may be in trouble, guest state is unprovable. The launcher hard-kills the VM and `vm.execute()` returns `Err(ExecuteError::CallLimit { detail })`. The provider always destroys the VM in this branch; it never re-enters the pool.
+
+This split removes the v0.27 contradiction: the typed API (`Ok` vs `Err(CallLimit)`) and the prose now describe the same pool semantics.
 
 This mapping is what `RemoteSession::execute()` in RFD 0026 must also implement so that local + remote sandboxes produce indistinguishable `ToolResult` shapes downstream of the agent loop.
 
@@ -1972,6 +2017,37 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.28 (2026-05-04):** rfd-critic v0.27 pass: 2 critical
+  (FS reset mechanism not technically believable; timeout policy
+  contradicted itself) + 4 small. Both criticals real and closed.
+  (1) **Reset choreography.** "Hot-swap upperdir/workdir of a
+  mounted overlay" doesn't work — overlayfs metadata cache makes
+  in-place upper swap unsafe. Replaced with explicit
+  `pivot_root` choreography: agent creates `/run/pi-newroot`
+  with a fresh overlay (same RO lower, new tmpfs upper/work),
+  `move_mount`s `/proc`/`/sys`/`/dev/vsock`/`/work`/`/run/contextfs`
+  into the new root, `pivot_root`s, re-execs the worker, and
+  `umount -l`s the old root so its tmpfs is reaped. The host's
+  `release()` blocks until the new worker reconnects on port 5001.
+  Reset-failure observability added: `PI_FAIL: reset-failed step=N
+  errno=E` to the serial console mirrors the boot-failure path;
+  `SandboxAction.outcome = "reset-failed"`. Dropped the "~50 LoC"
+  agent estimate (review nit). (2) **Timeout policy.** v0.27's
+  prose said timed-out-but-cleaned VMs return to the pool, but
+  the pseudocode treated `Err(ExecuteError::CallLimit)` as
+  `SuspectGuestState`. Fix: `CallLimit` semantics narrowed to
+  worker-level timeout (worker missed `wall_timeout + 1s` — VM
+  unresponsive, always destroy). Tool-level timeouts are now
+  `Ok(VmExecution { tool_result.is_error=true, exit_status=124,
+  post_call_state })` — the worker drains in-guest and the VM is
+  pool-eligible iff `post_call_state = Clean`. Doc + pseudocode
+  + ExecuteError variant doc all aligned. Small: `code-reviewer`
+  example generalised — bundled agents in tree don't all carry
+  tool allowlists today, so paragraph reads "subagents may carry
+  allowlists" with the bundle path as a real example location.
+  Summary vs Stage 4 rollout text are consistent (explicit pins
+  ship per-OS; unqualified auto-pick waits for all three GA);
+  no change needed.
 - **v0.27 (2026-05-04):** rfd-critic v0.26 pass: 1 critical
   (filesystem-reset implementation details) + 4 small. All real,
   all closed. (1) §"Post-call hygiene" item 3 was vague on
