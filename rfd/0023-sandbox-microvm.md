@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.16)
+- **Status:** Discussion (v0.17)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -49,7 +49,7 @@ use pi_ai::{ToolResult, ToolSpec};
 
 Audit of `pi-tools/Cargo.toml` shows `pi-ai.workspace = true` and `reqwest.workspace = true` are unconditional. The host build pulls in the whole world.
 
-**Resolution (Commits A1/A2):** extract the POD types `ToolResult` and `ToolSpec` (and `ToolError`) into a tiny new crate `pi-tool-types` with no transitive deps beyond `serde`/`serde_json`/`thiserror`. `pi-ai` re-exports them from there for backward compatibility. `pi-tools` switches its imports to `pi_tool_types::*`. Then split `pi-tools` into `pi-tools-core` (read/write/edit/bash/grep/find/ls — file + process only) and `pi-tools-net` (web_search). The guest worker depends on `pi-tool-types` + `pi-tools-core` + `pi-sandbox-protocol`. Compiles statically against musl, links into a ~6–8 MB binary, fits in alpine.
+**Resolution (Commits A1/A2 — both shipped):** A1 extracts the POD types `ToolResult` / `ToolSpec` / `ToolError` into a tiny `pi-tool-types` crate (deps: `serde`/`serde_json`/`thiserror` only); `pi-ai` re-exports them for back-compat. A2 splits `pi-tools` into `pi-tools-core` (read/write/edit/bash/grep/find/ls — file + process only) and `pi-tools-net` (web_search), with `pi-tools` itself becoming a re-export façade. **As of 2026-05-04 both A1 and A2 are merged on `main`** (`crates/pi-tools/Cargo.toml` already pulls `pi-tools-core` + `pi-tools-net`). The remaining A-series work for guest-side completeness: extracting `ToolContext` / a `Tool` impl that doesn't transitively pull `pi-ai` (some shared trait machinery still lives in `pi-tools` re-exporting `pi-ai` types). The guest worker depends on `pi-tool-types` + `pi-tools-core` + `pi-sandbox-protocol`. Compiles statically against musl, links into a ~6–8 MB binary, fits in alpine.
 
 Estimated impact: ~600 LoC moved, no behavior change. Fully reversible.
 
@@ -70,8 +70,16 @@ Commit G adds a first-class `ToolDispatchClass` to the tool registry
 metadata:
 
 ```rust
-// in pi-tool-types (after RFD 0023 Commit A1)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `ToolDispatchClass` is a small POD enum and CAN live in
+// `pi-tool-types` (next to `ToolResult` / `ToolSpec`); it's
+// just data with no behavior. The corresponding `dispatch_class()`
+// method lives on the existing `Tool` trait in `pi-tools`
+// (the trait crate that already exposes `Tool::name()` /
+// `Tool::invoke()`). pi-tool-types stays POD-only; pi-tools
+// gains one trait method.
+
+// pi-tool-types/src/lib.rs:
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolDispatchClass {
     /// Runtime-owned: bypasses SandboxProvider entirely. Examples:
     /// `task` (RFD 0005), future `apply_plan` / `evolve_tick`.
@@ -83,10 +91,15 @@ pub enum ToolDispatchClass {
     SandboxManaged,
 }
 
+// pi-tools/src/lib.rs (existing trait — gains one method):
 pub trait Tool {
-    // ... existing fields ...
-    fn dispatch_class(&self) -> ToolDispatchClass {
-        ToolDispatchClass::SandboxManaged   // safe default
+    // ... existing fields: name(), schema(), invoke(), etc. ...
+
+    /// Default is `SandboxManaged` because every existing tool is
+    /// sandbox-managed today. Runtime-native tools (currently just
+    /// `task`) override.
+    fn dispatch_class(&self) -> pi_tool_types::ToolDispatchClass {
+        pi_tool_types::ToolDispatchClass::SandboxManaged
     }
 }
 ```
@@ -340,12 +353,76 @@ pub trait MicroVmLauncher: Send + Sync {
 
     /// Probe at construction. Lets `pi sandbox doctor` produce
     /// actionable diagnostics without booting anything.
-    async fn probe(&self) -> Result<ProbeReport, SandboxError>;
+    async fn probe(&self) -> Result<ProbeReport, ProbeError>;
 
     /// Acquire a VM ready to execute a tool call. v1.0 launchers
     /// MAY return a pooled+warm-restored VM (FirecrackerLauncher
     /// MUST); others may cold-boot.
-    async fn acquire(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, SandboxError>;
+    async fn acquire(&self, spec: &VmSpec) -> Result<Box<dyn VmHandle>, AcquireError>;
+}
+
+// Error taxonomy. The two layers below SandboxProvider (launcher +
+// VM handle) have their own error types so a typed sandbox error
+// can carry the originating cause without flattening it into a
+// stringy `SandboxError(String)`. SandboxProvider's `execute_tool`
+// wraps both AcquireError and ExecuteError into the SandboxError
+// enum that callers see; the wrapping preserves the typed
+// discriminant so the runtime can route on it (retry policy for
+// `BrokerMasterEpochTooOld`, alert-the-operator for
+// `BrokerOidcRejected` config errors, etc.).
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProbeError {
+    #[error("launcher binary not found: {what}")]
+    BinaryMissing { what: String },
+    #[error("kernel feature missing: {feat}")]
+    KernelFeatureMissing { feat: String },
+    #[error("permission denied: {detail}")]
+    PermissionDenied { detail: String },
+    #[error("other: {0}")]
+    Other(#[source] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AcquireError {
+    #[error("vm cold-boot failed: {0}")]
+    BootFailed(#[source] anyhow::Error),
+    #[error("guest readiness timeout after {boot_timeout_ms}ms; last dmesg:\n{last_dmesg}")]
+    ReadyTimeout { boot_timeout_ms: u32, last_dmesg: String },
+    #[error("host transport setup failed (vsock CID/port collision?): {detail}")]
+    HostTransportSetup { detail: String },
+    #[error("guest daemon ({daemon}) exited with code {exit}")]
+    GuestDaemonStartFailed { daemon: String, exit: i32 },
+    #[error("broker rejected with master_epoch_too_old (configured epoch={configured_epoch})")]
+    BrokerMasterEpochTooOld { configured_epoch: u32 },
+    #[error("broker oidc denial: {code} ({detail})")]
+    BrokerOidcRejected { code: String, detail: String },
+    #[error("broker tenant-mode mismatch: {detail}")]
+    BrokerTenantModeMismatch { detail: String },
+    #[error("pool capacity exhausted (max={max})")]
+    PoolExhausted { max: u32 },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExecuteError {
+    #[error("guest tool failed: {0}")]
+    GuestToolFailed(#[source] anyhow::Error),
+    #[error("vsock RPC failure: {0}")]
+    Rpc(#[source] anyhow::Error),
+    #[error("call exceeded ceiling: {detail}")]
+    CallLimit { detail: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SandboxError {
+    #[error("microvm unavailable: {0}")]
+    Unavailable(#[source] ProbeError),
+    #[error("acquire failed")]
+    Acquire(#[source] AcquireError),
+    #[error("execute failed")]
+    Execute(#[source] ExecuteError),
+    #[error("tool {tool} unavailable: {reason}")]
+    ToolUnavailable { tool: String, reason: String },
 }
 
 #[derive(Debug, Clone)]
@@ -477,23 +554,9 @@ pub struct ProbeCheck {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum SandboxError {
-    #[error("microvm unavailable: {0}")]
-    Unavailable(String),
-    #[error("guest tool error: {0}")]
-    Tool(#[from] ToolError),
-    #[error("vsock io: {0}")]
-    Vsock(String),
-    #[error("rootfs version mismatch: expected {expected}, got {found}")]
-    RootfsMismatch { expected: u32, found: u32 },
-    #[error("tool '{tool}' unavailable in sandbox: {reason}")]
-    ToolUnavailable { tool: String, reason: &'static str },
-    #[error("timeout after {0:?}")]
-    Timeout(Duration),
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-}
+// (the canonical `pub enum SandboxError` is defined above, in the
+// MicroVmLauncher trait block. This was previously a second
+// definition with overlapping variants — collapsed in v0.17.)
 ```
 
 `MicroVmProvider` is the `SandboxProvider` impl that owns one `Box<dyn MicroVmLauncher>`. The launcher owns the pool (so all calls through one `MicroVmProvider` share its pool); the provider owns the spec defaults and per-call limits derivation:
@@ -737,16 +800,18 @@ One JSON line per direction, `\n`-framed. Carried over a vsock connection on `VS
 
 #### `ToolResponse` ↔ `ToolResult` field mapping
 
-The host needs to reconstruct a `pi_tool_types::ToolResult` from the wire `ToolResponse` so the rest of the agent loop sees a uniform shape regardless of sandbox. `ToolResult` (post-Commit-A1) has these fields:
+The host needs to reconstruct a `pi_tool_types::ToolResult` from the wire `ToolResponse` so the rest of the agent loop sees a uniform shape regardless of sandbox. `ToolResult` (the actual shape on `main` post-A1, copied verbatim from `crates/pi-tool-types/src/lib.rs`):
 
 ```rust
 pub struct ToolResult {
     pub tool_use_id: String,            // matches the LLM's tool_use id
     pub model_output: String,           // text fed back to the LLM
-    pub display: Option<String>,        // optional UI-only rendering
+    pub display: serde_json::Value,     // structured UI hint (Null when none)
     pub is_error: bool,
 }
 ```
+
+Note: `display` is `serde_json::Value`, not `Option<String>` — host-side tools like `task` populate it with structured JSON (a child-session pointer object). Microvm guest tools have no UI hints to surface; they emit `display: serde_json::Value::Null` in v1.
 
 Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 
@@ -1494,6 +1559,25 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.17 (2026-05-04):** rfd-critic v0.16 pass found 4 critical
+  issues. All real, all closed. (1) Background §"pi-tools dependency
+  problem" updated: A1 + A2 are MERGED on main (per task list #33,
+  #40); cited the actual current Cargo.toml shape and reframed the
+  remaining A-series as "extracting Tool / ToolContext from
+  pi-ai-touching machinery", not "split pi-tools". (2)
+  `ToolDispatchClass` placement: keep in `pi-tool-types` (it's a POD
+  enum, fine there), but `dispatch_class()` method lives on the
+  existing `Tool` trait in `pi-tools` (the trait crate that already
+  exposes `Tool::name()` etc.). pi-tool-types stays POD-only.
+  (3) Error type taxonomy: introduced `ProbeError`, `AcquireError`,
+  `ExecuteError`, and `SandboxError` that wraps them with typed
+  `#[source]` chaining. The launcher's `acquire()` returns
+  `Result<_, AcquireError>`; provider wraps into `SandboxError`. The
+  duplicate `pub enum SandboxError` in §2 collapsed to one
+  definition. (4) `ToolResult.display` corrected to
+  `serde_json::Value` (matches actual `pi-tool-types/src/lib.rs`),
+  not `Option<String>`. Microvm guest tools emit
+  `display: serde_json::Value::Null` in v1.
 - **v0.16 (2026-05-04):** rfd-critic v0.15 pass: closed the one
   substantive remaining issue (safety default contradiction). The
   trait `tool_disposition()` default is now `Unavailable`, not
