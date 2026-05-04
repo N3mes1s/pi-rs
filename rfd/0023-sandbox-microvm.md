@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.5)
+- **Status:** Discussion (v0.6)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -447,16 +447,32 @@ What RFD 0026 owns:
 What RFD 0023 owns (this RFD):
 - The worker binary, the wire protocol, the `ToolResponse↔ToolResult` mapping, and the local microVM transport.
 
-### 3.5. ContextFS integration (added v0.5)
+### 3.5. ContextFS integration (Linux/Firecracker Stage 1 only)
 
-The microVM rootfs ships an in-guest `contextfsd` daemon that mediates
-file-system access for the agent. ContextFS RFD-0023 (their numbering;
-the embedder profile) is the contextfs-side spec that ships the
-library entry, transport-generic mesh, vsock listeners, per-VM tenant
-secret derivation, OIDC handoff, and audit-ping stub. It is published
-at contextfs `v0.3.0+`. Pi-rs Commit G integrates against that surface;
-all six sub-sections below are operator-side responsibilities at VM
-provisioning time.
+ContextFS RFD-0023 (their numbering — the embedder profile, state:
+published, broker `>= v0.3.0`) is the contextfs-side spec that ships
+the library entry, transport-generic mesh, vsock subcommands, per-VM
+tenant secret derivation, OIDC handoff, and audit-ping stub. Pi-rs
+Commit G integrates against that surface for **Linux/Firecracker
+Stage 1 only**: contextfs's vsock transport is explicitly Linux-only
+(see contextfs RFD-0023 "Goals/non-goals: Windows/macOS embedders").
+macOS/Windows microVM provisioning **does not bring up contextfsd in
+v1.0** — those launchers continue to use the §3 virtio-fs RW share at
+`/work` as the agent's workspace path, and a follow-up pi-rs RFD will
+bring contextfs to those platforms once contextfs supports a non-vsock
+embedder transport.
+
+**Workspace transport on Linux Stage 1.** ContextFS supersedes the §3
+virtio-fs RW share for the agent's workspace path. The worker's cwd
+becomes `/work`, but `/work` is now a `cfs-fs-server` FUSE mount over
+a `cfs-mesh` Noise-IK channel to the host broker (rather than a direct
+virtio-fs share). This is the explicit choice: write-mediation is the
+whole reason contextfs exists. The §3 virtio-fs `/work` claim applies
+on macOS/Windows v1.0 and is what Linux Stage 1 replaces.
+
+Sub-sections 3.5.1–3.5.8 below describe the operator-side
+responsibilities at VM provisioning time. 3.5.9 is the guest boot
+contract (rootfs additions + readiness ordering) Commit G owns.
 
 #### 3.5.1 — `vm_id` source
 
@@ -467,134 +483,278 @@ at provisioning. The same id is hashed into the vsock CID in
 operator-supplied `vm_id` field (contextfs RFD-0023 §5: required when
 embedder mode is in use; format `[A-Za-z0-9._-]{1,128}`).
 
+`vm_id` lifetime: tied to the warm-pool VM, not to a single tool call.
+A pooled VM that survives N tool calls retains the same `vm_id` (and
+the same per-VM secret derived from it) across those calls; rotation
+fires when the VM is torn down per the §4 pool-rotation policy.
+Audit attribution is therefore per-VM, not per-call. Subagents that
+share a pooled VM (the v1 default per RFD 0005) share its `vm_id`;
+isolated subagents constructing their own `MicroVmProvider` mint a
+distinct `vm_id`.
+
 #### 3.5.2 — Per-VM tenant secret (host-side derivation)
 
 At provisioning, the orchestrator calls the contextfs CLI helper:
 
 ```bash
-secret=$(contextfs-cli key derive-per-vm-secret \
+contextfs-cli key derive-per-vm-secret \
     --master-path /etc/contextfs/<tenant>.master \
     --tenant-id <tenant_id> \
     --vm-id "<pi_firecracker_uuid>" \
-    --master-epoch <N>)
+    --master-epoch <N> > "<run_dir>/<vm_id>/cfs-tenant-secret"
+chmod 0600 "<run_dir>/<vm_id>/cfs-tenant-secret"
 ```
 
-Output is 32 hex bytes. Pi-rs writes it to a tmpfs file (mode 0600)
-inside the VM's run-dir, e.g.
+The output is **raw 32 bytes** as written to stdout (matching the
+in-tree `tenant_secret` files contextfsd already loads). Pi-rs writes
+to a tmpfs file (mode 0600) inside the VM's run-dir, e.g.
 `<run_dir>/<vm_id>/cfs-tenant-secret`, and bind-mounts the file into
 the guest at `/var/run/cfs/tenant_secret`. The daemon TOML's
 `tenant_secret_path` points at the bind-mounted location.
 
-The orchestrator reads `<N>` (the master epoch) from broker
-configuration; Commit G's `MicroVmProvider` accepts a
-`master_epoch: u32` field on its construction config and threads it
-into both the CLI invocation and the TOML.
+`<N>` (master epoch) is read from broker configuration; Commit G's
+`MicroVmProvider` accepts a `master_epoch: u32` field on its
+construction config and threads it into both the CLI invocation and
+the TOML.
+
+**Pool refresh on `BrokerMasterEpochTooOld`.** Per the contextfs
+typed `StartError::BrokerMasterEpochTooOld` variant, when the broker
+rotates its epoch beyond the 4-deep window, in-flight VMs in the warm
+pool become unusable. The MicroVmProvider's pool eviction policy
+treats this as fatal-for-this-VM: the affected VM is torn down, a
+fresh derivation runs with the current epoch, and a new VM is booted
+into the pool. Other VMs in the pool with the same epoch may also
+need refresh; v1 evicts them lazily on next-use rather than eagerly.
 
 #### 3.5.3 — Workload-identity OIDC token
 
-Pi-rs's host orchestrator already mints a Workload Identity token per
-job (this is the same flow that authenticates against any host service
-the guest needs — RFD 0021 §"Open Q3"). For contextfs, that token is
-mounted into the guest at `/var/run/secrets/token` (a single file,
-mode 0644 since the guest is single-tenant per VM) and the daemon TOML
-`oidc_token_path` points at it. The daemon reads the token on every
-`WriteVerifyRequest`; rotation is host-driven (orchestrator rewrites
-the file when its WI token rotates).
+The host orchestrator (the layer above pi-rs that mints jobs) supplies
+a Workload Identity token per job. Commit G accepts the token path as
+a `MicroVmProviderConfig` field; the orchestrator's exact source is
+out of scope for this RFD. Pi-rs bind-mounts the token file into the
+guest at `/var/run/secrets/token` (mode 0444, single-tenant per VM)
+and the daemon TOML `oidc_token_path` points at it. The daemon reads
+the token on every `WriteVerifyRequest`; rotation is host-driven
+(orchestrator rewrites the file in place when its WI token rotates).
 
 Failure routing for contextfs's three typed OIDC denials:
-- `oidc_validation_failed` — broker rejected the token.
-  → `BrokerOidcRejected` StartError variant (transient if JWKS
-  rotation, persistent if config); MicroVmProvider's `acquire_to_ready`
-  retries once after JWKS-rotation grace, otherwise surfaces to the
-  operator.
+- `oidc_validation_failed` → `StartError::BrokerOidcRejected`.
+  Transient if JWKS rotation; persistent if config. MicroVmProvider's
+  `acquire_to_ready` retries once after JWKS-rotation grace, otherwise
+  surfaces to the operator.
 - `oidc_token_required` — broker has a validator configured but the
-  daemon sent an empty `oidc_token`. Configuration bug; surfaced to the
-  operator immediately, no retry.
+  daemon sent an empty token. Configuration bug; surfaced immediately,
+  no retry.
 - `oidc_token_unexpected` — daemon sent a token but the broker has no
-  validator for this tenant. Configuration bug (broker's `--tenant-mode`
-  flag missing or the wrong validator pinned); surfaced immediately, no
-  retry.
+  validator for this tenant (broker's `--tenant-mode` flag missing or
+  the wrong validator pinned). Configuration bug; surfaced
+  immediately, no retry.
 
 #### 3.5.4 — Per-mount audit-ping
 
-ContextFS RFD-0023 §7 ships a v1 audit-ping shape: every successful
-write-class FUSE op (write / create / unlink / rename / setattr /
-xattr.set / xattr.remove) forwards the AuditRecord to the broker as a
-`Request::WriteAuditPing`. The daemon TOML opts in per mount:
-
-```toml
-[mounts.<name>]
-audit_ping = { mode = "fail-open", high_water_mark = 1024 }
-```
+ContextFS RFD-0023 §7 (HEAD `dbe2df5`) ships a v1 audit-ping shape:
+every successful write-class FUSE op (write / create / unlink /
+rename / setattr / xattr.set / xattr.remove) forwards the
+AuditRecord to the broker as a `Request::WriteAuditPing`. The daemon
+TOML opts in per mount.
 
 For the routine code-editing-agent use case Commit G targets,
 `fail-open` with `high_water_mark = 1024` is the default — a transient
 broker hiccup must not fail the agent's `cargo build`. Operators with
-hostile-tenancy / compliance-graded tenants opt their tenant configs
-into `fail-closed`; the contextfs broker now (HEAD `dbe2df5`) refuses
-writes with `EIO` BEFORE backend mutation when the audit-ping channel
-is saturated, so fail-closed is integrity-correct. Pi-rs's per-tenant
-config plumbing (RFD 0022 §C) maps to this 1:1.
+hostile-tenancy / compliance-graded tenants set their tenant configs
+to `fail-closed`; the contextfs broker (post-`dbe2df5`) refuses writes
+with `EIO` BEFORE backend mutation when the audit-ping channel is
+saturated, so fail-closed is integrity-correct. The audit-ping queue
+is in-memory only (contextfs RFD-0023 §7 explicit note); daemon
+restarts wipe queued events.
 
-#### 3.5.5 — Broker invocation (host-side)
+Pi-rs's per-tenant config plumbing (RFD 0022 §"Per-tenant config
+overlays") maps to this 1:1.
 
-The host-side broker MUST be invoked with:
+#### 3.5.5 — Transport topology (Linux/Firecracker Stage 1)
+
+Single chosen topology, end-to-end, no mixed flags:
+
+```
+            ┌────────────────────── HOST ────────────────────────┐
+            │  contextfs-broker         (UDS auth, NOT vsock)    │
+            │      ↑                                             │
+            │      │ /run/contextfs/broker.sock                  │
+            │  cfs-mesh vsock-bridge                             │
+            │      ↑                                             │
+            │      │ vsock (CID = vm_id_to_cid(vm_id), port P)   │
+            └──────┼─────────────────────────────────────────────┘
+                   │
+            ┌──────┼─────────────────── GUEST (microVM) ─────────┐
+            │  cfs-mesh vsock-listen                             │
+            │      ↑                                             │
+            │      │ /run/contextfs/broker.sock (re-exposed UDS) │
+            │  contextfsd                                        │
+            │      ↑                                             │
+            │      │ /work (FUSE mount, cfs-fs-server backend)   │
+            │  pi-sandbox-worker (cwd = /work)                   │
+            └────────────────────────────────────────────────────┘
+```
+
+- Host runs `contextfs-broker` listening on the **UDS** at
+  `/run/contextfs/broker.sock` (the existing TCP/UDS auth path; the
+  broker's `--vsock` listener path is intentionally NOT used here so
+  we keep the broker on its proven-stable transport).
+- Host runs `cfs-mesh vsock-bridge --cid <guest-cid> --port <P>
+  --key ... --peer-pubkey-path ... --target-uds
+  /run/contextfs/broker.sock`. This terminates the in-guest vsock
+  Noise-IK session and bridges traffic into the broker's UDS.
+- Guest runs `cfs-mesh vsock-listen --cid ANY --port <P> --key ...
+  --peer-pubkey-path ... --uds /run/contextfs/broker.sock`. This
+  re-exposes the host broker as a guest-local UDS that contextfsd
+  consumes via `[broker].socket_path`.
+- Guest runs `contextfsd` reading `/etc/contextfsd/daemon.toml`,
+  which mounts `/work` as a contextfs FUSE filesystem and contacts
+  the broker via the guest-local UDS.
+- The pi-sandbox-worker runs with `cwd = /work`; every tool's
+  read/write goes through the FUSE mount.
+
+Cross-discriminant safety per contextfs RFD-0023 §3 (`PeerId::Uid`
+vs `PeerId::VsockCid`): the guest's UDS allow-list and the host
+bridge's vsock CID allow-list never compare across discriminants.
+
+#### 3.5.6 — Broker invocation (host-side)
+
+The host-side broker is invoked with:
 
 ```
 contextfs-broker \
+    --auth-secret-path /etc/contextfs/<tenant>.tenant_secret \
     --tenant-mode <tenant_id>=embedder \
     --verify-write-oidc-issuer <issuer-url> \
     --verify-write-oidc-audience <wi-audience> \
     --verify-write-oidc-alg RS256 \
-    --vsock <CID>:<PORT>           # Linux only, gated on `vsock` Cargo feature
-    --vsock-key <PATH>             # broker's Noise-IK static key
-    --vsock-peer-pubkey <PATH>     # in-guest daemon's pinned static key
     [other flags]
 ```
 
-`--tenant-mode <t>=embedder` is the operator's opt-in to embedder mode.
-Without it the broker defaults to legacy mode and refuses any request
-carrying `vm_id`/`master_epoch` with a typed
-`tenant_mode_legacy_no_vm_id` denial. With it set, every request must
-carry non-empty `vm_id` + `master_epoch` (typed `vm_id_required`
-denial otherwise). Pi-rs's MicroVmProvider asserts both are set on its
-config at construction; absence is a hard error at startup, not at
-first request.
+(No `--vsock*` flags — vsock termination is owned by the host-side
+`cfs-mesh vsock-bridge` per §3.5.5.)
 
-#### 3.5.6 — Daemon TOML rendered at provisioning
+`--tenant-mode <t>=embedder` is the operator's opt-in to embedder
+mode. Without it the broker defaults to legacy mode and refuses any
+request carrying `vm_id`/`master_epoch` with a typed
+`tenant_mode_legacy_no_vm_id` denial. With it set, every request
+must carry non-empty `vm_id` + `master_epoch` (typed `vm_id_required`
+denial otherwise). Pi-rs's MicroVmProvider asserts both are set on
+its config at construction; absence is a hard error at startup, not
+at first request.
 
-The full operator-rendered daemon TOML for one Commit G provisioning,
-inside the guest at `/etc/contextfsd/daemon.toml`:
+#### 3.5.7 — Daemon TOML rendered at provisioning
+
+The full operator-rendered `/etc/contextfsd/daemon.toml` inside the
+guest, matching contextfsd's actual config shape:
 
 ```toml
-tenant_id        = "tenant-a"
-vm_id            = "<pi_firecracker_uuid>"
-master_epoch     = 7
+tenant_id          = "tenant-a"
+vm_id              = "<pi_firecracker_uuid>"
+master_epoch       = 7
 tenant_secret_path = "/var/run/cfs/tenant_secret"   # bind-mounted from host tmpfs
 oidc_token_path    = "/var/run/secrets/token"        # bind-mounted WI token
+audit_log_path     = "/var/log/contextfs/audit.ndjson"
+
+[pdp]
+policy_path       = "/etc/contextfs/policy.cedar"
+default_principal = 'Agent::"pi"'
 
 [broker]
-socket_path = "/run/contextfs/broker.sock"           # vsock-bridge → host UDS
+socket_path = "/run/contextfs/broker.sock"          # guest-local UDS exposed by cfs-mesh vsock-listen
 
-[mounts.workspace]
-backend     = "local-dir"
-mountpoint  = "/workspace"
-audit_ping  = { mode = "fail-open", high_water_mark = 1024 }
+[[mount]]
+name       = "workspace"
+mountpoint = "/work"
+backend    = "remote-fs"                             # FUSE mediates via cfs-fs-server over Noise-IK
+cache_dir  = "/var/cache/contextfs/workspace"
+read_only  = false
+audit_ping = { mode = "fail-open", high_water_mark = 1024 }
+
+  [mount.remote_fs]
+  target_uds = "/run/contextfs/fs.sock"              # cfs-fs-server UDS, host-side
 ```
 
-The `MicroVmProvider` renders this from a `MicroVmProviderConfig`
-struct at construction; `pi sandbox doctor` validates each field
-(file paths exist, broker reachable, `--tenant-mode` flag visible in
-the broker's argv) per the §5 probe contract.
+Commit G's `MicroVmProvider` renders this from a
+`MicroVmProviderConfig` struct at construction. The TOML schema is
+that of contextfsd; the canonical source is
+`<contextfs>/crates/contextfsd/src/config.rs` and Commit G adds a
+serde-aligned struct on the pi-rs side that fails loud on schema
+drift (broken match → compile-time error).
 
-#### 3.5.7 — Version compatibility
+#### 3.5.8 — Version compatibility
 
-ContextFS broker MUST be `>= v0.3.0` (the version that shipped
-`vm_id` / `master_epoch` / `oidc_token` over the wire). v0.2.x brokers
-will reject any embedder request via serde unknown-field rejection at
-the first `verify_write`; this is the documented fail-loud signal. Pi-rs's
-`pi sandbox doctor` probes the broker's version via the existing
-`/version` HTTP endpoint (RFD 0022 §A).
+ContextFS broker MUST be `>= v0.3.0` — the version that shipped
+`vm_id`/`master_epoch`/`oidc_token` over the wire and the
+`--tenant-mode` flag. v0.2.x brokers reject any embedder request via
+serde unknown-field rejection at the first `verify_write`; that is
+the documented fail-loud signal.
+
+`pi sandbox doctor` performs **functional connectivity checks**, not
+argv inspection of foreign processes:
+- `cfs-mesh vsock-bridge` reachable from the host (TCP/UDS round-trip).
+- `contextfs-broker` reachable via the bridge (a no-op `verify_write`
+  with a synthetic `vm_id` is rejected with a typed denial code; the
+  doctor accepts any 4xx-class response as "reachable").
+- `contextfs-cli` invocable on `$PATH`, prints a version string.
+- ContextFS daemon binary is present in the cached rootfs and matches
+  a known SHA from the rootfs manifest (RFD 0023 §3.2).
+
+#### 3.5.9 — Guest boot contract (rootfs + readiness)
+
+The §3.2 rootfs builder ships the following additions for Linux
+Stage 1:
+
+| Binary / file                                  | Source                                  | Purpose                              |
+| ---------------------------------------------- | --------------------------------------- | ------------------------------------ |
+| `/usr/local/bin/contextfsd`                    | `contextfs-v0.3.0` static-musl release  | FUSE mount + verify_write loop       |
+| `/usr/local/bin/cfs-mesh`                      | same                                    | vsock-listen subcommand              |
+| `/etc/contextfsd/daemon.toml`                  | rendered at provisioning (§3.5.7)       | daemon config                        |
+| `/etc/contextfs/policy.cedar`                  | bundled in rootfs (default agent policy)| Cedar PDP                            |
+| `/var/cache/contextfs/workspace/` (tmpfs)      | created at boot                         | FUSE backend cache                   |
+| `/var/log/contextfs/` (tmpfs)                  | created at boot                         | audit chain                          |
+| Bind-mounted: `/var/run/cfs/tenant_secret`     | host tmpfs (§3.5.2)                     | per-VM keying material               |
+| Bind-mounted: `/var/run/secrets/token`         | host WI mount (§3.5.3)                  | OIDC token                           |
+
+Required kernel/guest features (the rootfs builder asserts each at
+build time, and `pi sandbox doctor` re-checks at host provisioning):
+
+- Kernel: `CONFIG_FUSE_FS=y` (or built-in).
+- Kernel: `CONFIG_VSOCKETS=y`, `CONFIG_VIRTIO_VSOCKETS=y`.
+- Device: `/dev/fuse` accessible to the contextfsd uid.
+- Static-musl binaries (no glibc in the alpine rootfs).
+
+Boot sequence (the rootfs `init` script, which Commit G adds):
+
+1. `init` mounts tmpfs at the cache + log paths.
+2. `init` spawns `cfs-mesh vsock-listen ... --uds /run/contextfs/broker.sock`
+   in the background. Readiness gate: the UDS exists and accepts a
+   connection.
+3. `init` spawns `contextfsd /etc/contextfsd/daemon.toml` in the
+   background. Readiness gate: a file in `/work/.cfs-ready` appears
+   (contextfsd writes it after the FUSE mount is up + a synthetic
+   verify_write round-trip succeeds with the configured
+   `master_epoch`).
+4. `init` spawns `pi-sandbox-worker` with `cwd = /work` only after
+   step 3's gate fires. This is the existing worker; no changes
+   beyond the cwd.
+5. If steps 2 or 3 fail to ready within `boot_timeout` (default 10s),
+   `init` panics the guest; the `MicroVmLauncher` surfaces this as a
+   typed `acquire_to_ready_failed` outcome and tears the VM down.
+
+Failure surface visible to `MicroVmProvider`:
+
+- `cfs-mesh vsock-listen` fails to start → vsock CID/port collision
+  on host → `MicroVmLauncher::acquire` returns
+  `AcquireError::HostTransportSetup`.
+- `contextfsd` fails the synthetic round-trip with
+  `BrokerMasterEpochTooOld` → eviction per §3.5.2.
+- `contextfsd` fails with `tenant_mode_legacy_no_vm_id` →
+  configuration bug at the broker; surfaced to operator.
+- `/work/.cfs-ready` never appears within `boot_timeout` → typed
+  ready-timeout error with a captured copy of the guest's last 100
+  lines of `dmesg` for diagnostics.
 
 ### 4. Per-OS launcher impls
 
@@ -681,6 +841,41 @@ A real probe takes 50–200ms, not 10ms — the time accounts for the actual fil
 **Rootfs contents are public knowledge.** The alpine image, busybox version, the `pi-sandbox-worker` binary itself — all of it is observable to a jailbroken model running `cat /etc/os-release` or `cat /etc/passwd` inside the guest. Do **not** bake credentials, tokens, or per-user state into the rootfs. The rootfs is a single artifact shared by every pi user worldwide; treat it like a pre-built docker image.
 
 **Guest tooling is busybox, not GNU coreutils.** `bash` calls run under busybox `ash`, not real bash. Subtle option drift: `find -printf`, `grep -P`, `ls --color=auto`, GNU-specific tar flags, etc. behave differently. v1.0 ships with a known-incompatibility list in the docs. Users with GNU-specific scripts can pin `--sandbox-provider=local-process` for those sessions. A future RFD can offer a glibc-based rootfs as an opt-in pin (`microvm:firecracker:rootfs=glibc-debian`) if telemetry shows the friction is widespread.
+
+**ContextFS-specific threats (Linux Stage 1, added v0.6).** The §3.5
+integration introduces new threat categories beyond plain virtio-fs:
+
+- **Guest-resident per-VM secret + OIDC token.** A jailbroken model
+  that escalates inside the guest can read both. Compartmentalization:
+  per-VM secret derivation (contextfs RFD-0023 §5) bounds the leak to
+  THIS VM's audit chain — cross-tenant `decision_id`s remain forgeable
+  only for THIS `vm_id`. The OIDC token is the host orchestrator's WI
+  token, scoped per-job. Mitigation: short token TTL (host-rotation
+  cadence ≤ token_lifetime), per-VM secret regenerated on every fresh
+  pool boot, and warm-pool VMs torn down per §4 rotation policy.
+- **Audit-ping loss window.** Between successful FUSE write and broker
+  ping, an in-guest attacker who crashes the VM mid-write wipes the
+  pending event. Bounded by the contextfs RFD-0023 §7 in-memory queue
+  drain (default 1s); fail-closed shrinks the window to zero at the
+  cost of broker-availability coupling.
+- **Vsock handshake DoS.** A rogue guest can open half-open Noise-IK
+  handshakes from a forged CID at line rate; the host-side
+  `cfs-mesh vsock-bridge` rate-limits per the contextfs RFD-0023 §4
+  cap (`--vsock-handshake-rate`, default 32/CID, 256 global). Pi-rs's
+  MicroVmProvider observes the typed `vsock_handshake_rate_limited`
+  event via `pi sandbox doctor` and surfaces it.
+- **Warm-pool secret persistence.** A pooled VM that survives N tool
+  calls retains its `vm_id`, per-VM secret, and OIDC token mount
+  across calls. State leakage between calls is by design (it's how
+  pooling earns its latency). Mitigation: §4 rotation policy bounds N
+  (default 50 calls / 5 min); operators with stricter posture pin
+  N=1 (cold-boot per call) at the cost of the §7 SLO.
+- **Compromised broker / master rotation under HA.** Broker
+  compromise leaks all per-VM secrets across the rotation window.
+  This is the same blast radius as today's single-tenant master-on-disk;
+  contextfs RFD-0017 (broker HA) is the host-side hardening, not in
+  pi-rs's lap. Pi-rs's MicroVmProvider treats `BrokerOidcRejected`
+  with a persistent (non-JWKS-rotation) cause as an operator alert.
 
 ### 7. Performance SLO
 
@@ -803,6 +998,40 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.6 (2026-05-04):** rfd-critic v0.5 pass found 5 critical issues +
+  2 citation rots. Closed all of them. (1) §3.5 now scopes contextfs
+  to **Linux/Firecracker Stage 1 only**; macOS/Windows v1.0 keeps the
+  §3 virtio-fs RW share at `/work` and a follow-up RFD brings contextfs
+  to those platforms once contextfs supports a non-vsock embedder
+  transport. (2) §3.5 now states explicitly that on Linux contextfs
+  **supersedes** the §3 virtio-fs RW share for the workspace path —
+  the worker's cwd `/work` is a contextfs FUSE mount, not a virtio-fs
+  share. (3) §3.5.7's TOML rewritten against contextfsd's actual
+  config shape (`[[mount]]` not `[mounts.<name>]`, `backend = "remote-fs"`
+  + `[mount.remote_fs] target_uds`, mandatory `audit_log_path` /
+  `[pdp]` / `cache_dir`). (4) §3.5.5 picks one transport topology end-
+  to-end: host runs broker on UDS + `cfs-mesh vsock-bridge` to the
+  guest's vsock listener; broker has no `--vsock*` flags. The
+  guest-side `cfs-mesh vsock-listen` re-exposes the host broker as a
+  guest-local UDS that contextfsd consumes. (5) New §3.5.9 Guest boot
+  contract: rootfs additions table (contextfsd + cfs-mesh binaries,
+  policy.cedar, tmpfs cache/log), required kernel features
+  (`CONFIG_FUSE_FS`, `CONFIG_VSOCKETS`, `CONFIG_VIRTIO_VSOCKETS`,
+  `/dev/fuse`), `init` script's startup ordering with explicit
+  readiness gates and the `/work/.cfs-ready` rendezvous file, typed
+  failure surface visible to MicroVmProvider. Citation fixes: dropped
+  the wrong "RFD 0021 §Open Q3" cite (replaced with "operator-supplied
+  path; orchestrator owns it") and the unverifiable
+  "/version endpoint (RFD 0022 §A)" cite (replaced with synthetic
+  verify_write reachability check). Added `pi sandbox doctor`
+  functional probes (no foreign-argv inspection). New §3.5.2 explicit
+  encoding: `contextfs-cli key derive-per-vm-secret` writes raw 32
+  bytes to stdout (matching the in-tree `tenant_secret` format).
+  Added §3.5.1 lifetime note (`vm_id` survives pool reuse, so audit
+  attribution is per-pooled-VM not per-call) and §3.5.2 pool refresh
+  policy on `BrokerMasterEpochTooOld`. Added §6 threat-model bullets
+  for guest-resident secret/token, audit-ping loss window, vsock
+  handshake DoS, warm-pool secret persistence, broker compromise/HA.
 - **v0.5 (2026-05-04):** Added §3.5 ContextFS integration. Originally
   the RFD said nothing about how the in-guest contextfsd is configured
   at provisioning, treating it as "just sits in the rootfs." That
