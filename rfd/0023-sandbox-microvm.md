@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.14)
+- **Status:** Discussion (v0.15)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -123,6 +123,71 @@ the `SandboxManaged` slice of the tool surface: the `pi-tools-core`
 guest tools, `web_search` (host-direct), `monitor` (unavailable),
 `lsp` (unavailable in v1). `task` is `RuntimeNative` and never
 appears in that matrix.
+
+#### Plan-time advertisement — `SandboxProvider::tool_disposition()`
+
+Runtime-only rejection isn't enough. The model plans against the
+advertised tool list at conversation start; if `monitor` and `lsp`
+appear there, a model under microvm will plan to use them and fail
+at execution. Worse, RFD 0005 subagents like `code-reviewer` and
+`halo-implementer` are configured with explicit tool allowlists; if
+their allowlist includes `lsp` and the operator runs them under
+microvm, they fail mid-task in a confusing way.
+
+Commit G adds a **plan-time capability-query API**:
+
+```rust
+// New on the SandboxProvider trait (RFD 0022 amendment):
+pub enum SandboxToolDisposition {
+    Guest,        // routes through provider's guest path
+    HostDirect,   // routes through provider's host-direct path
+    Unavailable,  // model should not see this tool advertised
+}
+
+trait SandboxProvider {
+    /// Plan-time capability query: which tools does this provider
+    /// support? Default impl returns `Guest` for everything (the
+    /// LocalProcessProvider behavior — every tool runs inline).
+    /// MicroVmProvider overrides to return `Unavailable` for
+    /// `monitor` and `lsp`, `HostDirect` for `web_search`, `Guest`
+    /// for everything else.
+    fn tool_disposition(&self, tool_name: &str) -> SandboxToolDisposition {
+        SandboxToolDisposition::Guest
+    }
+
+    // ... existing execute_tool, etc. ...
+}
+```
+
+Runtime startup (in `pi-agent-core` `RuntimeConfig::build()`) filters
+the advertised tool list:
+
+```rust
+let advertised_tools: Vec<&Tool> = self.tools.iter()
+    .filter(|t| match t.dispatch_class() {
+        ToolDispatchClass::RuntimeNative => true,    // always advertised
+        ToolDispatchClass::SandboxManaged => match &self.sandbox_provider {
+            None    => true,                          // no provider → everything advertised
+            Some(p) => !matches!(p.tool_disposition(t.name()),
+                                 SandboxToolDisposition::Unavailable),
+        },
+    })
+    .collect();
+```
+
+`task` executor behavior when an agent definition's allowlist
+includes an unavailable tool: **strip-with-warning** (the v1
+default). The agent runs with the filtered list, and the runtime
+emits a one-line `tool_filtered_out` event to the session JSONL
+(seen by `pi-stats`) plus a stderr banner on the first filter event
+per session. Operators with strict-mode tenants can opt into
+**fail-fast** via `[task] on_unavailable_tool = "fail-fast"` in the
+campaign or settings.json — at session start, if any allowlisted
+tool is `Unavailable` under the active provider, the agent aborts
+with `AgentError::ToolUnavailable` before the first turn.
+
+This is also a NEW API (Commit G ships it). The default
+implementation keeps `LocalProcessProvider` behavior unchanged.
 
 ### Tool availability under `microvm` — full matrix
 
@@ -1411,6 +1476,23 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.15 (2026-05-04):** rfd-critic v0.14 pass found 1 critical
+  issue (transport error mid-output truncated the rest, but the
+  surfaced finding was substantive). Closed it. (1) Plan-time tool
+  advertisement: today the model gets the FULL tool list at session
+  start — `monitor`/`lsp` would appear advertised under microvm
+  even though they're runtime-rejected, and RFD 0005 subagents
+  configured with `lsp` in their allowlist would crash mid-task.
+  Added §"Plan-time advertisement": new `SandboxProvider::tool_disposition()`
+  capability-query API + runtime startup filter that strips
+  `Unavailable` tools from the advertised list before the model
+  plans. `task` executor's behavior on an agent-defined allowlist
+  containing an unavailable tool: strip-with-warning by default
+  (one stderr banner + a `tool_filtered_out` session-JSONL event);
+  fail-fast opt-in via `[task] on_unavailable_tool = "fail-fast"`.
+  Both `tool_disposition()` and the runtime filter are NEW APIs
+  Commit G adds; `LocalProcessProvider`'s default returns `Guest`
+  for everything (behavior unchanged).
 - **v0.14 (2026-05-04):** rfd-critic v0.13 pass found 2 critical
   issues. Both real (and a class I'd been hand-waving). Closed both.
   (1) `lsp` was claimed host-direct via "pi-tools-net's LSP backend
