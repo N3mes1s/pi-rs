@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.31)
+- **Status:** Discussion (v0.32 — rfd-critic READY, polish landing)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -555,7 +555,18 @@ pub struct BootSpec {
 #[derive(Debug, Clone, Copy)]
 pub struct CallLimits {
     pub wall_timeout: Duration,    // default 60s
-    pub max_output_bytes: u32,     // default 256 KiB
+    /// Aggregate budget across the worker's captured `stdout` +
+    /// `stderr` (counted in bytes after UTF-8 truncation at the
+    /// last valid char boundary). `model_output` is derived FROM
+    /// that already-capped capture (e.g. `stdout + "\n" + stderr +
+    /// "[exit N]"` for bash) — it is not budgeted independently.
+    /// `display` is excluded from the cap (it carries small
+    /// structured metadata; image `display.base64` is bounded by
+    /// the image-read tool's own limits, not this one). Default
+    /// 256 KiB. Per-call truncation is applied by the worker
+    /// before the wire response is sent; the wire shape is
+    /// already-truncated.
+    pub max_output_bytes: u32,
 }
 
 #[async_trait]
@@ -812,10 +823,15 @@ impl SandboxProvider for MicroVmProvider {
         // SandboxProvider entirely BEFORE we get here. The runtime
         // dispatcher checks `tool.dispatch_class()` first and never
         // calls SandboxProvider::execute_tool for `RuntimeNative`
-        // tools (task/subagent/etc.). We assert it as a defense-in-
-        // depth invariant; reaching this branch is a runtime bug,
-        // not a sandbox concern.
-        debug_assert!(tool_dispatch_class(tool_name) != ToolDispatchClass::RuntimeNative,
+        // tools (task/subagent/etc.). The provider is constructed
+        // with a `dispatch_class_registry: Arc<dyn DispatchClassRegistry>`
+        // that maps tool name → ToolDispatchClass; the assert below
+        // is defense-in-depth only. Reaching this branch is a
+        // runtime bug, not a sandbox concern. The registry is the
+        // same one the runtime's planner uses, threaded into
+        // `MicroVmProvider::new()` from `RuntimeConfig` to keep
+        // both surfaces in sync.
+        debug_assert!(self.dispatch_class_registry.lookup(tool_name) != ToolDispatchClass::RuntimeNative,
             "RuntimeNative tool {tool_name} should never reach SandboxProvider");
         // monitor: incompatible with one-shot RPC, see §"Tool availability".
         if tool_name == "monitor" {
@@ -1088,7 +1104,14 @@ The new fields are added as an **amendment to RFD 0022** (which is currently mar
 
 **JSONL backward compatibility** — pre-amendment rows lack the new fields; `#[serde(default)]` makes them deserialize as `None`, and `pi-stats::ingest` writes `NULL` to the new columns. **Migration ordering**: schema migration (`ALTER TABLE sandbox_actions ADD COLUMN ...` × 10 new) MUST run before any pi binary speaking the new fields ingests rows; otherwise the binary will refuse to start with `schema_migration_required`. v1 ships an integration test (`tests/sandbox_action_compat.rs`) that loads a fixture of pre-amendment rows and asserts both the old binary's rows are still readable AND the new binary's rows have the new fields populated. The `provider` field already exists on the struct in RFD 0022 and is not new here.
 
-**Public API impact.** Every consumer of `SandboxProvider` (the in-tree CLI; `pi-sdk` mocks, examples, and tests; downstream embedders against `pi-sdk`) needs to update for the new `release()` return type and `SandboxTelemetry` fields. To be honest about the change: changing `release()`'s signature on a publicly-implementable trait IS source-breaking for downstream `impl SandboxProvider for ...`. **The change is sealed-trait-friendly only.** RFD 0027 ships `SandboxProvider` as `#[non_exhaustive]` on its method set is not enforceable — the practical mitigation is that v1 of `pi-sdk` lists `SandboxProvider` as **unstable / sealed-by-convention** in the docs (only `LocalProcessProvider`, `MicroVmProvider`, and `MockSandboxProvider` are blessed implementers; other downstream impls run at their own risk until the trait stabilises). When `pi-sdk` cuts its 1.0, the RFD-0023 trait shape is what stabilises. In the meantime: bump pi-sdk MINOR (still 0.x), update `MockSandboxProvider` to return a synthetic `ReleaseOutcome { pool_disposition: ReturnedToPool, reset_status: NotApplicable, reason: None }`, and changelog the breaking change clearly in the release notes.
+**Public API impact.** Two surfaces, two audiences:
+
+- **`SandboxProvider` implementers** (downstream embedders, alt-providers): source-breaking changes are `execute_tool(ctx, tool_use_id, tool_name, tool_input) -> Result<SandboxOutcome, SandboxError>` — the `tool_use_id: &str` parameter is new — and `SandboxOutcome` itself replaces RFD 0022's bare `ToolResult` return. Every `impl SandboxProvider for X` must adapt.
+- **`MicroVmLauncher` implementers** (anyone shipping a new launcher backend): source-breaking change is `VmHandle::release(self, hint) -> ReleaseOutcome` (was `-> ()`). `SandboxProvider` implementers do NOT see this — `release()` is a launcher-internal trait.
+
+`SandboxAction` / `SandboxTelemetry` field additions are backward-compatible serde/schema expansion (new optional fields with `#[serde(default)]`). Pre-amendment JSONL/SQLite rows deserialize cleanly; new rows populate the new fields.
+
+`pi-sdk`'s `MockSandboxProvider` updates to return a synthetic `ReleaseOutcome { pool_disposition: ReturnedToPool, reset_status: NotApplicable, reason: None }` so existing test code keeps compiling without touching call sites. The two trait changes ride a pi-sdk MINOR bump (still 0.x); both `SandboxProvider` and `MicroVmLauncher` are documented as **unstable / sealed-by-convention** until `pi-sdk` 1.0, with `LocalProcessProvider`, `MicroVmProvider`, and `MockSandboxProvider` as the blessed in-tree implementers. Other downstream impls run at their own risk pre-1.0; the changelog calls out the break clearly.
 
 ### 3. The local microVM contract
 
@@ -2118,6 +2141,26 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.32 (2026-05-04):** rfd-critic v0.31 returned **READY**
+  ("Critical issues: None.") after 28 iterations from v0.4. This
+  polish pass lands the three non-blocking suggested deltas:
+  (1) `MicroVmProvider::execute_tool` defense-in-depth assert now
+  references an explicit `dispatch_class_registry: Arc<dyn
+  DispatchClassRegistry>` field on the provider (threaded from
+  `RuntimeConfig` so planner + provider share one source of
+  truth), instead of a free-floating `tool_dispatch_class()`
+  function. (2) `CallLimits.max_output_bytes` doc pinned: it's
+  an aggregate cap across captured `stdout + stderr` (UTF-8
+  boundary-safe truncation at the worker), `model_output` is
+  derived from that already-capped capture (not budgeted
+  independently), `display` is excluded. Wire shape is already-
+  truncated. (3) Public API impact paragraph split into two
+  audiences: `SandboxProvider` implementers see
+  `execute_tool(.., tool_use_id, ..)` + return-type changes;
+  `MicroVmLauncher` implementers see `release() -> ReleaseOutcome`
+  (a launcher-internal trait — `SandboxProvider` impls don't see
+  this). Both ride a pi-sdk MINOR bump under sealed-by-convention
+  pre-1.0.
 - **v0.31 (2026-05-04):** rfd-critic v0.30 pass found 2 real
   citation/staleness issues. (1) Background §"pi-tools dependency
   problem" used present tense ("Audit shows `pi-ai.workspace = true`
