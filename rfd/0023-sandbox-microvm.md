@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.24)
+- **Status:** Discussion (v0.25)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -348,8 +348,9 @@ use serde::{Deserialize, Serialize};
 #[async_trait]
 pub trait MicroVmLauncher: Send + Sync {
     /// Slug used in telemetry; one of "firecracker", "vfkit",
-    /// "cloud-hypervisor". Stable across patch releases.
-    fn transport_name(&self) -> &'static str;
+    /// "cloud-hypervisor". Stable across patch releases. Returned
+    /// value is the same string written to `SandboxAction.launcher`.
+    fn launcher_name(&self) -> &'static str;
 
     /// Probe at construction. Lets `pi sandbox doctor` produce
     /// actionable diagnostics without booting anything.
@@ -746,7 +747,7 @@ impl SandboxProvider for MicroVmProvider {
                     launcher: None,                   // no VM involved
                     dispatch_path: Some("host-direct"),
                     acquire_to_ready_ms: None,
-                    guest_duration_ms: Some(started.elapsed().as_millis() as u32),
+                    guest_duration_ms: None,                  // host-direct: no guest involved; use duration_ms
                     cold_boot: None,
                     cost_usd: None,
                 },
@@ -931,6 +932,8 @@ SandboxAction {
     dispatch_path: Option<String>, // "guest" | "host-direct" (microvm only)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     acquire_to_ready_ms: Option<u32>,  // host-observed time-to-first-byte (None for host-direct / local-process)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    guest_duration_ms: Option<u32>,    // measured INSIDE the guest (Some for microvm-guest; None for host-direct, local-process, remote)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cold_boot: Option<bool>,
     // NEW (RFD 0026 — remote):
@@ -1921,7 +1924,7 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 - `microvm_firecracker` (Linux + KVM, gated on `PI_SANDBOX_FC_TEST=1`):
   - Boot + ls a tmp dir.
-  - Read + edit + verify host fs mutation through virtio-fs RW.
+  - Read + edit + verify host fs mutation through the `/work` mount (contextfs FUSE on Linux/Firecracker; virtio-fs on macOS/Windows).
   - bash with cwd boundary check (path traversal rejected).
   - Pool warm-vs-cold timing.
   - Resource limit honored (OOM killed at mem cap).
@@ -1933,10 +1936,30 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 - After Phase 3 + G: `pi --sandbox-provider=microvm:firecracker "ls + read + edit a marker file"` on Manjaro. Confirm session JSONL has the expected `provider="microvm"`, `launcher="firecracker"`, `dispatch_path="guest"`, `acquire_to_ready_ms`, and `cold_boot` telemetry fields, and the host file actually changed.
 - Same dogfood on macos-14 + windows runner once D and F have landed.
-- `pi --stats sandbox-actions` must show non-zero rows with the new `transport` column populated.
+- `pi --stats sandbox-actions` must show non-zero rows with `provider` populated, and where applicable `launcher` / `dispatch_path` / `acquire_to_ready_ms` / `guest_duration_ms` / `cold_boot`.
 
 ## Revision history
 
+- **v0.25 (2026-05-04):** rfd-critic v0.24 pass: 1 critical
+  (telemetry-contract self-contradiction) + 4 small. All closed.
+  (1) `SandboxAction` struct field list was missing
+  `guest_duration_ms: Option<u32>` even though the migration text
+  listed it as a new SQLite column. Added between
+  `acquire_to_ready_ms` and `cold_boot`. (2) Host-direct branch in
+  `MicroVmProvider::execute_tool()` set
+  `guest_duration_ms: Some(elapsed())` — wrong, no guest involved.
+  Now `None`; `duration_ms` is the host-direct elapsed time.
+  (3) Dogfood line `--stats sandbox-actions ... transport column`
+  → `provider`/`launcher`/`dispatch_path`/`acquire_to_ready_ms`/
+  `guest_duration_ms`/`cold_boot`. (4) Firecracker integration
+  test bullet "verify host fs mutation through virtio-fs RW" →
+  "through the `/work` mount (contextfs FUSE on Linux/Firecracker;
+  virtio-fs on macOS/Windows)". (5) `MicroVmLauncher::transport_name()`
+  → `launcher_name()` with a doc note that the return value is
+  the same string written to `SandboxAction.launcher`. External
+  vendor citation pinning (Firecracker virtio-fs, vfkit version
+  floor, cloud-hypervisor + WHPX) deferred to a publish-readiness
+  task per RFD policy — left as-is in Discussion.
 - **v0.24 (2026-05-04):** rfd-critic v0.23 pass: 3 criticals, 3
   underspec. Real ones closed. (1) Post-call hygiene mechanism
   promoted from "marker text in model_output" to first-class
