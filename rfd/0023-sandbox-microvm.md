@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.11)
+- **Status:** Discussion (v0.12)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -505,7 +505,7 @@ pub struct SandboxTelemetry {
 The pool ownership rule is **the launcher owns the pool**. This means:
 
 - One `MicroVmProvider` instance ↔ one launcher instance ↔ one pool.
-- Subagents that inherit the parent's `Arc<dyn SandboxProvider>` (via `RuntimeConfig.sandbox_provider`) **share that pool**. Concurrent tool calls from parent + subagents serialize on `tokio::sync::Mutex<VecDeque<WarmVm>>`; if the pool is empty, the launcher cold-boots an ad-hoc VM.
+- Subagents that inherit the parent's `Arc<dyn SandboxProvider>` (via `RuntimeConfig.sandbox_provider`) **share that pool**. The pool is normatively keyed by `BootSpec` — implementation is equivalent to `tokio::sync::Mutex<HashMap<BootSpec, VecDeque<WarmVm>>>`. Acquire looks up the warm-VM ring for the requesting `BootSpec`; release puts it back into the same ring. Two subagents with different `BootSpec`s (different `host_cwd` per RFD 0006 worktree, different `env_hash`, etc.) NEVER share a warm VM. If the matching ring is empty, the launcher cold-boots an ad-hoc VM for that `BootSpec`.
 - A user who wants **per-subagent pool isolation** must construct a fresh `MicroVmProvider` for each subagent runtime — explicit, not implicit. Halo's RFD 0025 supervisor will configure this; documented in the halo integration notes.
 
 This was previously misstated in v0.2's Open Question #2 ("each subagent's runtime gets its own MicroVmProvider"); v0.3 corrects it.
@@ -1091,7 +1091,7 @@ opt in.
 #### Linux: `FirecrackerLauncher` (`#[cfg(target_os = "linux")]`)
 
 - Probes `/dev/kvm` and the `firecracker` binary at construction.
-- Maintains a **warm pool** of N (default 2) pre-booted VMs as a `tokio::sync::Mutex<VecDeque<WarmVm>>`. `acquire()` pops a warm VM in O(1); release returns it for the next call. Default is 2 because real coding-agent tool calls are dominantly sequential (write → read → bash → read); pool=2 covers one parallel subagent burst at ~512MB resident. Telemetry on pool hit-rate decides whether to bump to 4.
+- Maintains a **warm pool of N (default 2) pre-booted VMs per `BootSpec` ring**, as `tokio::sync::Mutex<HashMap<BootSpec, VecDeque<WarmVm>>>`. `acquire(&boot_spec)` pops a warm VM from the matching ring in O(1); release returns it to the same ring. Two callers with different `BootSpec`s (e.g. different `host_cwd` per RFD 0006 worktree) get separate rings and cannot share a warm VM. Default 2/ring because real coding-agent tool calls are dominantly sequential (write → read → bash → read); pool=2 covers one parallel subagent burst at ~512MB resident. Telemetry on pool hit-rate per ring decides whether to bump to 4. Empty rings garbage-collect after their last VM is released and an idle TTL elapses (default 5 min) so a long-running session that drifts across many cwds doesn't leak unbounded ring entries.
 - Pool refills opportunistically in the background.
 - Each Linux/Firecracker VM gets its own firecracker process, API socket, vsock socket, plus per-VM `cfs-fs-server` + `contextfs-broker` instances on per-VM run-dir UDSes (§3.5.5). macOS/vfkit and Windows/cloud-hypervisor VMs use a per-VM virtio-fs share (those launchers expose virtio-fs; Firecracker does not). Rotation: VMs are torn down and replaced after N tool calls or T seconds (default 50 calls / 5 minutes) to bound cumulative state leakage.
 - Cribbed from aegis: vsock client wire-up; the rest is fresh.
@@ -1111,7 +1111,7 @@ LoC estimate: 800.
 
 - Probes WHPX (`Windows Hypervisor Platform`) availability + `cloud-hypervisor.exe`.
 - v1.0 cold-boots per call.
-- WSL2 alternative offered as `--sandbox-provider=microvm:wsl2` for users who already have WSL2 — different impl, separate launcher, NOT the default.
+- A WSL2-based launcher was considered and **cut from v1**; users who already run WSL2 can continue using `--sandbox-provider=local-process` inside the WSL2 distro. A separate `Wsl2Launcher` would need its own design section (rootfs, vsock, CI plan); not in scope for this RFD.
 
 LoC estimate: 1000.
 
@@ -1122,7 +1122,6 @@ pi --sandbox-provider=microvm                  # auto-pick per OS
 pi --sandbox-provider=microvm:firecracker      # explicit pin
 pi --sandbox-provider=microvm:vfkit
 pi --sandbox-provider=microvm:cloud-hypervisor
-pi --sandbox-provider=microvm:wsl2             # opt-in Windows alt
 pi --sandbox-provider=local-process            # existing, no isolation
 ```
 
@@ -1279,7 +1278,10 @@ The user-facing surface lands in stages so the maintainer's primary use case (Li
 - **Stage 1 (after Commit D merges):** `--sandbox-provider=microvm:firecracker` (explicit pin) goes live. Documented as "Linux only, beta." `pi sandbox doctor` works for the firecracker path. Maintainer dogfoods on Manjaro.
 - **Stage 2 (after Commit E merges):** `--sandbox-provider=microvm:vfkit` (explicit pin) goes live. macOS users can dogfood.
 - **Stage 3 (after Commit F merges):** `--sandbox-provider=microvm:cloud-hypervisor` goes live on Windows.
-- **Stage 4 (Commit G):** `--sandbox-provider=microvm` (auto-pick) goes live, with the cross-OS coverage promise honest.
+- **Stage 4 (Commit G + post-impl follow-ups):** `--sandbox-provider=microvm` (auto-pick) goes live with the cross-OS coverage promise. **Gating bar**: not just "all three launchers exist" — also requires symlink-resolve-beneath parity on macOS/vfkit and Windows/cloud-hypervisor (per §6 threat model: those launchers' v1 host-side path resolution does not check beneath-root for symlinks pre-placed in `/work`). Until that parity ships:
+  - Linux/Firecracker `--sandbox-provider=microvm` and `microvm:firecracker` are GA.
+  - macOS/vfkit and Windows/cloud-hypervisor remain **explicit-pin beta** (`--sandbox-provider=microvm:vfkit` / `:cloud-hypervisor`) with a stderr banner on first use noting the symlink-escape limitation. Plain `--sandbox-provider=microvm` on those OSes errors with a remediation message pointing to the explicit pin or RFD 0026 remote backends.
+  - The auto-pick promise unlocks platform-by-platform once each platform's resolve-beneath lands. v1.1 (per `rfd/0023-sandbox-microvm.md` §6) closes the gap on vfkit; v1.2 on cloud-hypervisor.
 
 This avoids the "Linux first, macOS later" anti-pattern (which the previous critic correctly flagged as user-hostile) while not blocking the Linux launch on Windows runner availability. Users get explicit pins as each lands; the auto-pick flag waits for the full matrix.
 
@@ -1343,6 +1345,25 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.12 (2026-05-04):** rfd-critic v0.11 pass found 3 critical
+  issues. Closed all of them. (1) Pool partition normatively keyed:
+  `tokio::sync::Mutex<HashMap<BootSpec, VecDeque<WarmVm>>>` instead
+  of the un-keyed `Mutex<VecDeque<WarmVm>>`. Acquire/release/refill
+  text in §2 and §4.1 updated; added empty-ring GC after idle TTL
+  so long-running cwd-drifting sessions don't leak ring entries.
+  (2) Stripped the `microvm:wsl2` reference from §4.3 (Windows
+  launcher text) and §5 (CLI examples). The revision-history claim
+  matched the v0.10 prose, but the body still showed it; now actually
+  removed. WSL2 acknowledgement reframed as "considered, cut from
+  v1, document why." (3) §"Phased flag rollout" Stage 4 GA bar
+  tightened: not just "all three launchers exist" — also requires
+  symlink-resolve-beneath parity on macOS/vfkit and Windows/cloud-
+  hypervisor (the §6 limitation we documented in v0.11). Until
+  parity ships: Linux/Firecracker is GA; macOS/vfkit and
+  Windows/cloud-hypervisor are explicit-pin beta with a stderr
+  banner; plain `--sandbox-provider=microvm` errors on those OSes
+  pointing the operator at the explicit pin. v1.1 closes vfkit;
+  v1.2 closes cloud-hypervisor.
 - **v0.11 (2026-05-04):** rfd-critic v0.10 pass found 3 critical
   issues. Closed all of them. (1) New §"Tool dispatch boundary"
   subsection: runtime-native orchestration tools (`task` from
