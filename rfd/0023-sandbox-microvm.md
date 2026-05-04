@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.30)
+- **Status:** Discussion (v0.31)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -60,7 +60,7 @@ A guest worker that runs pi's tools cannot link `pi-ai` (the LLM-provider crate)
 use pi_ai::{ToolResult, ToolSpec};
 ```
 
-Audit of `pi-tools/Cargo.toml` shows `pi-ai.workspace = true` and `reqwest.workspace = true` are unconditional. The host build pulls in the whole world.
+Audit of `pi-tools/Cargo.toml` *at the time RFD 0023 v0.4 was written (2026-05-02)* showed `pi-ai.workspace = true` and `reqwest.workspace = true` as unconditional `[dependencies]` — the host build pulled in the whole world. As of 2026-05-04 those entries have moved to `[dev-dependencies]` (Commit A2 landed; `pi-tools` itself is a thin re-export façade over `pi-tools-core` + `pi-tools-net`). The dependency-problem framing below is preserved as historical context for *why* the A1/A2 split exists; the current state is documented in the "Resolution" paragraph.
 
 **Resolution (Commits A1/A2 — both shipped):** A1 extracts the POD types `ToolResult` / `ToolSpec` / `ToolError` into a tiny `pi-tool-types` crate (deps: `serde`/`serde_json`/`thiserror` only); `pi-ai` re-exports them for back-compat. A2 splits `pi-tools` into `pi-tools-core` (the guest-safe file/process tools — `read`/`write`/`edit`/`bash`/`grep`/`find`/`ls`/`monitor` all live here today; `monitor` is in the source tree but is **not registered** in the guest worker's tool dispatcher under v1 because the one-shot RPC can't carry its streaming output) and `pi-tools-net` (web_search), with `pi-tools` itself becoming a re-export façade. **As of 2026-05-04 both A1 and A2 are merged on `main`** (`crates/pi-tools/Cargo.toml` already pulls `pi-tools-core` + `pi-tools-net`). The remaining A-series work for guest-side completeness: extracting `ToolContext` / a `Tool` impl that doesn't transitively pull `pi-ai` (some shared trait machinery still lives in `pi-tools` re-exporting `pi-ai` types). The guest worker depends on `pi-tool-types` + `pi-tools-core` + `pi-sandbox-protocol`. Compiles statically against musl, links into a ~6–8 MB binary, fits in alpine.
 
@@ -1435,9 +1435,12 @@ combinations:
 - `--sandbox-provider=microvm:firecracker --sandbox-microvm-mode=local`
   → hard error at provider construction:
   `unsupported: Linux/Firecracker v1 has no `local`-mode workspace
-  transport. Firecracker does not support virtio-fs (RFD
-  0023-known-issues). Use --sandbox-microvm-mode=managed (requires
+  transport. Firecracker does not support virtio-fs (per
+  rfd/0023-known-issues.md §"Issue 1" + upstream firecracker-microvm
+  issue #1180). Use --sandbox-microvm-mode=managed (requires
   contextfs broker config) or --sandbox-provider=local-process.`
+
+  **Note on the in-tree code.** `crates/pi-sandbox/src/microvm/firecracker.rs` on `main` still contains pre-known-issues plumbing for `virtiofsd_bin` resolution, a `virtiofsd` child process per VM, and a virtio-fs `/work` mount — that's the original Commit D shape from before the validation in `rfd/0023-known-issues.md` proved Firecracker drops the `fs` config block silently. Commit G is responsible for **removing or quarantining** that legacy path: either delete `virtiofsd_bin`/`fs_share_for` entirely, or cfg-gate it behind a `firecracker-virtiofs-experimental` feature with a stderr banner. The in-tree code is dead-on-Firecracker-v1.15.0 today; the RFD's "managed-only on Linux/Firecracker" stance is the v1 GA story.
 - `--sandbox-provider=microvm:vfkit --sandbox-microvm-mode=managed`
   → hard error: contextfs's vsock embedder transport is Linux-only
   per contextfs RFD-0023 §"Goals/non-goals: Windows/macOS embedders".
@@ -2115,6 +2118,23 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.31 (2026-05-04):** rfd-critic v0.30 pass found 2 real
+  citation/staleness issues. (1) Background §"pi-tools dependency
+  problem" used present tense ("Audit shows `pi-ai.workspace = true`
+  ... unconditional") but on `main` today those entries have moved
+  to `[dev-dependencies]` — past-tense the audit and add a current-
+  state pointer. (2) §3.5 categorically claimed "Firecracker does
+  not support virtio-fs" while `crates/pi-sandbox/src/microvm/firecracker.rs`
+  on `main` STILL contains `virtiofsd_bin` resolution, a virtiofsd
+  child per VM, and virtio-fs `/work` mount plumbing — that's the
+  pre-known-issues Commit D shape. Reconciled: kept the v1 GA
+  position (managed-only on Linux/Firecracker, per
+  `rfd/0023-known-issues.md` §"Issue 1" + upstream firecracker-microvm
+  issue #1180); added an explicit note that Commit G removes or
+  quarantines the legacy virtiofsd path (delete entirely, or
+  cfg-gate behind `firecracker-virtiofs-experimental` feature
+  with a stderr banner). The in-tree code is dead-on-Firecracker-
+  v1.15.0 today; v1 GA story is unchanged.
 - **v0.30 (2026-05-04):** rfd-critic v0.29 cleanup pass found
   cascading staleness from v0.29's `release()` API change. (1)
   §"Post-call hygiene" still wrote
