@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.9)
+- **Status:** Discussion (v0.10)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -437,25 +437,20 @@ pub struct SandboxOutcome {
     pub telemetry: SandboxTelemetry,
 }
 
-// `host_tools` is an `Arc<HostToolRegistry>` held by the
-// MicroVmProvider; it knows which tools are host-bound (default:
-// web_search) and dispatches them through the existing pi-tools-net
-// implementation. Operators can extend the registry with custom
-// host-bound tools if their threat model permits (e.g. an internal
-// metric query). Guest-bound tools (read/write/edit/bash/grep/find/ls)
-// always route through the launcher and never appear in the host
-// registry.
+// `host_tools` is the in-process dispatcher for host-bound tools.
+// In v1 it hardcodes `web_search` as the only host-bound tool —
+// no operator-extensible registry, since making host-direct
+// extensible in the first release would widen the trust boundary
+// before the default path is proven. v1.1 may revisit if telemetry
+// shows demand. Guest-bound tools (read/write/edit/bash/grep/find/
+// ls) always route through the launcher.
 
-// New return type — combines what RFD 0022 returned with the §2
-// VmExecution telemetry. RFD 0022's SandboxProvider trait gains a
-// version bump (associated `type Outcome = SandboxOutcome` with a
-// default of `SandboxExecution` for back-compat) so existing
-// LocalProcessProvider can still return the bare execution while
-// MicroVmProvider returns the richer outcome.
-pub struct SandboxOutcome {
-    pub execution: SandboxExecution,    // unchanged stdout/stderr/exit
-    pub telemetry: SandboxTelemetry,
-}
+// SandboxProvider's trait return is unified: every provider — local-
+// process, microvm, remote backends — returns the SAME SandboxOutcome
+// shape. LocalProcessProvider's existing inline-execution body wraps
+// its `SandboxExecution` into the new envelope (one wrapping helper,
+// no associated-type machinery). This is a one-time non-breaking
+// expansion of RFD 0022's trait return.
 
 pub struct SandboxTelemetry {
     /// Which `SandboxProvider` impl handled this call.
@@ -487,14 +482,16 @@ Telemetry rows extend the existing `SessionEntryKind::SandboxAction` from RFD 00
 SandboxAction {
     provider: String,           // "microvm" | "local-process" | "e2b" | "sprites" | "daytona"
     tool_name: String,
-    duration_ms: u64,           // total host-observed; sum of acquire + guest
+    duration_ms: u64,           // total host-observed; sum of acquire + guest (or just elapsed for host-direct)
     exit_status: i32,
     is_error: bool,
-    // NEW (this RFD — local microVM):
+    // NEW (this RFD — local microVM, three-field split per v0.9):
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    transport: Option<String>,  // "firecracker" | "vfkit" | "cloud-hypervisor"
+    launcher: Option<String>,   // "firecracker" | "vfkit" | "cloud-hypervisor" (microvm-guest only)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    acquire_to_ready_ms: Option<u32>,  // host-observed time-to-first-byte
+    dispatch_path: Option<String>, // "guest" | "host-direct" (microvm only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    acquire_to_ready_ms: Option<u32>,  // host-observed time-to-first-byte (None for host-direct / local-process)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cold_boot: Option<bool>,
     // NEW (RFD 0026 — remote):
@@ -505,7 +502,9 @@ SandboxAction {
 }
 ```
 
-The new fields are added as an **amendment to RFD 0022** (which is currently marked Implemented v1.0 — adding optional fields is non-breaking; existing telemetry rows deserialize fine because of `#[serde(default)]`). RFD 0022's revision history will be appended with an `(amended by RFDs 0023 + 0026)` note when those RFDs land. `pi-stats::ingest` adds nullable columns (`transport TEXT`, `acquire_to_ready_ms INTEGER`, `cold_boot INTEGER`, `cost_usd REAL`, `round_trip_ms INTEGER`) to the `sandbox_actions` SQLite table.
+The new fields are added as an **amendment to RFD 0022** (which is currently marked Implemented v1.0 — adding optional fields is non-breaking; existing telemetry rows deserialize fine because of `#[serde(default)]`). RFD 0022's revision history will be appended with an `(amended by RFDs 0023 + 0026)` note when those RFDs land. `pi-stats::ingest` adds nullable columns (`launcher TEXT`, `dispatch_path TEXT`, `acquire_to_ready_ms INTEGER`, `cold_boot INTEGER`, `cost_usd REAL`, `round_trip_ms INTEGER`) to the `sandbox_actions` SQLite table.
+
+**JSONL backward compatibility** — pre-amendment rows lack `launcher` / `dispatch_path`; the `#[serde(default)]` makes them deserialize as `None`, and `pi-stats::ingest` writes `NULL` to the new columns. **Migration ordering**: schema migration (`ALTER TABLE sandbox_actions ADD COLUMN ...` × 3 new) MUST run before any pi binary speaking the new fields ingests rows; otherwise the binary will refuse to start with `schema_migration_required`. v1 ships an integration test (`tests/sandbox_action_compat.rs`) that loads a fixture of pre-amendment rows and asserts both the old binary's rows are still readable AND the new binary's rows have the new fields populated.
 
 ### 3. The local microVM contract
 
@@ -1060,7 +1059,7 @@ opt in.
 - Probes `/dev/kvm` and the `firecracker` binary at construction.
 - Maintains a **warm pool** of N (default 2) pre-booted VMs as a `tokio::sync::Mutex<VecDeque<WarmVm>>`. `acquire()` pops a warm VM in O(1); release returns it for the next call. Default is 2 because real coding-agent tool calls are dominantly sequential (write → read → bash → read); pool=2 covers one parallel subagent burst at ~512MB resident. Telemetry on pool hit-rate decides whether to bump to 4.
 - Pool refills opportunistically in the background.
-- Each VM gets its own firecracker process, API socket, vsock socket, and (on Linux Stage 1) per-VM `cfs-fs-server` + `contextfs-broker` instances on per-VM run-dir UDSes (§3.5.5). On Linux fallback / macOS / Windows the per-VM share is virtio-fs. Rotation: VMs are torn down and replaced after N tool calls or T seconds (default 50 calls / 5 minutes) to bound cumulative state leakage.
+- Each Linux/Firecracker VM gets its own firecracker process, API socket, vsock socket, plus per-VM `cfs-fs-server` + `contextfs-broker` instances on per-VM run-dir UDSes (§3.5.5). macOS/vfkit and Windows/cloud-hypervisor VMs use a per-VM virtio-fs share (those launchers expose virtio-fs; Firecracker does not). Rotation: VMs are torn down and replaced after N tool calls or T seconds (default 50 calls / 5 minutes) to bound cumulative state leakage.
 - Cribbed from aegis: vsock client wire-up; the rest is fresh.
 
 LoC estimate: 1500 (incl. pool) + 200 for tests.
@@ -1097,9 +1096,11 @@ pi --sandbox-provider=local-process            # existing, no isolation
 
 ```
 $ pi sandbox doctor
-microvm:firecracker  ✓ available  (Firecracker v1.15.0, probe 87ms)
+microvm:firecracker  ✓ available  (Firecracker v1.15.0, probe 87ms, mode=managed)
                        checks: kvm_open_rw ✓, kvm_group_member ✓,
-                               vsock_module ✓, virtiofsd ✓, fc_binary ✓
+                               vsock_module ✓, fc_binary ✓,
+                               contextfs_broker ✓, cfs_fs_server ✓,
+                               cfs_mesh ✓, contextfs_cli ✓ (v0.3.2)
 microvm:vfkit        ✗ unavailable
                        blocker: vfkit binary not found on $PATH
                        remediation: brew install vfkit  # or download from https://...
@@ -1115,7 +1116,7 @@ Exits 0 if at least one transport is available; 2 otherwise.
 
 The probe MUST go beyond binary-existence checks. The known false-positive case is "user passes `pi sandbox doctor` then sees `acquire()` fail with EPERM" — they were misled. Per-launcher checks:
 
-- **`FirecrackerLauncher`:** `firecracker` binary on PATH; `/dev/kvm` openable RW (catches kvm group / cgroup denial); kernel `vsock` module loaded (`lsmod` or `/sys/module/vsock`); on Linux Stage 1: `contextfs-broker` + `cfs-fs-server` + `cfs-mesh` + `contextfs-cli` binaries on PATH (per §3.5.8 functional probes); on Linux fallback: `virtiofsd` on PATH; AppArmor/SELinux denial test (no-op `firecracker --version` under restrictive profile).
+- **`FirecrackerLauncher`** (Linux v1 = `managed` only): `firecracker` binary on PATH; `/dev/kvm` openable RW (catches kvm group / cgroup denial); kernel `vsock` module loaded (`lsmod` or `/sys/module/vsock`); `contextfs-broker` + `cfs-fs-server` + `cfs-mesh` + `contextfs-cli` binaries on PATH (per §3.5.8 functional probes); AppArmor/SELinux denial test (no-op `firecracker --version` under restrictive profile). Does NOT probe `virtiofsd` — Firecracker has no virtio-fs and Linux v1 doesn't need it.
 - **`VfkitLauncher`:** Hypervisor.framework available (probe via `sysctl kern.hv_support`); `vfkit` binary on PATH or vendored; vfkit version ≥ 0.5 (virtio-vsock support).
 - **`CloudHypervisorLauncher`:** WHPX feature enabled (probe via `Get-WindowsOptionalFeature -FeatureName HypervisorPlatform`); `cloud-hypervisor.exe` on PATH; admin/elevated check (WHPX requires either elevated tokens or a service install).
 
@@ -1126,7 +1127,7 @@ A real probe takes 50–200ms, not 10ms — the time accounts for the actual fil
 `microvm` defends against:
 
 - **Malicious model output executing arbitrary host commands.** A model that is jailbroken or prompt-injected emits `bash` calls; the guest contains the blast radius (no host fs outside `/work`, no network, killed on timeout).
-- **Tool input crafted to escape the sandbox.** Path traversal in `read`/`write`/`edit` is rejected by the guest worker; the host-side cwd boundary is enforced by `cfs-fs-server`'s `--backend-root` clamp on Linux Stage 1, or by virtio-fs's mount-rooted scope on macOS/Windows v1.0 / Linux fallback.
+- **Tool input crafted to escape the sandbox.** Path traversal in `read`/`write`/`edit` is rejected by the guest worker; the host-side cwd boundary is enforced by `cfs-fs-server`'s `--backend-root` clamp on Linux/Firecracker, or by virtio-fs's mount-rooted scope on macOS/vfkit and Windows/cloud-hypervisor.
 - **Resource exhaustion.** `ResourceLimits` caps memory, vCPUs, disk, wall time.
 
 `microvm` does **not** defend against:
@@ -1260,7 +1261,7 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 1. **Cloud-hypervisor as unified launcher across all three OSes?** It supports KVM/Hypervisor.framework/WHPX in one binary. v1.0 picks best-of-breed (Firecracker on Linux, vfkit on macOS, cloud-hypervisor on Windows); revisit after one quarter of telemetry.
 2. **Pool size default.** N=4 host-side, N=1 per subagent. Memory: 4 × 256MB = 1GB resident. Negotiable if users complain.
-3. **Tool selection for `pi-tools-core` (the guest-buildable subset).** Today: read/write/edit/bash/grep/find/ls/monitor. Excluded: web_search (needs network). Confirm pre-Commit A2.
+3. ~~**Tool selection for `pi-tools-core` (the guest-buildable subset).**~~ **DECIDED, v0.8/v0.9.** Guest-bound tools (route through the launcher → vsock → guest worker → pi-tools-core): `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Host-bound (run on the host directly via pi-tools-net): `web_search`. Unavailable under microvm: `monitor` (one-shot RPC vs. streaming mismatch). The split is the §"Tool availability under `microvm`" matrix, not a per-crate question.
 4. **Default `--sandbox-provider` value after `microvm` ships GA.** Stays at `local-process` (no breaking change for existing users). Migration: docs + release notes + a one-shot first-run prompt suggesting `microvm` if all probes pass.
 5. **Rootfs upgrade UX on pi binary upgrade.** Auto-download with progress bar (default) or refuse + prompt? **Auto-download** is the answer for v1.0; users on offline systems set `PI_SANDBOX_OFFLINE=1` to disable it (and the binary then refuses to use `microvm` until a manual `pi sandbox update`).
 6. **Auth storage for remote backends** — moves to RFD 0026.
@@ -1295,6 +1296,28 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.10 (2026-05-04):** rfd-critic v0.9 pass found 3 critical issues
+  + sweep gaps. Closed all of them. (1) `SandboxOutcome` is now defined
+  ONCE: `{ tool_result, execution, telemetry }`. The earlier
+  associated-type / dual-definition story is gone — every provider
+  (LocalProcessProvider, MicroVmProvider, remote backends) returns the
+  same envelope. LocalProcessProvider wraps its existing
+  `SandboxExecution` into the unified shape via a one-line helper.
+  (2) `SessionEntryKind::SandboxAction` schema block now matches the
+  v0.9 three-field split: `launcher` / `dispatch_path` /
+  `acquire_to_ready_ms` / `cold_boot` / `cost_usd` / `round_trip_ms`,
+  with explicit JSONL backward-compat semantics (`#[serde(default)]`
+  on the new fields) and SQLite migration ordering rules
+  (`ALTER TABLE` before any new-binary ingest, schema-version refusal
+  otherwise). New integration test `sandbox_action_compat.rs` pins it.
+  (3) Sweep: `pi sandbox doctor` example output, FirecrackerLauncher
+  probe checklist, and per-VM share descriptions all now reference
+  contextfs binaries on Linux (no `virtiofsd` mention). Open Question
+  3 marked DECIDED with the §"Tool availability" matrix as the
+  resolution. The §"web_search" host-bound dispatcher is hardcoded
+  to `web_search` in v1 (not operator-extensible) per critic's
+  overengineering feedback. The earlier `microvm:wsl2` reference was
+  cut from v1 (was vestigial; not specced).
 - **v0.9 (2026-05-04):** rfd-critic v0.8 pass found 2 critical issues
   remaining + naming-overload + stale text. Closed all of them.
   (1) §3.5 now opens with an **availability matrix** (OS × launcher ×
