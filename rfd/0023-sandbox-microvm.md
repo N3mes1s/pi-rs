@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.4)
+- **Status:** Discussion (v0.5)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -447,6 +447,155 @@ What RFD 0026 owns:
 What RFD 0023 owns (this RFD):
 - The worker binary, the wire protocol, the `ToolResponse↔ToolResult` mapping, and the local microVM transport.
 
+### 3.5. ContextFS integration (added v0.5)
+
+The microVM rootfs ships an in-guest `contextfsd` daemon that mediates
+file-system access for the agent. ContextFS RFD-0023 (their numbering;
+the embedder profile) is the contextfs-side spec that ships the
+library entry, transport-generic mesh, vsock listeners, per-VM tenant
+secret derivation, OIDC handoff, and audit-ping stub. It is published
+at contextfs `v0.3.0+`. Pi-rs Commit G integrates against that surface;
+all six sub-sections below are operator-side responsibilities at VM
+provisioning time.
+
+#### 3.5.1 — `vm_id` source
+
+Pi-rs already mints a per-VM UUIDv4 in
+`crates/pi-sandbox/src/microvm/firecracker.rs:643` (`Uuid::new_v4()`)
+at provisioning. The same id is hashed into the vsock CID in
+`vm_id_to_cid()`. Commit G threads it into the daemon TOML as the
+operator-supplied `vm_id` field (contextfs RFD-0023 §5: required when
+embedder mode is in use; format `[A-Za-z0-9._-]{1,128}`).
+
+#### 3.5.2 — Per-VM tenant secret (host-side derivation)
+
+At provisioning, the orchestrator calls the contextfs CLI helper:
+
+```bash
+secret=$(contextfs-cli key derive-per-vm-secret \
+    --master-path /etc/contextfs/<tenant>.master \
+    --tenant-id <tenant_id> \
+    --vm-id "<pi_firecracker_uuid>" \
+    --master-epoch <N>)
+```
+
+Output is 32 hex bytes. Pi-rs writes it to a tmpfs file (mode 0600)
+inside the VM's run-dir, e.g.
+`<run_dir>/<vm_id>/cfs-tenant-secret`, and bind-mounts the file into
+the guest at `/var/run/cfs/tenant_secret`. The daemon TOML's
+`tenant_secret_path` points at the bind-mounted location.
+
+The orchestrator reads `<N>` (the master epoch) from broker
+configuration; Commit G's `MicroVmProvider` accepts a
+`master_epoch: u32` field on its construction config and threads it
+into both the CLI invocation and the TOML.
+
+#### 3.5.3 — Workload-identity OIDC token
+
+Pi-rs's host orchestrator already mints a Workload Identity token per
+job (this is the same flow that authenticates against any host service
+the guest needs — RFD 0021 §"Open Q3"). For contextfs, that token is
+mounted into the guest at `/var/run/secrets/token` (a single file,
+mode 0644 since the guest is single-tenant per VM) and the daemon TOML
+`oidc_token_path` points at it. The daemon reads the token on every
+`WriteVerifyRequest`; rotation is host-driven (orchestrator rewrites
+the file when its WI token rotates).
+
+Failure routing for contextfs's three typed OIDC denials:
+- `oidc_validation_failed` — broker rejected the token.
+  → `BrokerOidcRejected` StartError variant (transient if JWKS
+  rotation, persistent if config); MicroVmProvider's `acquire_to_ready`
+  retries once after JWKS-rotation grace, otherwise surfaces to the
+  operator.
+- `oidc_token_required` — broker has a validator configured but the
+  daemon sent an empty `oidc_token`. Configuration bug; surfaced to the
+  operator immediately, no retry.
+- `oidc_token_unexpected` — daemon sent a token but the broker has no
+  validator for this tenant. Configuration bug (broker's `--tenant-mode`
+  flag missing or the wrong validator pinned); surfaced immediately, no
+  retry.
+
+#### 3.5.4 — Per-mount audit-ping
+
+ContextFS RFD-0023 §7 ships a v1 audit-ping shape: every successful
+write-class FUSE op (write / create / unlink / rename / setattr /
+xattr.set / xattr.remove) forwards the AuditRecord to the broker as a
+`Request::WriteAuditPing`. The daemon TOML opts in per mount:
+
+```toml
+[mounts.<name>]
+audit_ping = { mode = "fail-open", high_water_mark = 1024 }
+```
+
+For the routine code-editing-agent use case Commit G targets,
+`fail-open` with `high_water_mark = 1024` is the default — a transient
+broker hiccup must not fail the agent's `cargo build`. Operators with
+hostile-tenancy / compliance-graded tenants opt their tenant configs
+into `fail-closed`; the contextfs broker now (HEAD `dbe2df5`) refuses
+writes with `EIO` BEFORE backend mutation when the audit-ping channel
+is saturated, so fail-closed is integrity-correct. Pi-rs's per-tenant
+config plumbing (RFD 0022 §C) maps to this 1:1.
+
+#### 3.5.5 — Broker invocation (host-side)
+
+The host-side broker MUST be invoked with:
+
+```
+contextfs-broker \
+    --tenant-mode <tenant_id>=embedder \
+    --verify-write-oidc-issuer <issuer-url> \
+    --verify-write-oidc-audience <wi-audience> \
+    --verify-write-oidc-alg RS256 \
+    --vsock <CID>:<PORT>           # Linux only, gated on `vsock` Cargo feature
+    --vsock-key <PATH>             # broker's Noise-IK static key
+    --vsock-peer-pubkey <PATH>     # in-guest daemon's pinned static key
+    [other flags]
+```
+
+`--tenant-mode <t>=embedder` is the operator's opt-in to embedder mode.
+Without it the broker defaults to legacy mode and refuses any request
+carrying `vm_id`/`master_epoch` with a typed
+`tenant_mode_legacy_no_vm_id` denial. With it set, every request must
+carry non-empty `vm_id` + `master_epoch` (typed `vm_id_required`
+denial otherwise). Pi-rs's MicroVmProvider asserts both are set on its
+config at construction; absence is a hard error at startup, not at
+first request.
+
+#### 3.5.6 — Daemon TOML rendered at provisioning
+
+The full operator-rendered daemon TOML for one Commit G provisioning,
+inside the guest at `/etc/contextfsd/daemon.toml`:
+
+```toml
+tenant_id        = "tenant-a"
+vm_id            = "<pi_firecracker_uuid>"
+master_epoch     = 7
+tenant_secret_path = "/var/run/cfs/tenant_secret"   # bind-mounted from host tmpfs
+oidc_token_path    = "/var/run/secrets/token"        # bind-mounted WI token
+
+[broker]
+socket_path = "/run/contextfs/broker.sock"           # vsock-bridge → host UDS
+
+[mounts.workspace]
+backend     = "local-dir"
+mountpoint  = "/workspace"
+audit_ping  = { mode = "fail-open", high_water_mark = 1024 }
+```
+
+The `MicroVmProvider` renders this from a `MicroVmProviderConfig`
+struct at construction; `pi sandbox doctor` validates each field
+(file paths exist, broker reachable, `--tenant-mode` flag visible in
+the broker's argv) per the §5 probe contract.
+
+#### 3.5.7 — Version compatibility
+
+ContextFS broker MUST be `>= v0.3.0` (the version that shipped
+`vm_id` / `master_epoch` / `oidc_token` over the wire). v0.2.x brokers
+will reject any embedder request via serde unknown-field rejection at
+the first `verify_write`; this is the documented fail-loud signal. Pi-rs's
+`pi sandbox doctor` probes the broker's version via the existing
+`/version` HTTP endpoint (RFD 0022 §A).
+
 ### 4. Per-OS launcher impls
 
 #### Linux: `FirecrackerLauncher` (`#[cfg(target_os = "linux")]`)
@@ -654,6 +803,21 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.5 (2026-05-04):** Added §3.5 ContextFS integration. Originally
+  the RFD said nothing about how the in-guest contextfsd is configured
+  at provisioning, treating it as "just sits in the rootfs." That
+  silently begged questions that contextfs's RFD-0023 (their numbering)
+  shipped in published form between 2026-05-03 and 2026-05-04: per-VM
+  tenant secret derivation, OIDC token plumbing, audit-ping per-mount
+  config, broker invocation flags, version compat. §3.5 documents each
+  field pi-rs renders into the daemon TOML at provisioning, the
+  host-side `contextfs-cli key derive-per-vm-secret` invocation, the
+  Workload-Identity token mount path, the typed OIDC denial-routing
+  contract, and the broker-side `--tenant-mode <t>=embedder` requirement.
+  Pinned contextfs broker version to `>= v0.3.0` (the version that
+  shipped `vm_id`/`master_epoch`/`oidc_token` over the wire). No
+  changes to §1-§2 architecture or §4 launcher impls; the integration
+  delta is purely in the runtime provisioning path Commit G owns.
 - **v0.4 (2026-05-02):** In-repo `rfd-critic` (gpt-5.4 xhigh) pass. Closed three P0 deltas the external Plan-agent missed: (1) added explicit `ToolResponse↔ToolResult` field-mapping table in §3 (previously lossy — `tool_use_id`/`display` were unspecified); (2) clarified pool-ownership rule (launcher owns the pool; subagents inheriting `Arc<dyn SandboxProvider>` SHARE it — corrected v0.2's wrong OQ#2 claim); (3) showed `CallLimits` construction site in `MicroVmProvider::execute_tool` pseudocode. Also: declared the worker's transport-agnostic design as RFD 0023's responsibility (so RFD 0026 owns the remote-side strategy, not the worker design). Picked the SandboxAction telemetry schema decision: one union struct with all-optional new fields (amends RFD 0022 non-breakingly). Added `ToolUnavailable` error variant for the `monitor` exclusion path.
 - **v0.3 (2026-05-02):** Second Plan-agent critique pass. **Decided `monitor` exclusion** from microvm — protocol stays one-shot RPC, `monitor` returns clean error in microvm mode (telemetry decides whether v1.1 adds streaming). Split `ResourceLimits` into per-VM `VmCeiling` and per-call `CallLimits` (the previous design was wrong with pooling). Renamed `boot_ms` → `acquire_to_ready_ms` to be honest about what's measurable. Deepened probe to actually exercise preconditions (`/dev/kvm` open RW, vsock module, virtiofsd, AppArmor) with per-check results in `ProbeReport.checks`. Reduced default pool from N=4 to N=2 (real coding sessions are sequential; pool=2 covers one parallel subagent burst at ~512MB resident). Added explicit "rootfs contents are public knowledge" note to threat model + busybox-not-GNU compatibility note. Formalised the phased flag rollout (`microvm:firecracker` ships Stage 1; auto-pick waits for full matrix). Acknowledged `pi-tool-types` becomes a stable public ABI by virtue of being on the wire AND in the host tool API.
 - **v0.2 (2026-05-02):** Restructured after Plan-agent critical review. Promoted writable virtio-fs and Firecracker pooling to v1.0. Added concrete `MicroVmLauncher` / `VmHandle` / `VmSpec` Rust signatures. Added pi-tools dependency-extraction pre-work (Commits A1/A2). Split remote backends out to RFD 0026. Added explicit threat model and performance SLO. Pinned CI matrix to self-hosted Linux/Windows runners, GitHub-hosted macos-14.
@@ -669,3 +833,10 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 - **cloud-hypervisor** — https://www.cloudhypervisor.org/.
 - **virtio-fs** — https://virtio-fs.gitlab.io/.
 - **virtio-vsock** — kernel docs.
+- **contextfs RFD-0023** (`/home/nemesis/code/contextfs/rfds/0023-embedder-profile.md`,
+  state: published, target broker version `>= v0.3.0`) — the
+  contextfs-side spec that pi-rs Commit G integrates against. Their §1
+  (library entry), §2 (transport-generic mesh), §3 (listener-generic
+  cfs-fs-server), §4 (vsock subcommands), §5 (per-VM tenant_secret),
+  §6 (verify_write OIDC validator), §7 (audit-ping stub) are the seven
+  load-bearing surfaces our §3.5 consumes.
