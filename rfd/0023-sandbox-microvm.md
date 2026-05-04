@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.22)
+- **Status:** Discussion (v0.23)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -49,7 +49,7 @@ use pi_ai::{ToolResult, ToolSpec};
 
 Audit of `pi-tools/Cargo.toml` shows `pi-ai.workspace = true` and `reqwest.workspace = true` are unconditional. The host build pulls in the whole world.
 
-**Resolution (Commits A1/A2 — both shipped):** A1 extracts the POD types `ToolResult` / `ToolSpec` / `ToolError` into a tiny `pi-tool-types` crate (deps: `serde`/`serde_json`/`thiserror` only); `pi-ai` re-exports them for back-compat. A2 splits `pi-tools` into `pi-tools-core` (read/write/edit/bash/grep/find/ls — file + process only) and `pi-tools-net` (web_search), with `pi-tools` itself becoming a re-export façade. **As of 2026-05-04 both A1 and A2 are merged on `main`** (`crates/pi-tools/Cargo.toml` already pulls `pi-tools-core` + `pi-tools-net`). The remaining A-series work for guest-side completeness: extracting `ToolContext` / a `Tool` impl that doesn't transitively pull `pi-ai` (some shared trait machinery still lives in `pi-tools` re-exporting `pi-ai` types). The guest worker depends on `pi-tool-types` + `pi-tools-core` + `pi-sandbox-protocol`. Compiles statically against musl, links into a ~6–8 MB binary, fits in alpine.
+**Resolution (Commits A1/A2 — both shipped):** A1 extracts the POD types `ToolResult` / `ToolSpec` / `ToolError` into a tiny `pi-tool-types` crate (deps: `serde`/`serde_json`/`thiserror` only); `pi-ai` re-exports them for back-compat. A2 splits `pi-tools` into `pi-tools-core` (the guest-safe file/process tools — `read`/`write`/`edit`/`bash`/`grep`/`find`/`ls`/`monitor` all live here today; `monitor` is in the source tree but is **not registered** in the guest worker's tool dispatcher under v1 because the one-shot RPC can't carry its streaming output) and `pi-tools-net` (web_search), with `pi-tools` itself becoming a re-export façade. **As of 2026-05-04 both A1 and A2 are merged on `main`** (`crates/pi-tools/Cargo.toml` already pulls `pi-tools-core` + `pi-tools-net`). The remaining A-series work for guest-side completeness: extracting `ToolContext` / a `Tool` impl that doesn't transitively pull `pi-ai` (some shared trait machinery still lives in `pi-tools` re-exporting `pi-ai` types). The guest worker depends on `pi-tool-types` + `pi-tools-core` + `pi-sandbox-protocol`. Compiles statically against musl, links into a ~6–8 MB binary, fits in alpine.
 
 Estimated impact: ~600 LoC moved, no behavior change. Fully reversible.
 
@@ -642,9 +642,22 @@ pub struct MicroVmProvider {
 /// caller's filesystem outside `<host_cwd>`, …) — currently only
 /// `web_search`. Returns the same shape the guest path returns so
 /// telemetry stays uniform.
+///
+/// **Single source of truth for host-bound classification.**
+/// `MicroVmProvider::tool_disposition(name)` returns
+/// `ToolDispatchClass::HostDirect` **iff** `host_tools.is_host_bound(name)`
+/// returns true. The provider implementation calls
+/// `host_tools.is_host_bound(name)` to derive `tool_disposition()`,
+/// not a separate const list. A unit test in
+/// `crates/pi-sandbox/tests/host_bound_parity.rs` round-trips every
+/// pi-tools tool name through both surfaces and asserts equality;
+/// drift is impossible by construction (the second surface delegates
+/// to the first), and the test is a defense-in-depth check against
+/// future regressions when more host-bound tools land.
 #[async_trait]
 pub trait HostBoundToolDispatcher: Send + Sync {
     /// Plan-time check: would `execute()` accept this tool?
+    /// **Source of truth.** `tool_disposition()` defers to this.
     fn is_host_bound(&self, tool_name: &str) -> bool;
 
     /// Execute the tool in-process on the host. Returns
@@ -752,9 +765,20 @@ impl SandboxProvider for MicroVmProvider {
         // policy (today: destroy, since we cannot prove guest state).
         let mut guard = ReleaseGuard::new(vm);
         let exec_result = guard.vm_mut().execute(ctx, &limits, tool_name, tool_input).await;
+        // The hint is the host's preference; the launcher then runs a
+        // **post-call hygiene probe** before actually returning the VM
+        // to the pool (see §"Post-call hygiene", below). Successful
+        // execution by itself is NOT proof the VM is reusable: a
+        // `bash` tool call that runs `sleep 999 &`, `nohup ... &`,
+        // or starts a background daemon leaves descendants alive in
+        // the guest after `tool.invoke()` returns. The probe MUST
+        // verify (a) no descendant processes remain in the per-call
+        // process subtree/cgroup; (b) the worker's transient working
+        // dirs are cleared. Failure of either downgrades the outcome
+        // to `SuspectGuestState` regardless of the host's hint.
         let outcome_hint = match &exec_result {
             Ok(_) => ExecuteOutcomeHint::Clean,
-            Err(ExecuteError::CallLimit { .. }) => ExecuteOutcomeHint::Clean,    // guest is fine; just timed out
+            Err(ExecuteError::CallLimit { .. }) => ExecuteOutcomeHint::Clean,    // worker has already drained per §"Timeout hygiene"
             Err(_) => ExecuteOutcomeHint::SuspectGuestState,
         };
         guard.release(outcome_hint).await;  // disarms Drop; awaits the actual release
@@ -910,9 +934,9 @@ SandboxAction {
 }
 ```
 
-The new fields are added as an **amendment to RFD 0022** (which is currently marked Implemented v1.0 — adding optional fields is non-breaking; existing telemetry rows deserialize fine because of `#[serde(default)]`). RFD 0022's revision history will be appended with an `(amended by RFDs 0023 + 0026)` note when those RFDs land. `pi-stats::ingest` adds nullable columns (`launcher TEXT`, `dispatch_path TEXT`, `acquire_to_ready_ms INTEGER`, `cold_boot INTEGER`, `cost_usd REAL`, `round_trip_ms INTEGER`) to the `sandbox_actions` SQLite table.
+The new fields are added as an **amendment to RFD 0022** (which is currently marked Implemented v1.0 — adding optional fields is non-breaking; existing telemetry rows deserialize fine because of `#[serde(default)]`). RFD 0022's revision history will be appended with an `(amended by RFDs 0023 + 0026)` note when those RFDs land. `pi-stats::ingest` adds the following nullable columns to the `sandbox_actions` SQLite table — one per new struct field: `launcher TEXT`, `dispatch_path TEXT`, `acquire_to_ready_ms INTEGER`, `guest_duration_ms INTEGER`, `cold_boot INTEGER`, `cost_usd REAL`, `round_trip_ms INTEGER`.
 
-**JSONL backward compatibility** — pre-amendment rows lack `launcher` / `dispatch_path`; the `#[serde(default)]` makes them deserialize as `None`, and `pi-stats::ingest` writes `NULL` to the new columns. **Migration ordering**: schema migration (`ALTER TABLE sandbox_actions ADD COLUMN ...` × 3 new) MUST run before any pi binary speaking the new fields ingests rows; otherwise the binary will refuse to start with `schema_migration_required`. v1 ships an integration test (`tests/sandbox_action_compat.rs`) that loads a fixture of pre-amendment rows and asserts both the old binary's rows are still readable AND the new binary's rows have the new fields populated.
+**JSONL backward compatibility** — pre-amendment rows lack the new fields; `#[serde(default)]` makes them deserialize as `None`, and `pi-stats::ingest` writes `NULL` to the new columns. **Migration ordering**: schema migration (`ALTER TABLE sandbox_actions ADD COLUMN ...` × 7 new) MUST run before any pi binary speaking the new fields ingests rows; otherwise the binary will refuse to start with `schema_migration_required`. v1 ships an integration test (`tests/sandbox_action_compat.rs`) that loads a fixture of pre-amendment rows and asserts both the old binary's rows are still readable AND the new binary's rows have the new fields populated. The `provider` field already exists on the struct in RFD 0022 and is not new here.
 
 ### 3. The local microVM contract
 
@@ -959,7 +983,19 @@ pub struct ToolRequest {
     ///      to rewrite the JSON keys it doesn't trust the worker to
     ///      handle.
     /// The host re-validates inverse-rewrites on receipt — guest
-    /// output is not trusted to be rewriting-correct.
+    /// output is not trusted to be rewriting-correct. **Failure
+    /// policy:** if the host finds a `/work/...` substring in
+    /// `model_output` after the guest claimed to have rewritten it,
+    /// the host applies its own rewrite (the registry is the
+    /// authority) and logs a `path_rewrite_drift` warning to
+    /// telemetry. Same for `display`. The host does NOT reject the
+    /// response — that would lose tool work — but the drift
+    /// counter is a CI alert: any nonzero value indicates a
+    /// worker/host mismatch that needs reconciling. Conversely, a
+    /// `display` field that the host's registry doesn't recognize
+    /// (unknown JSON shape) is passed through verbatim with a
+    /// `path_rewrite_unknown_shape` counter bump; the host never
+    /// fabricates a rewrite for a shape it doesn't understand.
     pub host_cwd: String,
 }
 
@@ -1026,6 +1062,15 @@ Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 | `is_error`         | `ToolResponse.is_error`                            | Direct copy. |
 
 `SandboxOutcome.execution: SandboxExecution` (defined in §2) is populated from the raw wire fields **without rewriting**: `execution.stdout = ToolResponse.stdout`, `execution.stderr = ToolResponse.stderr`, `execution.exit_status = ToolResponse.exit_status`. Path rewriting applies **only** to `model_output` and `display`; `execution` stays guest-truthful so post-mortem debugging shows what the guest process actually saw (`/work/...` paths included). Operators who want a host-flavored execution view can derive it from `model_output` (which IS rewritten); the raw stream is kept for fidelity. `guest_duration_ms` goes into the `SandboxAction` telemetry row alongside the existing `duration_ms`. There is **no** `SandboxAction.stderr` field — earlier drafts referenced one; it does not exist in the schema in §2 and is not added.
+
+**Post-call hygiene (background daemon problem).** v1 microvm does **not** support cross-call background daemons or services. After every guest tool call — successful, errored, or timed out — the worker MUST run a hygiene probe before signaling the host that the VM is idle. The probe verifies:
+
+1. **Process subtree empty.** Every descendant the per-call tool spawned (the `bash` shell, anything it forked) is gone. Implementation: bash runs as the leader of a fresh process group; the worker reaps it, then `kill(-pgid, 0)` returns `ESRCH`. On Linux the worker additionally consults a per-call cgroup v2 (`cgroup.procs` empty) — the cgroup is the authoritative test because a daemonized child reparented to PID 1 still appears in the cgroup. macOS/Windows use process-group reparenting detection as a coarser fallback (a known v1 gap; documented).
+2. **Worker transient state cleared.** Per-call temp dirs (`$TMPDIR`/<call_id>) removed; per-call open file descriptors closed; `$PWD`/env scrubbed.
+
+If either check fails, the worker emits a `ToolResponse` with `is_error = true` and the `model_output` carries a `[background-daemon-detected]` marker; the host downgrades the outcome to `ExecuteOutcomeHint::SuspectGuestState` regardless of the tool's success bit, and the launcher destroys the VM rather than returning it to the pool. This is by design: a leaked `sleep 999 &` would otherwise contaminate the next call (or worse, the next subagent on the same `BootSpec` partition).
+
+**Tested cases.** The Commit D integration suite includes negative tests for: `bash 'sleep 999 &'`, `bash 'nohup foo &'`, `bash '(sleep 5; touch /work/marker) &'`, `bash 'mkdir -p /tmp/x && touch /tmp/x/leftover'`, plus the timeout path (`bash 'sleep 60'` with `timeout_ms=1000`). Each test asserts that (a) the affected VM does **not** return to the pool, (b) the next acquire on the same `BootSpec` does NOT see the leftover process or `/tmp` residue, and (c) telemetry records `outcome=SuspectGuestState`.
 
 **Timeout hygiene before pool return.** When `ExecuteError::CallLimit { wall_timeout }` fires, the worker MUST: (1) send `SIGTERM` to the spawned tool process group; (2) drain stdin/stdout/stderr pipes to EOF or a 250 ms hard cutoff, whichever is first; (3) on cutoff, send `SIGKILL` and continue draining; (4) emit the resulting `ToolResponse` with `is_error = true`, `model_output` set to a short timeout marker, and `exit_status = 124` (GNU `timeout` convention). Only after step (4) is the worker considered idle — and only then is the host allowed to mark the VM as `ExecuteOutcomeHint::Clean` and return it to the pool. The host's `release()` waits for `vm.execute()`'s future to resolve with the `CallLimit` error before reading the hint, which gives the worker the natural signal it has finished cleanup. If the worker itself hangs past `wall_timeout + 1s`, the launcher escalates to a hard VM kill and reports `ExecuteOutcomeHint::SuspectGuestState`.
 
@@ -1862,6 +1907,43 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.23 (2026-05-04):** rfd-critic v0.22 pass found 2 critical
+  + 3 underspec + a real citation. Both criticals real and closed.
+  (1) **Pool hygiene proof.** v0.22 marked every `Ok(_)` and
+  `CallLimit` as `Clean`, but a successful `bash 'sleep 999 &'`
+  leaks a daemon into the warm pool. New §"Post-call hygiene"
+  pins the worker contract: per-call cgroup-empty check (Linux)
+  / process-group-orphan check (macOS/Windows fallback) +
+  per-call temp-dir scrub. Either failing downgrades to
+  `SuspectGuestState` regardless of the tool's success bit, and
+  the launcher destroys the VM. Negative test matrix added:
+  `sleep 999 &`, `nohup foo &`, deferred `(sleep 5; touch …) &`,
+  `/tmp` residue, plus the timeout path. Each test asserts
+  (a) no pool return, (b) next-acquire is clean, (c) telemetry
+  records `outcome=SuspectGuestState`. Also added an explicit
+  v1 statement: microvm v1 does **not** support cross-call
+  background daemons. (2) **Citation rot.** A2 paragraph said
+  `pi-tools-core = read/write/edit/bash/grep/find/ls`; verified
+  on `main` that `crates/pi-tools-core/src/monitor.rs` exists.
+  Updated to: `monitor` source-tree-present but **not registered
+  in the guest worker** under v1 (one-shot RPC can't carry
+  streaming output). The other claim — `rfd/0023-known-issues.md`
+  doesn't exist — **was wrong**: file does exist; left in place.
+  Underspec items (a–c) closed: (a) Telemetry alignment —
+  schema migration text now lists 7 nullable columns
+  (`launcher`, `dispatch_path`, `acquire_to_ready_ms`,
+  `guest_duration_ms`, `cold_boot`, `cost_usd`, `round_trip_ms`),
+  matching the `SandboxAction` struct; `× 7 new`, not `× 3 new`.
+  (b) Single source of truth for host-bound classification:
+  `tool_disposition()` defers to `host_tools.is_host_bound()`;
+  documented + parity test at
+  `crates/pi-sandbox/tests/host_bound_parity.rs`. (c) Host
+  re-validation policy: drift logs `path_rewrite_drift` to
+  telemetry and the host re-rewrites (registry is authoritative);
+  unknown `display` shapes pass through with a
+  `path_rewrite_unknown_shape` counter bump; the host never
+  rejects the response (would lose tool work) and never fabricates
+  a rewrite for an unknown shape.
 - **v0.22 (2026-05-04):** rfd-critic v0.21 pass found 2 critical +
   3 underspec + stale-name sweep. Both criticals were real, not
   bikeshedding. (1) `ToolRequest` lacked any host-cwd field, so the
