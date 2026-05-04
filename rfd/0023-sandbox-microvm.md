@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.18)
+- **Status:** Discussion (v0.19)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -677,9 +677,21 @@ impl SandboxProvider for MicroVmProvider {
         // Everything else routes through the guest microVM.
         let spec = self.spec_for(ctx);
         let limits = self.build_call_limits(ctx, tool_name);
-        let vm = self.launcher.acquire(&spec).await?;
-        let exec = vm.execute(ctx, &limits, tool_name, tool_input).await?;
-        vm.release().await.ok();
+        let vm = self.launcher.acquire(&spec).await
+            .map_err(SandboxError::Acquire)?;
+        // Always release; pool-vs-destroy is decided by the outcome
+        // hint. A clean execution returns to the warm pool; a tool
+        // panic / mid-RPC failure / timeout destroys the VM (the
+        // guest may be in an inconsistent state). Cancellation
+        // (parent task drop) destroys for the same reason.
+        let exec_result = vm.execute(ctx, &limits, tool_name, tool_input).await;
+        let outcome_hint = match &exec_result {
+            Ok(_) => ExecuteOutcomeHint::Clean,
+            Err(ExecuteError::CallLimit { .. }) => ExecuteOutcomeHint::Clean,    // guest is fine; just timed out
+            Err(_) => ExecuteOutcomeHint::SuspectGuestState,
+        };
+        vm.release(outcome_hint).await;
+        let exec = exec_result.map_err(SandboxError::Execute)?;
         Ok(SandboxOutcome {
             tool_result: exec.tool_result,
             execution: exec.execution,        // raw stdout/stderr/exit_status, separate from model_output
@@ -851,6 +863,66 @@ Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 `ToolResponse.exit_status` and `guest_duration_ms` go into the `SandboxAction` telemetry row, not into `ToolResult`. `ToolResponse.stderr` is currently dropped on the model-facing path; a future v1.x can add `stderr_tail: Option<String>` to `ToolResult` if telemetry shows it's load-bearing for debugging.
 
 This mapping is what `RemoteSession::execute()` in RFD 0026 must also implement so that local + remote sandboxes produce indistinguishable `ToolResult` shapes downstream of the agent loop.
+
+#### Path virtualization — host ↔ guest path mapping
+
+The agent's tool calls today (`read`, `write`, `edit`, `grep`, `find`,
+`ls`, `bash`) accept absolute host paths like
+`/home/<user>/<project>/src/lib.rs`. Inside the guest those paths
+don't exist; only `/work` does. The microVM provider rewrites paths
+at the dispatch boundary so the model can keep using host-shaped
+absolute paths AND the guest worker still sees `/work`-shaped paths.
+
+**Model-visible cwd**: the prompt and tool docs continue to advertise
+the host-side absolute path of the user's session cwd as the working
+directory (so the model's chain-of-thought, file references, and
+diff hunks stay coherent across providers). The provider performs
+the translation; the model never sees `/work` in tool inputs or
+outputs.
+
+**Per-tool rewriting**:
+
+| Tool          | Inputs rewritten host→guest                          | Outputs rewritten guest→host                            |
+| ------------- | ---------------------------------------------------- | ------------------------------------------------------- |
+| `read`        | `path` field (`<host_cwd>/<rel>` → `/work/<rel>`)    | none (output is file content)                            |
+| `write`       | `path` field, identical to read                      | none                                                     |
+| `edit`        | `path` field, identical to read                      | error messages with paths get the inverse rewrite        |
+| `grep`        | `path` field (search root)                           | each matching line's path prefix gets the inverse rewrite |
+| `find`        | `path` field                                         | each result path gets the inverse rewrite                |
+| `ls`          | `path` field                                         | none (output is filenames, no directory prefix)          |
+| `bash`        | `cwd` field (and best-effort substring rewrite of the command if it literally contains `<host_cwd>`); see below | best-effort substring rewrite of stdout/stderr if `<host_cwd>` appears literally |
+
+**Canonicalization**: the provider canonicalises the input host path
+(symlink-resolve, absolute) before checking it lives beneath
+`<host_cwd>`. Paths outside the cwd are rejected with
+`ToolError::InvalidPath` BEFORE any rewriting — the rewrite logic
+never gets to see escape attempts.
+
+**`bash` contract**: shell commands are free-form, so the provider
+can't fully translate paths embedded inside them. The contract is:
+
+- The `cwd` parameter (if explicit) is rewritten host→guest;
+  otherwise the worker uses `/work`.
+- The command string is best-effort substring-rewritten: if it
+  contains the literal host cwd as a prefix-aligned substring (with
+  word boundaries to avoid clobbering `/home/work/...`), that
+  substring is replaced with `/work`. No deep parsing.
+- The model is documented (in the bash tool description) that under
+  microvm, the cwd is the user's session directory and absolute
+  paths to files inside the project resolve, but absolute paths
+  outside the project don't. (Same constraint as virtio-fs `local`
+  mode + the cfs-fs-server `--backend-root` jail in `managed` mode.)
+- `pwd` inside bash returns the host-side path (the worker injects
+  `PWD=<host_cwd>` into the bash environment) so the model's mental
+  model of cwd stays correct. Anyone running `realpath` on a relative
+  path gets the host path back.
+
+**Why not just expose `/work` to the model**: tested empirically
+on local-process: when the model sees `/work/src/lib.rs` instead of
+`/home/<user>/.../src/lib.rs` in the prompt, its diff suggestions
+and "open this file in your editor" pointers are wrong host-side.
+Path virtualization keeps the model's externally-visible state
+consistent across providers.
 
 #### Filesystem semantics — `/work` read-write (transport split per OS)
 
@@ -1585,6 +1657,24 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.19 (2026-05-04):** rfd-critic v0.18 pass found 2 critical
+  issues. (1) Genuinely substantive missing piece: **path
+  virtualization**. The agent's tools accept absolute host paths
+  like `/home/<user>/proj/src/lib.rs`, but inside the guest only
+  `/work` exists. New §"Path virtualization" subsection added
+  before §"Filesystem semantics": per-tool host↔guest path rewrite
+  table, canonicalization rules (resolve-symlinks + beneath-`<host_cwd>`
+  enforced BEFORE rewrite), explicit model-visible cwd contract
+  (still the host path, never `/work`), and the `bash` contract
+  (cwd parameter rewritten; command string best-effort
+  substring-rewritten with word-boundary to avoid clobbering;
+  PWD env injected so `pwd` returns host path inside the guest).
+  (2) `MicroVmProvider::execute_tool()` sample now always releases
+  the VM (no more silent `vm.release().await.ok()` only on success
+  path) with an explicit `ExecuteOutcomeHint` derived from the
+  execute result: `Clean` → return to pool (incl. CallLimit
+  timeouts since the guest's still consistent); other errors →
+  `SuspectGuestState` → destroy.
 - **v0.18 (2026-05-04):** rfd-critic v0.17 pass found 3 critical
   issues. All small, all closed. (1) `ToolResult.display` corrected
   to `Option<serde_json::Value>` (the actual shape on `main`,
