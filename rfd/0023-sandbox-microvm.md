@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.10)
+- **Status:** Discussion (v0.11)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -54,6 +54,31 @@ Audit of `pi-tools/Cargo.toml` shows `pi-ai.workspace = true` and `reqwest.works
 Estimated impact: ~600 LoC moved, no behavior change. Fully reversible.
 
 **`pi-tool-types` becomes a stable public ABI** by virtue of being on the wire protocol AND in the host-side tool API. Field additions to `ToolResult`/`ToolSpec` after Commit A1 are breaking changes that must bump the crate's MAJOR version and the wire-protocol version in lockstep. Acknowledged here so future-us doesn't blunder.
+
+### Tool dispatch boundary — runtime-native tools bypass `SandboxProvider`
+
+`SandboxProvider::execute_tool()` mediates **guest-buildable tools**
+only — the `pi-tools-core` set (`read`, `write`, `edit`, `bash`,
+`grep`, `find`, `ls`) plus host-direct exceptions (`web_search`).
+Runtime-native orchestration tools that drive the agent's outer
+loop never reach the SandboxProvider layer at all:
+
+- **`task`** (RFD 0005) — dispatches a subagent. The runtime owns
+  this; the spawned subagent is a fresh agent loop with its own
+  `SandboxProvider` (typically inheriting the parent's `Arc`).
+- Future runtime-native tools that compose multi-tool workflows
+  (e.g. an `apply_plan` tool, an `evolve_tick` tool) similarly
+  bypass.
+
+The runtime dispatcher checks `tool.is_runtime_native()` BEFORE
+calling `SandboxProvider::execute_tool`. The provider's
+`execute_tool` body asserts this with a `debug_assert!` for
+defense-in-depth; any runtime-native tool reaching the provider is a
+runtime bug, not a sandbox concern.
+
+The §"Tool availability under `microvm`" matrix below covers only
+the tools a `SandboxProvider` actually sees: `monitor`, `web_search`,
+and the seven `pi-tools-core` guest tools.
 
 ### Tool availability under `microvm` — `monitor` AND `web_search` excluded
 
@@ -376,6 +401,15 @@ impl SandboxProvider for MicroVmProvider {
         tool_name: &str,
         tool_input: &serde_json::Value,
     ) -> Result<SandboxOutcome, SandboxError> {
+        // Runtime-native orchestration tools (task / subagent — anything
+        // that drives the agent's outer loop, per RFD 0005) bypass
+        // SandboxProvider entirely BEFORE we get here. The runtime
+        // dispatcher checks `tool.is_runtime_native()` first and never
+        // calls SandboxProvider::execute_tool for those. We assert
+        // it as a defense-in-depth invariant; reaching this branch is
+        // a runtime bug, not a sandbox concern.
+        debug_assert!(!is_runtime_native_tool(tool_name),
+            "runtime-native {tool_name} should never reach SandboxProvider");
         // monitor: incompatible with one-shot RPC, see §"Tool availability".
         if tool_name == "monitor" {
             return Err(SandboxError::ToolUnavailable {
@@ -1127,7 +1161,7 @@ A real probe takes 50–200ms, not 10ms — the time accounts for the actual fil
 `microvm` defends against:
 
 - **Malicious model output executing arbitrary host commands.** A model that is jailbroken or prompt-injected emits `bash` calls; the guest contains the blast radius (no host fs outside `/work`, no network, killed on timeout).
-- **Tool input crafted to escape the sandbox.** Path traversal in `read`/`write`/`edit` is rejected by the guest worker; the host-side cwd boundary is enforced by `cfs-fs-server`'s `--backend-root` clamp on Linux/Firecracker, or by virtio-fs's mount-rooted scope on macOS/vfkit and Windows/cloud-hypervisor.
+- **Tool input crafted to escape the sandbox.** Path traversal via absolute paths or `..` segments in `read`/`write`/`edit` is rejected by the guest worker. Host-side cwd boundary enforcement is **strong on Linux/Firecracker** (`cfs-fs-server --backend-root` does symlink-resolve-beneath: every path operation is canonicalised under the backend root, and a symlink whose target escapes the root is rejected). On **macOS/vfkit** and **Windows/cloud-hypervisor** v1, virtio-fs's mount-rooted scope only blocks paths that escape via the FUSE namespace; a symlink already inside `/work` that points outside (e.g. `/work/escape -> /etc`) is followed by virtio-fs without a beneath-root check. **v1 limitation, documented**: on those platforms the agent can theoretically read/write outside `/work` via a pre-existing symlink in the host cwd. v1.1 adds explicit resolve-beneath in the worker on those platforms; until then, operators on macOS/Windows should not microvm-sandbox sessions where the host cwd contains adversarially-placed symlinks.
 - **Resource exhaustion.** `ResourceLimits` caps memory, vCPUs, disk, wall time.
 
 `microvm` does **not** defend against:
@@ -1138,7 +1172,20 @@ A real probe takes 50–200ms, not 10ms — the time accounts for the actual fil
 
 **Rootfs contents are public knowledge.** The alpine image, busybox version, the `pi-sandbox-worker` binary itself — all of it is observable to a jailbroken model running `cat /etc/os-release` or `cat /etc/passwd` inside the guest. Do **not** bake credentials, tokens, or per-user state into the rootfs. The rootfs is a single artifact shared by every pi user worldwide; treat it like a pre-built docker image.
 
-**Guest tooling is busybox, not GNU coreutils.** `bash` calls run under busybox `ash`, not real bash. Subtle option drift: `find -printf`, `grep -P`, `ls --color=auto`, GNU-specific tar flags, etc. behave differently. v1.0 ships with a known-incompatibility list in the docs. Users with GNU-specific scripts can pin `--sandbox-provider=local-process` for those sessions. A future RFD can offer a glibc-based rootfs as an opt-in pin (`microvm:firecracker:rootfs=glibc-debian`) if telemetry shows the friction is widespread.
+**Guest userland: real Bash, busybox for the rest.** The `bash` tool's
+contract MUST be preserved across providers (model behavior depends
+on it). The guest rootfs ships **real Bash** as `/bin/bash` (the
+`bash-static-musl` 5.x release, ~1.5 MiB statically linked); the
+worker's `bash` tool dispatcher invokes `/bin/bash`, never busybox
+`ash`. The rest of the userland (coreutils-like) IS busybox to keep
+the rootfs small — so `find`, `grep`, `ls`, `cat`, etc. have busybox
+quirks: `find -printf`, `grep -P`, `ls --color=auto`, GNU-specific
+tar flags, etc. behave differently. v1.0 ships with a
+known-incompatibility list in the docs covering only the busybox
+side; the `bash` tool itself is unchanged. Users hitting busybox
+friction can pin `--sandbox-provider=local-process`; a future RFD
+can offer a glibc/coreutils rootfs as an opt-in pin
+(`microvm:firecracker:rootfs=glibc-debian`).
 
 **ContextFS-specific threats (Linux Stage 1, added v0.6).** The §3.5
 integration introduces new threat categories beyond plain virtio-fs:
@@ -1296,6 +1343,26 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.11 (2026-05-04):** rfd-critic v0.10 pass found 3 critical
+  issues. Closed all of them. (1) New §"Tool dispatch boundary"
+  subsection: runtime-native orchestration tools (`task` from
+  RFD 0005, future `apply_plan`/`evolve_tick` etc.) bypass
+  `SandboxProvider::execute_tool` BEFORE provider dispatch. The
+  runtime checks `tool.is_runtime_native()` first; SandboxProvider
+  only sees guest-buildable tools + host-direct exceptions
+  (`web_search`). The provider sample asserts this with a
+  `debug_assert!`. (2) §6 threat-model claim about virtio-fs
+  cwd-confinement softened to the truth: on Linux/Firecracker (with
+  `cfs-fs-server --backend-root`) we DO get symlink-resolve-beneath;
+  on macOS/vfkit and Windows/cloud-hypervisor we do NOT — a symlink
+  pre-placed in `/work` pointing outside is followed by virtio-fs.
+  Documented as a v1 limitation; v1.1 adds resolve-beneath in the
+  worker on those platforms. (3) §6 "busybox userland" claim flipped:
+  the guest rootfs SHIPS real Bash (statically-linked
+  `bash-static-musl`, ~1.5 MiB) so the `bash` tool's contract is
+  preserved across providers. Only the coreutils-like commands
+  (`find`/`grep`/`ls`/etc.) remain busybox; the known-incompat list
+  shrinks to those.
 - **v0.10 (2026-05-04):** rfd-critic v0.9 pass found 3 critical issues
   + sweep gaps. Closed all of them. (1) `SandboxOutcome` is now defined
   ONCE: `{ tool_result, execution, telemetry }`. The earlier
