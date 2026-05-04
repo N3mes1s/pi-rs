@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.28)
+- **Status:** Discussion (v0.29)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -227,12 +227,31 @@ let advertised_tools: Vec<&Tool> = self.tools.iter()
 includes an unavailable tool: **strip-with-warning** (the v1
 default). The agent runs with the filtered list, and the runtime
 emits a one-line `tool_filtered_out` event to the session JSONL
-(seen by `pi-stats`) plus a stderr banner on the first filter event
-per session. Operators with strict-mode tenants can opt into
-**fail-fast** via `[task] on_unavailable_tool = "fail-fast"` in the
-campaign or settings.json — at session start, if any allowlisted
-tool is `Unavailable` under the active provider, the agent aborts
-with `AgentError::ToolUnavailable` before the first turn.
+plus a stderr banner on the first filter event per session.
+Operators with strict-mode tenants can opt into **fail-fast** via
+`[task] on_unavailable_tool = "fail-fast"` in the campaign or
+settings.json — at session start, if any allowlisted tool is
+`Unavailable` under the active provider, the agent aborts with
+`AgentError::ToolUnavailable` before the first turn.
+
+The session event is a new variant on `SessionEntryKind`:
+
+```rust
+// pi-agent-core::session_log
+SessionEntryKind::ToolFilteredOut {
+    agent: String,             // e.g. "code-reviewer" — agent definition name
+    tool: String,              // the filtered tool name, e.g. "lsp"
+    provider: String,          // active provider, e.g. "microvm"
+    reason: String,            // e.g. "Unavailable under provider 'microvm'"
+}
+```
+
+Example JSONL line:
+```json
+{"ts":"2026-05-04T18:42:11Z","kind":"tool_filtered_out","agent":"code-reviewer","tool":"lsp","provider":"microvm","reason":"Unavailable under provider 'microvm'"}
+```
+
+`pi-stats::ingest` does **not** ship a SQLite column for this event in v1; it's session-JSONL-only. Operators can already grep / `jq` for `kind == "tool_filtered_out"` rows, and the count is low enough (per-agent-startup, not per-call) that aggregation isn't load-bearing yet. v1.1 may add a `tool_filtered_out` table if telemetry shows demand.
 
 This is also a NEW API (Commit G ships it). The default
 implementation keeps `LocalProcessProvider` behavior unchanged.
@@ -556,13 +575,16 @@ pub trait VmHandle: Send + Sync {
         tool_input: &serde_json::Value,
     ) -> Result<VmExecution, ExecuteError>;
 
-    /// Release the VM. v1.0 in pooled mode = return to pool;
-    /// non-pooled = shutdown. Best-effort: errors are logged but
-    /// do not propagate. Pool hygiene rule: VMs released after a
-    /// non-trivial `ExecuteError` (e.g. tool panic, RPC failure)
-    /// are **destroyed** rather than returned to the pool, to
-    /// bound the leak from corrupt guest state.
-    async fn release(self: Box<Self>, exec_outcome: ExecuteOutcomeHint);
+    /// Release the VM. Returns a structured `ReleaseOutcome` so the
+    /// caller can record the actual pool-vs-destroy decision and
+    /// (when applicable) the reset-choreography result on the
+    /// telemetry row. v1.0 in pooled mode = return to pool on
+    /// `ExecuteOutcomeHint::Clean` AND a successful reset;
+    /// non-pooled or any other input = shutdown. Errors during
+    /// release are surfaced via `ReleaseOutcome.reset_status` /
+    /// `reason`, not via panic — release is the cleanup path and
+    /// must not unwind.
+    async fn release(self: Box<Self>, exec_outcome: ExecuteOutcomeHint) -> ReleaseOutcome;
 
     /// Synchronous best-effort teardown. Used **only** by
     /// `ReleaseGuard::Drop` when no tokio runtime is available
@@ -589,11 +611,41 @@ pub trait VmHandle: Send + Sync {
 }
 
 /// Hint to `release()` so the launcher can decide pool-vs-destroy.
+/// **Note:** `Clean` is a *necessary* condition for pool return,
+/// not sufficient. Actual pool reuse requires the launcher's
+/// per-call reset choreography (§"Post-call hygiene") to succeed
+/// AND the worker to reconnect on the data-plane vsock port. The
+/// final disposition is reported on `ReleaseOutcome`.
 pub enum ExecuteOutcomeHint {
-    Clean,                              // success or benign error → return to pool
+    Clean,                              // pre-reset hygiene + tool success → eligible for pool return iff reset succeeds
     SuspectGuestState,                  // tool panic / RPC midstream → destroy
     Cancelled,                          // ctx cancellation → destroy (state unknown)
 }
+
+/// Structured result of `release()`, recorded on the telemetry row
+/// so operators can see which calls actually warmed the pool, which
+/// destroyed VMs because of suspect state, and which destroyed
+/// because the launcher-side reset choreography failed.
+pub struct ReleaseOutcome {
+    /// Did this VM survive into the warm pool, or was it destroyed?
+    pub pool_disposition: PoolDisposition,
+    /// Outcome of the per-call filesystem-reset choreography. `NotApplicable`
+    /// for destroy-only paths (macOS/Windows v1, suspect/cancelled
+    /// releases — those don't try to reset, they just kill the VM).
+    pub reset_status: ResetStatus,
+    /// Short human-readable reason; populated only when the
+    /// disposition was non-default. Surfaces in `pi sandbox doctor
+    /// --recent` and in session-log post-mortems.
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolDisposition { ReturnedToPool, Destroyed }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetStatus { Ok, Failed, NotApplicable }
 
 pub struct VmExecution {
     /// Model-facing tool result (matches the inline path's shape;
@@ -683,7 +735,7 @@ pub struct MicroVmProvider {
 ///
 /// **Single source of truth for host-bound classification.**
 /// `MicroVmProvider::tool_disposition(name)` returns
-/// `ToolDispatchClass::HostDirect` **iff** `host_tools.is_host_bound(name)`
+/// `SandboxToolDisposition::HostDirect` **iff** `host_tools.is_host_bound(name)`
 /// returns true. The provider implementation calls
 /// `host_tools.is_host_bound(name)` to derive `tool_disposition()`,
 /// not a separate const list. A unit test in
@@ -833,7 +885,7 @@ impl SandboxProvider for MicroVmProvider {
         // compose_outcome: Clean iff BOTH inputs are Clean; otherwise
         // SuspectGuestState. Cancelled propagates separately via
         // ReleaseGuard::Drop.
-        guard.release(outcome_hint).await;  // disarms Drop; awaits the actual release
+        let release_outcome = guard.release(outcome_hint).await;  // disarms Drop; structured result
         let exec = exec_result.map_err(SandboxError::Execute)?;
         Ok(SandboxOutcome {
             tool_result: exec.tool_result,
@@ -846,6 +898,9 @@ impl SandboxProvider for MicroVmProvider {
                 guest_duration_ms: Some(exec.guest_duration_ms),
                 cold_boot: Some(exec.cold_boot),
                 cost_usd: None,
+                pool_disposition: Some(release_outcome.pool_disposition),
+                reset_status: Some(release_outcome.reset_status),
+                release_reason: release_outcome.reason,
             },
         })
     }
@@ -949,12 +1004,26 @@ pub struct SandboxTelemetry {
     pub guest_duration_ms: Option<u32>,
     pub cold_boot: Option<bool>,
     pub cost_usd: Option<f64>,           // remote-backend per-call billing
+    /// Did the VM survive into the warm pool, or was it destroyed?
+    /// Set from `ReleaseOutcome.pool_disposition`. None for
+    /// host-direct and local-process (no VM).
+    pub pool_disposition: Option<PoolDisposition>,
+    /// Outcome of the per-call filesystem-reset choreography
+    /// (§"Post-call hygiene"). Set from `ReleaseOutcome.reset_status`.
+    /// None for host-direct, local-process, and macOS/Windows v1
+    /// (destroy-only paths skip reset entirely).
+    pub reset_status: Option<ResetStatus>,
+    /// Short human-readable reason; populated only when the
+    /// disposition was non-default (destroy due to suspect state,
+    /// reset failure, etc.).
+    pub release_reason: Option<String>,
 }
 ```
 
 The pool ownership rule is **the launcher owns the pool**. This means:
 
 - One `MicroVmProvider` instance ↔ one launcher instance ↔ one pool.
+- **Caveat for `host_cwd`-keyed isolation:** `BootSpec.host_cwd` partitions warm rings only when the runtime actually supplies *different* cwds for different subagents. On `main` today, `crates/pi-coding-agent/src/native/task/tool.rs` warns that `isolated=true` is a no-op; `task` invocations all inherit the parent's cwd. Until RFD 0006's worktree wiring is active in the task executor, the partition key collapses to one ring per provider — which is correct from the RFD's perspective but defeats the intended cross-subagent isolation in practice. Documented so operators know what protection they actually have today.
 - Subagents that inherit the parent's `Arc<dyn SandboxProvider>` (via `RuntimeConfig.sandbox_provider`) **share that pool**. The pool is normatively keyed by `BootSpec` — implementation is equivalent to `tokio::sync::Mutex<HashMap<BootSpec, VecDeque<WarmVm>>>`. Acquire looks up the warm-VM ring for the requesting `BootSpec`; release puts it back into the same ring. Two subagents with different `BootSpec`s (different `host_cwd` per RFD 0006 worktree, different `env_hash`, etc.) NEVER share a warm VM. If the matching ring is empty, the launcher cold-boots an ad-hoc VM for that `BootSpec`.
 - A user who wants **per-subagent pool isolation** must construct a fresh `MicroVmProvider` for each subagent runtime — explicit, not implicit. Halo's RFD 0025 supervisor will configure this; documented in the halo integration notes.
 
@@ -980,6 +1049,12 @@ SandboxAction {
     guest_duration_ms: Option<u32>,    // measured INSIDE the guest (Some for microvm-guest; None for host-direct, local-process, remote)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cold_boot: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pool_disposition: Option<PoolDisposition>,  // returned_to_pool | destroyed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reset_status: Option<ResetStatus>,          // ok | failed | not_applicable
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_reason: Option<String>,             // populated only on non-default dispositions
     // NEW (RFD 0026 — remote):
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cost_usd: Option<f64>,
@@ -988,9 +1063,11 @@ SandboxAction {
 }
 ```
 
-The new fields are added as an **amendment to RFD 0022** (which is currently marked Implemented v1.0 — adding optional fields is non-breaking; existing telemetry rows deserialize fine because of `#[serde(default)]`). RFD 0022's revision history will be appended with an `(amended by RFDs 0023 + 0026)` note when those RFDs land. `pi-stats::ingest` adds the following nullable columns to the `sandbox_actions` SQLite table — one per new struct field: `launcher TEXT`, `dispatch_path TEXT`, `acquire_to_ready_ms INTEGER`, `guest_duration_ms INTEGER`, `cold_boot INTEGER`, `cost_usd REAL`, `round_trip_ms INTEGER`.
+The new fields are added as an **amendment to RFD 0022** (which is currently marked Implemented v1.0 — adding optional fields is non-breaking; existing telemetry rows deserialize fine because of `#[serde(default)]`). RFD 0022's revision history will be appended with an `(amended by RFDs 0023 + 0026)` note when those RFDs land. `pi-stats::ingest` adds the following nullable columns to the `sandbox_actions` SQLite table — one per new struct field: `launcher TEXT`, `dispatch_path TEXT`, `acquire_to_ready_ms INTEGER`, `guest_duration_ms INTEGER`, `cold_boot INTEGER`, `pool_disposition TEXT`, `reset_status TEXT`, `release_reason TEXT`, `cost_usd REAL`, `round_trip_ms INTEGER`.
 
-**JSONL backward compatibility** — pre-amendment rows lack the new fields; `#[serde(default)]` makes them deserialize as `None`, and `pi-stats::ingest` writes `NULL` to the new columns. **Migration ordering**: schema migration (`ALTER TABLE sandbox_actions ADD COLUMN ...` × 7 new) MUST run before any pi binary speaking the new fields ingests rows; otherwise the binary will refuse to start with `schema_migration_required`. v1 ships an integration test (`tests/sandbox_action_compat.rs`) that loads a fixture of pre-amendment rows and asserts both the old binary's rows are still readable AND the new binary's rows have the new fields populated. The `provider` field already exists on the struct in RFD 0022 and is not new here.
+**JSONL backward compatibility** — pre-amendment rows lack the new fields; `#[serde(default)]` makes them deserialize as `None`, and `pi-stats::ingest` writes `NULL` to the new columns. **Migration ordering**: schema migration (`ALTER TABLE sandbox_actions ADD COLUMN ...` × 10 new) MUST run before any pi binary speaking the new fields ingests rows; otherwise the binary will refuse to start with `schema_migration_required`. v1 ships an integration test (`tests/sandbox_action_compat.rs`) that loads a fixture of pre-amendment rows and asserts both the old binary's rows are still readable AND the new binary's rows have the new fields populated. The `provider` field already exists on the struct in RFD 0022 and is not new here.
+
+**Public API impact.** Every consumer of `SandboxProvider` (the in-tree CLI; `pi-sdk` mocks, examples, and tests; downstream embedders against `pi-sdk`) needs to update for the new `release()` return type and `SandboxTelemetry` fields. A1's stable wire/ABI lift forecast accommodates exactly this: the trait change rides the next minor of `pi-sdk` (additive shape; matches `#[non_exhaustive]` already on the relevant types), and `pi-sdk`'s `MockSandboxProvider` returns a synthetic `ReleaseOutcome { pool_disposition: ReturnedToPool, reset_status: NotApplicable, reason: None }` so existing test code keeps compiling without touching call sites. RFD 0027 §H7's "additive only between minors" policy applies.
 
 ### 3. The local microVM contract
 
@@ -2017,6 +2094,33 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.29 (2026-05-04):** rfd-critic v0.28 pass: 1 critical
+  (release/reset telemetry not implementable as written) +
+  3 underspec. All real, all closed. Critical: §"Post-call
+  hygiene" promised `SandboxAction.outcome = "reset-failed"` and
+  tests asserting `outcome=SuspectGuestState`, but `release()`
+  returned `()` and `SandboxAction` had no field for it. Fix:
+  `release()` now returns `ReleaseOutcome { pool_disposition,
+  reset_status, reason }`; `SandboxTelemetry` and `SandboxAction`
+  gain three nullable fields (`pool_disposition: Option<PoolDisposition>`,
+  `reset_status: Option<ResetStatus>`, `release_reason: Option<String>`);
+  migration text + column count updated (× 10 new now).
+  `MicroVmProvider::execute_tool()` pseudocode threads
+  `release_outcome` into the telemetry row. Public API impact
+  paragraph added: pi-sdk's `MockSandboxProvider` returns a
+  synthetic `ReleaseOutcome` so existing test code keeps
+  compiling. Underspec: (a) `tool_filtered_out` event now has
+  an explicit `SessionEntryKind::ToolFilteredOut` definition
+  with field shapes + sample JSONL line; v1 is JSONL-only, no
+  SQLite column. (b) Pool-partitioning caveat added: today's
+  `task` tool warns `isolated=true` is a no-op, so per-subagent
+  `host_cwd` rings only kick in once RFD 0006 wiring is active
+  in the task executor. (c) `ExecuteOutcomeHint::Clean` doc
+  clarified — it's a *necessary* condition for pool return,
+  not sufficient; final disposition lives on `ReleaseOutcome`.
+  Trivia: `ToolDispatchClass::HostDirect` typo →
+  `SandboxToolDisposition::HostDirect` in the host-tools
+  source-of-truth comment.
 - **v0.28 (2026-05-04):** rfd-critic v0.27 pass: 2 critical
   (FS reset mechanism not technically believable; timeout policy
   contradicted itself) + 4 small. Both criticals real and closed.
