@@ -43,8 +43,22 @@ use crate::cache::{RootfsCache, ROOTFS_SHA256, ROOTFS_SIZE_BYTES, ROOTFS_URL, RO
 
 // ── Pool rotation limits ────────────────────────────────────────────────────
 
-/// A VM is retired after this many tool calls (bounds state leakage).
-const MAX_CALLS: u32 = 50;
+/// Default per-VM call count before retirement (bounds state leakage).
+/// Overridable via `PI_SANDBOX_FC_MAX_CALLS` — set to `1` for full
+/// per-call reset (every tool call cold-boots a fresh VM, ~1s
+/// overhead but a guaranteed-pristine overlay upper, no leftover
+/// processes, no stale routing/nft state). Per RFD 0023 §"Post-call
+/// hygiene" the proper sub-second alternative is `pi-vm-reset` +
+/// overlay re-mount; this knob is the simple "destroy the VM"
+/// alternative until that lands.
+const DEFAULT_MAX_CALLS: u32 = 50;
+fn max_calls() -> u32 {
+    std::env::var("PI_SANDBOX_FC_MAX_CALLS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(DEFAULT_MAX_CALLS)
+}
 /// A VM is retired after this much wall time (bounds state leakage).
 const MAX_AGE: Duration = Duration::from_secs(5 * 60);
 /// Default warm pool size.
@@ -199,7 +213,7 @@ struct WarmVm {
 
 impl WarmVm {
     fn is_expired(&self) -> bool {
-        self.call_count >= MAX_CALLS || self.born_at.elapsed() >= MAX_AGE
+        self.call_count >= max_calls() || self.born_at.elapsed() >= MAX_AGE
     }
 }
 
@@ -669,7 +683,7 @@ impl VmHandle for FirecrackerVmHandle {
     }
 
     async fn release(self: Box<Self>) -> Result<(), SandboxError> {
-        let expired = self.call_count.load(std::sync::atomic::Ordering::Relaxed) >= MAX_CALLS
+        let expired = self.call_count.load(std::sync::atomic::Ordering::Relaxed) >= max_calls()
             || self.born_at.elapsed() >= MAX_AGE;
 
         if expired {
@@ -1557,7 +1571,7 @@ mod tests {
                 vsock_path: PathBuf::from("/dev/null"),
                 _fc_proc: dummy_child(),
                 born_at: Instant::now(),
-                call_count: MAX_CALLS, // already at rotation cap
+                call_count: DEFAULT_MAX_CALLS, // already at rotation cap
                 ceiling: VmCeiling::default(),
                 host_cwd: PathBuf::from("/tmp"),
                 rootfs_version: "0.1.0".to_string(),

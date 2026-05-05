@@ -331,12 +331,22 @@ RFD 0023) or are read-only. So the practical effect is: each
 
 **What this does NOT cover** — the non-scratch overlay upper
 (writes to `/etc`, `/usr`, `/opt`, etc.) still persists across
-calls. Full reset requires the v1.1 RFD plan: `pi-cfs-init` as
-PID 1 + `pi-vm-reset` sibling agent + overlay re-mount with
-`move_mount` survival list + `pivot_root` into a fresh upper.
-Until that lands, the warm-pool retirement cap (50 calls or 5
-minutes per VM, whichever fires first) is the outer hygiene
-boundary.
+calls within ONE VM lifetime. There are two ways to bound that:
+
+1. **`PI_SANDBOX_FC_MAX_CALLS=1`** (works today) — every tool
+   call cold-boots a fresh VM. ~1s overhead per call but every
+   call gets a guaranteed-pristine overlay upper, no leftover
+   processes, no stale routing/nft state. Default is 50 (warm
+   pool reuse for performance).
+
+2. **`pi-vm-reset` agent** (v1.1, RFD 0023 §"Post-call hygiene")
+   — same logical reset in ~50ms via overlay re-mount with
+   `move_mount` survival list + `pivot_root` into a fresh
+   upper. Not yet implemented. The MAX_CALLS=1 knob is the
+   simple "destroy the VM" alternative until that lands.
+
+For the default 50-call window, the warm-pool retirement cap is
+the outer hygiene boundary.
 
 Verified by `tests/firecracker_per_call_hygiene.rs::tmp_is_wiped_between_tool_calls_in_same_vm`.
 
