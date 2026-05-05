@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.35 — bridge-daemon + child-only seccomp + reset-stable channel)
+- **Status:** Discussion (v0.36 — pi-cfs-init as sole PID 1, narrowed seccomp)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -339,14 +339,23 @@ One JSON line per direction, `\n`-framed.
 **Topology — three actors, two hops, every vsock host-initiated:**
 
 ```
-[ host ] -- vsock 5003 (host-initiated) -- [ pi-vm-search-bridge ] -- /run/pi-search-bridge.sock (UDS, 0o600) -- [ pi-sandbox-worker ]
-   ^                                       (PID 1 / reset-stable)                                                  (re-execed by reset)
-   |
+[ host ] -- vsock 5003 (host-initiated) -- [ pi-vm-search-bridge ]  -- /run/pi-search-bridge.sock --  [ pi-sandbox-worker ]
+   ^                                       (long-lived child of                                       (re-execed by reset;
+   |                                        PID 1 = pi-cfs-init)                                       short-lived UDS client)
    per-VM async task in `pi-sandbox`
    (host's pi-tools-net + rate limit)
 ```
 
-1. **Guest-side bridge daemon (`pi-vm-search-bridge`)** is a tiny statically compiled helper (~80 LoC, owned by Commit B alongside the rootfs init wrapper). It runs as PID 1 in the rootfs init chain — that is, it's launched by `/init` and survives the reset choreography's `pivot_root` because it lives in / and is moved into the new root by the reset agent (§"Post-call hygiene" item 3). Its job: (a) accept the host-initiated connection on guest vsock port `VSOCK_SEARCH_PROXY_PORT = 5003`, (b) listen on a Unix-domain socket at `/run/pi-search-bridge.sock` (mode `0o600`, owned by `pi-worker:pi-worker` UID/GID), (c) forward UDS↔vsock framed `WebSearchRequest`/`WebSearchResponse` lines, (d) survive worker re-exec.
+**Guest process tree (canonical, normative).** `/init` execs `pi-cfs-init`; `pi-cfs-init` is the **sole PID 1**. It:
+1. Performs the contextfs/virtio-fs setup described in §3.5.9 (Linux/Firecracker managed mode) or the simpler virtio-fs setup (macOS/Windows v1).
+2. Launches `pi-vm-search-bridge` as a long-lived child and remembers its PID.
+3. Launches `pi-sandbox-worker` (also as a child of PID 1) and remembers its PID.
+4. Reaps zombies, supervises both children. If `pi-vm-search-bridge` exits unexpectedly, `pi-cfs-init` writes `PI_FAIL: search-bridge-died exit=<N>` to the serial console and exits non-zero (the host's launcher reads this and destroys the VM — same pattern as boot/reset failures). The bridge is not auto-restarted in v1: a dead bridge means the search channel is gone and any in-flight `web_search` is unrecoverable, so destroy-and-replace is the right policy.
+5. On reset, `pi-cfs-init` is asked by `pi-vm-reset` (the reset agent — also a child of PID 1, spawned from `pi-cfs-init` on demand) to terminate and re-spawn the worker after `pivot_root`. The bridge child is preserved across `pivot_root` by `move_mount`-ing its `/run` mount into the new root and not killing it. After `pivot_root` completes, `pi-cfs-init` exec-replaces the worker; the bridge keeps its open vsock connection and its UDS listener untouched.
+
+This makes ownership unambiguous: PID 1 is `pi-cfs-init`. The bridge and worker are both its children. The reset agent is also its child. No actor is "PID 1 / reset-stable" outside of `pi-cfs-init` itself.
+
+**Bridge daemon (`pi-vm-search-bridge`)** — a tiny statically compiled helper (~80 LoC, owned by Commit B alongside the rootfs init). Its job: (a) accept the host-initiated connection on guest vsock port `VSOCK_SEARCH_PROXY_PORT = 5003`, (b) listen on a Unix-domain socket at `/run/pi-search-bridge.sock` (mode `0o600`, owned by `pi-worker:pi-worker` UID/GID), (c) forward UDS↔vsock framed `WebSearchRequest`/`WebSearchResponse` lines.
 2. **Worker side** is stateless w.r.t. the channel. The worker's `web_search` handler does `connect("/run/pi-search-bridge.sock")` per call, writes one `WebSearchRequest`, reads one `WebSearchResponse`, closes. No long-lived fds in the worker; no fd-inheritance leak to bash subprocesses (UDS path is mode `0o600` owned by `pi-worker`, and `bash` runs under a different UID — see "Bash-can't-bypass" defense below).
 3. **Host side**: at acquire time, after the main vsock to guest port 5001 succeeds, the launcher opens a *second* vsock connection to guest port 5003 (host-initiated, matches main protocol's pattern, avoids the macOS vfkit host-listen quirk). It hands the connected socket to a per-VM async task inside the pi binary process. The task reads `WebSearchRequest`, calls `pi-tools-net::web_search` with host-side auth, writes `WebSearchResponse`. Per-VM rate-limit state (default 30 calls / 60s, configurable). Multiple in-flight calls multiplex through the channel in serialise-then-respond order; v1 enforces one-in-flight-per-VM with a queue inside the bridge daemon (concurrent searches inside one VM are rare and serialise cleanly).
 
@@ -355,6 +364,18 @@ One JSON line per direction, `\n`-framed.
 **No separate host binary.** The host-side handler lives inside the existing pi binary; same auth context, same process. No `pi-host-search-proxy` external dependency.
 
 **Cancellation semantics.** If the worker's tool-level wall_timeout fires while a `web_search` call's HTTP round-trip is still outstanding on the host: the worker returns its 124-style timeout `ToolResult` to the agent loop and drops its UDS connection. The bridge daemon notices the UDS half-close and abandons the in-flight pair — the `WebSearchResponse` from the host (when it eventually arrives) is read and discarded by the bridge. The host-side async task itself completes naturally when its Tokio task is dropped (which happens on `release()` for a destroyed VM, or when the next request finishes for a pool-returned VM); HTTP cancellation on the host side rides `reqwest`'s drop semantics. No leaked outstanding HTTP requests.
+
+**Queue / backpressure semantics.** The bridge daemon serialises searches: one in-flight per VM. If a second `web_search` arrives at the bridge UDS while a first is still in flight, the bridge:
+
+1. Accepts the second UDS connection (so the worker doesn't block in `connect()`).
+2. Holds it in a per-VM FIFO queue.
+3. Processes it only after the first request's `WebSearchResponse` has been written back to the first caller.
+
+Queue depth is bounded at **2** (one in-flight + one waiting). A third concurrent caller hits "queue full" and the bridge writes back `WebSearchResponse { call_id, results: [], error: Some("search-busy: another search is in flight") }` immediately, then closes that UDS connection. The worker turns this into a normal `ToolResult { is_error: true, model_output: "[search-error] busy: another search is in flight; retry in a moment" }` — the call did execute, it just got a busy signal.
+
+If the second caller's tool wall_timeout fires while it's still queued: the worker's UDS-side drop is observed by the bridge (UDS half-close in the queued slot), and the bridge dequeues it without ever forwarding to the host. The first call continues unaffected; the second sees the worker's normal 124-timeout `ToolResult`. **In practice**, agents rarely issue concurrent `web_search` calls in a single VM (the typical pattern is sequential search-then-act); the queue exists for correctness, not throughput.
+
+**Bridge-failure detection.** If `pi-vm-search-bridge` exits unexpectedly (segfault, OOM, unhandled error), `pi-cfs-init` (PID 1) catches the SIGCHLD, writes `PI_FAIL: search-bridge-died exit=<N>` to the serial console, and exits non-zero. The host launcher reads this and destroys the VM (no auto-restart in v1: a dead bridge means an in-flight search is unrecoverable, and destroy-and-replace is the right policy). Any concurrent `web_search` call in the worker times out via the channel-drop path described under "Error mapping".
 
 **Why this is materially better than v0.32 host-direct:**
 
@@ -368,14 +389,16 @@ One JSON line per direction, `\n`-framed.
 
 *Layer 1 — UID separation + UDS permissions:* the worker runs as `pi-worker:pi-worker`, `bash` (and any other tool subprocess) runs as `pi-tool:pi-tool` (a separate, unprivileged UID). The bridge daemon's UDS at `/run/pi-search-bridge.sock` is mode `0o600` owned by `pi-worker:pi-worker`, so `bash` cannot `connect()` to it (POSIX-level rejection). This is the primary defense.
 
-*Layer 2 — seccomp on the bash spawn (closes the residual `AF_VSOCK` direct connect):* `vsock` is a process-family socket. Even with UID separation, a malicious `bash` could in principle `socket(AF_VSOCK, ...)` and try to reach the host directly bypassing the bridge UDS entirely. The worker's bash-spawn pre-exec hook closes this. The mechanism MUST be:
+*Layer 2 — seccomp on the bash spawn (closes the residual `AF_VSOCK` direct creation path):* `vsock` is a process-family socket. Even with UID separation, a malicious `bash` could in principle `socket(AF_VSOCK, ...)` and try to reach the host directly bypassing the bridge UDS entirely. The worker's bash-spawn pre-exec hook closes this. The mechanism MUST be:
 
 - Worker `fork()`s; in the **child only**, between fork and `execve()`:
   1. `prctl(PR_SET_NO_NEW_PRIVS, 1)`.
-  2. `seccomp(SECCOMP_SET_MODE_FILTER)` installs a BPF program that returns `SECCOMP_RET_ERRNO(EAFNOSUPPORT)` for `socket(AF_VSOCK, ...)`, `socketpair(AF_VSOCK, ...)`, and `bind`/`connect`/`listen` on `AF_VSOCK` family sockets.
+  2. `seccomp(SECCOMP_SET_MODE_FILTER)` installs a BPF program that returns `SECCOMP_RET_ERRNO(EAFNOSUPPORT)` for **`socket(AF_VSOCK, ...)`** and **`socketpair(AF_VSOCK, ...)`**. These are the only syscalls where the family lives in a register and seccomp-bpf can match it directly. `connect`/`bind`/`listen` take a `sockaddr *` userspace pointer that seccomp **cannot** dereference, so we deliberately do NOT try to filter them — there's no need: if `socket(AF_VSOCK, ...)` is denied, the child has no way to obtain a vsock fd in the first place. Pure socket()/socketpair() filtering is sufficient, and is also what `bpf-helpers(7)`-style sandboxes can actually enforce. (Earlier drafts implied seccomp could filter on fd's underlying family on `connect`; that was wrong.)
   3. `setresuid(pi_tool_uid, pi_tool_uid, pi_tool_uid)` + `setresgid(...)` to drop privileges.
   4. `execve("bash", ...)`.
 - The worker process (the parent) **never** installs the filter on itself — it stays free to talk to vsock and to `/run/pi-search-bridge.sock`. The "exempt itself" wording in earlier drafts was mechanically wrong; the correct primitive is "child-only pre-exec hardening". This is what `nix::unistd::Command::pre_exec` exposes in Rust.
+
+Layer 2 is a **guest-Linux** defense (the bash subprocess always runs in the Linux guest rootfs regardless of which launcher booted the VM). It applies uniformly across Firecracker / vfkit / cloud-hypervisor as long as the guest kernel ships `CONFIG_SECCOMP_FILTER`. The rootfs build (Commit B) already ships an alpine-based guest kernel with this enabled; `pi sandbox doctor` checks the guest kernel config at probe time and fails loud on any launcher whose kernel image lacks the option.
 
 **FD-inheritance hygiene (normative).** All fds the worker holds for sandbox-internal channels — vsock 5001 main, vsock 5002 reset control (held by reset agent, not worker), the UDS client connection to `/run/pi-search-bridge.sock` while a search is in flight — are opened with `FD_CLOEXEC` (`SOCK_CLOEXEC` on socket creation; `F_SETFD FD_CLOEXEC` on accept). Tool children spawned via `execve` therefore start with no inherited sandbox fds. A negative test (`tests/fd_isolation.rs`) runs `bash 'ls -l /proc/self/fd'` and asserts only stdin/stdout/stderr (and an explicit per-tool stdio set) appear; no vsock or sandbox UDS fd numbers leak in.
 
@@ -385,7 +408,7 @@ One JSON line per direction, `\n`-framed.
 - `bash 'ls -l /proc/self/fd'` asserts no sandbox fds leak (CLOEXEC layer).
 - `web_search → bash 'echo poison > /root/marker' → release(Clean)+reset → next acquire on same BootSpec → web_search` asserts second search still works AND no `/root/marker` survives (channel survives reset; fs reset works).
 
-**macOS/Windows status.** Layer 1 (UID separation + UDS perms) carries over directly. Layer 2 (seccomp) is Linux-only. Until vfkit and cloud-hypervisor launchers ship an equivalent (sandbox profiles on macOS, AppContainer/Job-object restrictions on Windows), `web_search` on those platforms relies on Layer 1 alone and is documented as such. The `pi sandbox doctor` output flags this gap explicitly when probing those launchers. v1.1 lifts the gap.
+**Cross-launcher status.** Both Layers 1 and 2 are **guest-side** defenses inside the Linux rootfs and apply identically regardless of which host launcher (Firecracker on Linux, vfkit on macOS, cloud-hypervisor on Windows) booted the guest. There is no per-host-OS hardening gap: the bash subprocess is always confined inside the guest kernel, which always has `CONFIG_SECCOMP_FILTER`. The `pi sandbox doctor` probe verifies the guest kernel config and fails loud on any guest image without seccomp filter support — irrespective of the host.
 
 **Threat-model note (unchanged):** search-result content can include prompt-injection material. That's a content-injection concern the microVM does not address either way (a model on `local-process` reads the same results); orthogonal hardening track (per-result content filter / quarantine, separate RFD).
 
@@ -807,6 +830,18 @@ pub struct MicroVmProvider {
     /// reach; adding another "must-be-on-host" tool requires its
     /// own dedicated narrow vsock-proxied protocol.
     search_config: Arc<SearchConfig>,
+    /// Plan-time dispatch-class registry. Threaded from
+    /// `RuntimeConfig` at provider construction so the planner and
+    /// the provider's defense-in-depth assert (in `execute_tool`)
+    /// share one source of truth. Maps tool name →
+    /// `ToolDispatchClass`. Reaching the provider with a
+    /// `RuntimeNative` tool would be a runtime bug, not a sandbox
+    /// concern — the assert catches it.
+    dispatch_class_registry: Arc<dyn DispatchClassRegistry>,
+}
+
+pub trait DispatchClassRegistry: Send + Sync {
+    fn lookup(&self, tool_name: &str) -> ToolDispatchClass;
 }
 
 /// Per-provider config for the host-side search channel handler.
@@ -884,7 +919,8 @@ impl SandboxProvider for MicroVmProvider {
         }
         // No host-direct branch in v0.33+. web_search registers in
         // the guest worker as a regular tool; its handler proxies
-        // out via vsock to pi-host-search-proxy. From here, every
+        // out through the in-guest bridge daemon to the host's
+        // per-VM async task. From here, every
         // tool routes through the same guest dispatch path.
         let spec = self.spec_for(ctx);
         let limits = self.build_call_limits(ctx, tool_name);
@@ -1134,10 +1170,7 @@ The new fields are added as an **amendment to RFD 0022** (which is currently mar
 
 - alpine 3.19+ minirootfs as the base (~6 MB).
 - `pi-sandbox-worker` binary (statically linked against musl, ~6–8 MB) at `/usr/local/bin/pi-sandbox-worker`.
-- An init script at `/init` that:
-  1. mounts `/proc`, `/sys`, `/dev/vsock`. `/work` is mounted by `pi-cfs-init` as a contextfs FUSE filesystem on Linux Stage 1 (§3.5.9), or by the rootfs init script as a virtio-fs share on macOS/Windows v1.0.
-  2. parses `/proc/cmdline` for `pi.proto_version=N`; if mismatch, prints a fatal diagnostic to the serial console and halts.
-  3. execs `pi-sandbox-worker --vsock-port=5001`.
+- An init script at `/init` that mounts `/proc`, `/sys`, `/dev/vsock`, parses `/proc/cmdline` for `pi.proto_version=N` and halts on mismatch with a fatal diagnostic to the serial console, then **execs `pi-cfs-init`**. `pi-cfs-init` is the sole PID 1 and supervises every other process in the rootfs (see §"web_search via vsock proxy" — Guest process tree, and §3.5.9 — pi-cfs-init responsibilities). It launches `pi-vm-search-bridge` and `pi-sandbox-worker` as long-lived children, supervises both, and re-execs the worker on reset.
 - Versioned: `pi-sandbox-rootfs-vMAJOR.MINOR.PATCH.img.zst`. SHA256 published alongside the artifact.
 - Distributed as a CI release asset; downloaded on first sandbox use to `~/.cache/pi/sandbox/rootfs/<version>/rootfs.img`. Auto-upgraded in lockstep with the pi binary (the binary has the expected rootfs version baked in at build time; on mismatch with the cache, it auto-downloads with a progress bar and SHA256 verification).
 - Hackers can rebuild from `crates/pi-sandbox-rootfs/build.sh` (alpine miniroot tarball + busybox + cargo-built worker). `PI_SANDBOX_ROOTFS=/path` env override for offline use.
@@ -2130,7 +2163,7 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 1. **Cloud-hypervisor as unified launcher across all three OSes?** It supports KVM/Hypervisor.framework/WHPX in one binary. v1.0 picks best-of-breed (Firecracker on Linux, vfkit on macOS, cloud-hypervisor on Windows); revisit after one quarter of telemetry.
 2. ~~**Pool size default.**~~ **DECIDED, v0.3.** N=2 per `BootSpec` ring on Linux/Firecracker (memory: 2 × 256MB = 512MB resident; covers one parallel subagent burst). macOS/Windows v1 are destroy-on-release (no pool; v0.24). Operators can override with `--sandbox-microvm-pool-size=N`. The earlier draft's "N=4 host-side" line is superseded.
-3. ~~**Tool selection for `pi-tools-core` (the guest-buildable subset).**~~ **DECIDED, v0.8/v0.9.** Guest-bound tools (route through the launcher → vsock → guest worker → pi-tools-core): `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Host-bound (run on the host directly via pi-tools-net): `web_search`. Unavailable under microvm: `monitor` (one-shot RPC vs. streaming mismatch). The split is the §"Tool availability under `microvm`" matrix, not a per-crate question.
+3. ~~**Tool selection for `pi-tools-core` (the guest-buildable subset).**~~ **DECIDED.** v0.8/v0.9 set the original split (`read`/`write`/`edit`/`bash`/`grep`/`find`/`ls` guest, `web_search` host-bound, `monitor` unavailable). v0.33+ then re-classified `web_search` as **guest-dispatched and host-proxied via the 5003 bridge channel** — there is no host-direct disposition in v1. Current matrix: guest tools = `read`/`write`/`edit`/`bash`/`grep`/`find`/`ls`/`web_search`; unavailable = `monitor`/`lsp`. See §"Tool availability under `microvm`" + §"web_search via vsock proxy".
 4. **Default `--sandbox-provider` value after `microvm` ships GA.** Stays at `local-process` (no breaking change for existing users). Migration: docs + release notes + a one-shot first-run prompt suggesting `microvm` if all probes pass.
 5. **Rootfs upgrade UX on pi binary upgrade.** Auto-download with progress bar (default) or refuse + prompt? **Auto-download** is the answer for v1.0; users on offline systems set `PI_SANDBOX_OFFLINE=1` to disable it (and the binary then refuses to use `microvm` until a manual `pi sandbox update`).
 6. **Auth storage for remote backends** — moves to RFD 0026.
@@ -2165,6 +2198,50 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.36 (2026-05-05):** rfd-critic v0.35 pass: 2 critical
+  (init-owner contradiction; seccomp mechanics overstated) +
+  underspec. All real, all closed.
+  (1) **Init / PID 1 ownership pinned.** v0.35 had three actors
+  implicitly claiming PID 1 (`/init`, `pi-cfs-init`, the bridge
+  daemon). Resolved canonically: `/init` execs `pi-cfs-init`;
+  `pi-cfs-init` is the **sole PID 1** and supervises every
+  other process — `pi-vm-search-bridge` (long-lived child),
+  `pi-sandbox-worker` (re-execed by reset), `pi-vm-reset`
+  (on-demand reset agent). Every previous "this thing IS PID 1"
+  claim about the bridge or worker is gone. §3.2 `/init` block
+  + §3.5.9 + §"web_search via vsock proxy" all reference one
+  canonical process tree.
+  (2) **Seccomp narrowed to syscall-arg filtering.** v0.35 said
+  the filter blocked `bind`/`connect`/`listen` on
+  "AF_VSOCK family sockets" — seccomp-bpf can't dereference a
+  userspace `sockaddr*` to know an fd's family on those calls.
+  Narrowed Layer 2 to **just `socket(AF_VSOCK, ...)` and
+  `socketpair(AF_VSOCK, ...)`** (family is in a register;
+  matchable). With those denied the child has no path to obtain
+  a vsock fd, so `connect`/`bind`/`listen` filtering is
+  unnecessary. Plus removed the wrong "Linux-host-only" framing:
+  the defense is **guest-Linux** (the bash subprocess always
+  runs in the Linux guest rootfs regardless of host launcher),
+  so it applies uniformly across Firecracker/vfkit/cloud-hypervisor
+  given `CONFIG_SECCOMP_FILTER` in the guest kernel — verified
+  by the `pi sandbox doctor` probe.
+  (3) **Bridge-death detection** specified: PID 1 (`pi-cfs-init`)
+  catches SIGCHLD, writes `PI_FAIL: search-bridge-died exit=<N>`
+  to the serial console, exits non-zero; host launcher destroys
+  the VM. No auto-restart in v1 (dead bridge means in-flight
+  searches unrecoverable; destroy-and-replace).
+  (4) **Queue/backpressure** specified: bounded depth of 2
+  (one in-flight + one waiting); a third concurrent caller gets
+  `WebSearchResponse.error = "search-busy: ..."` immediately;
+  queued worker timing out drops the UDS, bridge dequeues
+  without forwarding.
+  (5) Stale `pi-host-search-proxy` execute_tool comment cleaned
+  up. OQ#3 sweep done — `web_search` is now described as
+  "guest-dispatched and host-proxied via the 5003 bridge
+  channel; no host-direct disposition in v1".
+  (6) `MicroVmProvider` gains the missing
+  `dispatch_class_registry: Arc<dyn DispatchClassRegistry>`
+  field referenced by the v0.32 polish-pass assert.
 - **v0.35 (2026-05-05):** rfd-critic v0.34 pass: 2 critical
   (seccomp mechanically wrong; channel-vs-reset lifecycle
   contradiction) + small. Both real, both closed.
