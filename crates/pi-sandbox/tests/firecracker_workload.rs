@@ -42,6 +42,9 @@ async fn rust_workload_demo() {
     let h = launcher.acquire(&spec).await.unwrap();
 
     let cmds = [
+        // Overlay sanity: writes outside /tmp must also succeed under overlay.
+        // (Under per-path tmpfs this would have failed with Read-only file system.)
+        ("echo overlay-test > /etc/pi-overlay-marker && cat /etc/pi-overlay-marker && ls -la /usr/local/bin/", "overlay sanity: write to /etc + read it back"),
         ("uname -a", "kernel inside the guest"),
         ("cat /etc/os-release | head -5", "rootfs identity"),
         ("ls -1 /usr/local/bin/ | head -20", "what binaries the rootfs ships"),

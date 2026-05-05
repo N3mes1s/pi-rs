@@ -80,6 +80,7 @@ if [[ -n "${PI_SANDBOX_KERNEL_MODULES_DIR:-}" ]] && [[ -d "${PI_SANDBOX_KERNEL_M
     "kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko.zst"
     "kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko.zst"
     "kernel/fs/fuse/virtiofs.ko.zst"
+    "kernel/fs/overlayfs/overlay.ko.zst"
   )
   DEST_MODS="${ROOT}/lib/modules/${BUNDLED_KVER}"
   mkdir -p "${DEST_MODS}"
@@ -104,28 +105,46 @@ cat > "${ROOT}/init" << INIT_EOF
 #!/bin/sh
 mount -t proc none /proc 2>/dev/null
 mount -t sysfs none /sys 2>/dev/null
-# Writable scratch areas on tmpfs over the read-only rootfs. The drive
-# itself is RO at the VMM layer because warm-pool VMs share one
-# rootfs.img file and ext4 is not a cluster fs (corruption otherwise).
-# These tmpfs mounts give bash + tools a writable /tmp /root /run for
-# ephemeral state. State is per-VM; warm-pool reuse leaks tmpfs across
-# calls within one VM (the per-call reset choreography in RFD §Post-call
-# hygiene addresses that — separate commit).
-mount -t tmpfs -o size=64m,mode=1777   tmpfs /tmp  2>/dev/null
-mount -t tmpfs -o size=16m,mode=0700   tmpfs /root 2>/dev/null
-mount -t tmpfs -o size=8m,mode=0755    tmpfs /run  2>/dev/null
-mount -t tmpfs -o size=16m,mode=0755   tmpfs /var  2>/dev/null
 # Load vsock + virtiofs kernel modules if bundled (needed when they are
-# not built-in to the kernel, e.g. Ubuntu 6.8.x generic kernels).
+# not built-in to the kernel, e.g. Ubuntu 6.8.x generic kernels). We do
+# this BEFORE pivot_root because /lib/modules lives on the rootfs lower.
 MODS_DIR="/lib/modules/${BUNDLED_KVER}"
 if [ -d "\$MODS_DIR" ]; then
-  for m in vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport virtiofs; do
+  for m in vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport virtiofs overlay; do
     ko=\$(find "\$MODS_DIR" -name "\${m}.ko" 2>/dev/null | head -1)
     [ -n "\$ko" ] && insmod "\$ko" 2>/dev/null || true
   done
 fi
-# /work is the virtio-fs mount point. Attempt mount but do not abort if it
-# fails: the worker starts either way and reports an error per failing call.
+# Overlay setup: every path becomes writable. lower=current rootfs (RO at
+# the VMM-drive layer because warm-pool VMs share one rootfs.img file —
+# ext4 isn't a cluster fs); upper=tmpfs in guest RAM, ephemeral per-VM.
+# State leaks across tool calls within ONE warm VM (no per-call reset
+# yet; RFD §"Post-call hygiene" is the eventual fix). Bounded at 256 MiB
+# so a runaway dd doesn't OOM the VM under the 512 MiB default ceiling.
+# /run itself is on the RO rootfs; mount a tmpfs there first so we can
+# build the overlay scaffolding under it.
+mount -t tmpfs -o size=8m tmpfs /run
+mkdir -p /run/overlay
+mount -t tmpfs -o size=256m tmpfs /run/overlay
+mkdir -p /run/overlay/upper /run/overlay/work /run/overlay/newroot
+if mount -t overlay -o lowerdir=/,upperdir=/run/overlay/upper,workdir=/run/overlay/work overlay /run/overlay/newroot; then
+  # Carry critical mounts across pivot_root + create the put_old dir.
+  mkdir -p /run/overlay/newroot/proc /run/overlay/newroot/sys /run/overlay/newroot/dev /run/overlay/newroot/old_root
+  mount --move /proc /run/overlay/newroot/proc
+  mount --move /sys  /run/overlay/newroot/sys
+  mount -t devtmpfs none /run/overlay/newroot/dev || true
+  cd /run/overlay/newroot
+  pivot_root . ./old_root
+  exec /sbin/init-overlayed
+fi
+# Fallback path if overlay setup fails: keep the legacy per-path tmpfs
+# mounts so the VM still boots and bash has SOMETHING writable. The
+# guest will log to serial but not abort.
+echo "WARN: overlay setup failed; falling back to per-path tmpfs"
+mount -t tmpfs -o size=64m,mode=1777   tmpfs /tmp  2>/dev/null
+mount -t tmpfs -o size=16m,mode=0700   tmpfs /root 2>/dev/null
+mount -t tmpfs -o size=8m,mode=0755    tmpfs /run  2>/dev/null
+mount -t tmpfs -o size=16m,mode=0755   tmpfs /var  2>/dev/null
 mkdir -p /work 2>/dev/null || true
 mount -t virtiofs work /work 2>/dev/null || echo "WARN: virtiofs mount skipped (not available)"
 expected_proto=1
@@ -142,7 +161,21 @@ cat > "${ROOT}/init" <<'INIT_EOF'
 #!/bin/sh
 mount -t proc none /proc 2>/dev/null
 mount -t sysfs none /sys 2>/dev/null
-# Writable scratch areas on tmpfs over the read-only rootfs.
+# Overlay setup (no bundled modules — overlay must be built-in or
+# already loaded). lower=rootfs RO, upper=tmpfs (256 MiB cap).
+mkdir -p /run/overlay
+mount -t tmpfs -o size=256m tmpfs /run/overlay 2>/dev/null
+mkdir -p /run/overlay/upper /run/overlay/work /run/overlay/newroot
+if mount -t overlay -o lowerdir=/,upperdir=/run/overlay/upper,workdir=/run/overlay/work overlay /run/overlay/newroot; then
+  mkdir -p /run/overlay/newroot/proc /run/overlay/newroot/sys /run/overlay/newroot/dev
+  mount --move /proc /run/overlay/newroot/proc 2>/dev/null
+  mount --move /sys  /run/overlay/newroot/sys  2>/dev/null
+  mount -t devtmpfs none /run/overlay/newroot/dev 2>/dev/null || true
+  cd /run/overlay/newroot
+  pivot_root . old_root
+  exec /sbin/init-overlayed
+fi
+echo "WARN: overlay setup failed; falling back to per-path tmpfs"
 mount -t tmpfs -o size=64m,mode=1777   tmpfs /tmp  2>/dev/null
 mount -t tmpfs -o size=16m,mode=0700   tmpfs /root 2>/dev/null
 mount -t tmpfs -o size=8m,mode=0755    tmpfs /run  2>/dev/null
@@ -162,6 +195,26 @@ exec /usr/local/bin/pi-sandbox-worker --vsock-port=5001 --work-dir=/work
 INIT_EOF
 fi
 chmod 0755 "${ROOT}/init"
+
+# Post-pivot init runs INSIDE the overlay'd root (after pivot_root succeeds
+# in /init). Idempotently writes this once for both BUNDLE_MODULES branches.
+cat > "${ROOT}/sbin/init-overlayed" << 'POST_EOF'
+#!/bin/sh
+# Lazy-umount the old root so its tmpfs upper releases when references drop.
+umount -l /old_root 2>/dev/null
+rmdir /old_root 2>/dev/null
+mkdir -p /work 2>/dev/null
+mount -t virtiofs work /work 2>/dev/null || echo "WARN: virtiofs mount skipped (not available)"
+expected_proto=1
+cmdline_proto=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.proto_version=//p')
+if [ -n "$cmdline_proto" ] && [ "$cmdline_proto" != "$expected_proto" ]; then
+  echo "FATAL: proto_version mismatch (expected $expected_proto, kernel cmdline says $cmdline_proto)"
+  echo b > /proc/sysrq-trigger
+  exit 1
+fi
+exec /usr/local/bin/pi-sandbox-worker --vsock-port=5001 --work-dir=/work
+POST_EOF
+chmod 0755 "${ROOT}/sbin/init-overlayed"
 
 # Pre-create /work as a mount point (it must exist on the read-only rootfs
 # so the virtiofs mount succeeds without needing a writable root).
