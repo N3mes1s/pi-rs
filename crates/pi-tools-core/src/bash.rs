@@ -5,6 +5,9 @@ use std::process::Stdio;
 
 use crate::{resolve_path, truncate_for_model, Tool, ToolContext, ToolError};
 
+#[cfg(target_os = "linux")]
+mod seccomp;
+
 /// Hard cap on `bash.timeout_ms` per RFD 0027 §4.5 #7 (Hardening H4).
 /// 10 minutes. Stops a model from passing `timeout_ms = u64::MAX` and
 /// holding a worker indefinitely.
@@ -99,6 +102,28 @@ impl Tool for BashTool {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        // Optional seccomp denylist for tool subprocesses, gated on
+        // `PI_SANDBOX_BASH_SECCOMP=1` (set by `pi-sandbox-worker` at
+        // startup; absent under `local-process`). Closes the
+        // `bash → vsock(2,5003)` policy-bypass route + blocks
+        // mount/pivot_root/kexec/bpf class syscalls. Pure Rust filter
+        // installed in the child between fork and exec via pre_exec.
+        // See `seccomp.rs` for what's blocked + why each entry exists.
+        #[cfg(target_os = "linux")]
+        if std::env::var("PI_SANDBOX_BASH_SECCOMP").as_deref() == Ok("1") {
+            // tokio::process::Command exposes pre_exec directly on Linux
+            // (no CommandExt import needed). Closure runs in the child
+            // between fork() and execve(), so the filter applies to the
+            // upcoming bash process, not to the worker.
+            unsafe {
+                cmd.pre_exec(|| {
+                    seccomp::install_bash_filter().map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::Other, e)
+                    })
+                });
+            }
+        }
 
         let child = cmd.spawn().map_err(ToolError::Io)?;
         let output = match tokio::time::timeout(

@@ -31,6 +31,17 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     init_tracing(&cli.log_level);
+
+    // Signal to `pi_tools_core::bash::seccomp` that any bash
+    // subprocess we spawn should install the seccomp deny-list
+    // filter (block AF_VSOCK socket() + mount/pivot_root/bpf/etc).
+    // Closes the bash → vsock(2,5003) policy-bypass route. The
+    // env var is inherited by every child the worker spawns; the
+    // filter itself is installed by `bash.rs` between fork and
+    // exec via `Command::pre_exec`, so the worker process itself
+    // is unaffected.
+    std::env::set_var("PI_SANDBOX_BASH_SECCOMP", "1");
+
     pi_sandbox_worker::listener::serve(cli.vsock_port, cli.work_dir).await
 }
 

@@ -26,3 +26,12 @@ regex.workspace = true
 glob.workspace = true
 shellexpand.workspace = true
 chrono.workspace = true
+
+# Linux-only seccomp filter for `bash` tool subprocesses when run
+# inside the microvm worker (gated by `PI_SANDBOX_BASH_SECCOMP=1`
+# env var set by the worker at startup). seccompiler is pure Rust
+# (Amazon/Firecracker), no libseccomp C dep, links cleanly under
+# x86_64-unknown-linux-musl.
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.5"
+libc = "0.2"
