@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.41 — broker CLI syntax + audit_ping sweep)
+- **Status:** Discussion (v0.42 — rfd-critic READY, polish landing)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -1464,7 +1464,7 @@ Mapping rules (host-side, in `MicroVmProvider::execute_tool`):
 
 The worker reports the verdict on the wire as `ToolResponse.post_call_state` (`Clean` | `SuspectGuestState`). The tool itself may have succeeded; the post-call probe is what decides pool reuse. The host composes `final_hint = min(host_outcome_hint, post_call_state)` (`Clean < SuspectGuestState`) before calling `release(final_hint)`, so a daemonization leak forces destroy regardless of the tool's success bit. A missing `post_call_state` field defaults to `SuspectGuestState` — workers must *prove* cleanliness rather than implicitly assert it. The verdict is not surfaced to the model (the tool's `model_output` is unchanged); it's strictly a host/launcher signal.
 
-**macOS / Windows v1: destroy-on-release, no pooling.** The cgroup-based probe is Linux-only. macOS and Windows launchers in v1 have a coarser `process-group orphan` check that does NOT detect `setsid()` / fully-detached daemons. Rather than ship a known false-`Clean`, the v1 normative rule for `VfkitLauncher` and `CloudHypervisorLauncher` is **always destroy on release**: the launcher's `release()` ignores `ExecuteOutcomeHint::Clean` and tears the VM down unconditionally. This costs the warm-pool latency benefit on those OSes; an `--sandbox-microvm-pool=force` override is available for operators who accept the daemonization risk for their own workloads. The Linux/Firecracker path keeps the cgroup-based pool. A future RFD lifts the macOS/Windows restriction once each launcher has a proven-clean per-call container/cgroup analog.
+**macOS / Windows v1: destroy-on-release, no pooling.** The cgroup-based probe is Linux-only. macOS and Windows launchers in v1 have a coarser `process-group orphan` check that does NOT detect `setsid()` / fully-detached daemons. Rather than ship a known false-`Clean`, the v1 normative rule for `VfkitLauncher` and `CloudHypervisorLauncher` is **always destroy on release**: the launcher's `release()` ignores `ExecuteOutcomeHint::Clean` and tears the VM down unconditionally. This costs the warm-pool latency benefit on those OSes. **No `--sandbox-microvm-pool=force` escape hatch in v1** — a knowingly-unsound pooling escape would muddy the security story for marginal gain (an earlier v0.24 draft mentioned that flag; v0.42 cuts it). The Linux/Firecracker path keeps the cgroup-based pool. A future RFD lifts the macOS/Windows restriction once each launcher has a proven-clean per-call container/cgroup analog.
 
 **Tested cases.** The Commit D integration suite includes negative tests for: `bash 'sleep 999 &'`, `bash 'nohup foo &'`, `bash '(sleep 5; touch /work/marker) &'`, `bash 'mkdir -p /tmp/x && touch /tmp/x/leftover'`, plus the timeout path (`bash 'sleep 60'` with `timeout_ms=1000`). Each test asserts that (a) the affected VM does **not** return to the pool (telemetry row has `pool_disposition="destroyed"`), (b) the next acquire on the same `BootSpec` does NOT see the leftover process or `/tmp` residue, and (c) the row's `release_reason` contains a short rationale (e.g. `"post-call-hygiene-failed: descendant pid <N> alive in cgroup"`).
 
@@ -1946,11 +1946,11 @@ Host-side, per pi process (spawned at first acquire, joined at process exit):
    --verify-write-oidc-audience <wi-audience>
    --verify-write-oidc-alg RS256 ...` — the shared broker.
   UDS auth is SO_PEERCRED via `--tenant-peer-uid <tenant_id>:<uid>`
-  (colon separator per `crates/contextfs-broker/src/main.rs:188-195`
+  (colon separator per `<contextfs>/crates/contextfs-broker/src/main.rs:188-195`
   doc text "Format: `<tenant_id>:<uid>`"). The bridge process's
   effective uid is `pi-sandbox-bridge`. `--tenant-mode` uses the
   equals separator (different format from `--tenant-peer-uid`; see
-  `crates/contextfs-broker/src/main.rs:205` "Format:
+  `<contextfs>/crates/contextfs-broker/src/main.rs:205` "Format:
   `<tenant_id>=embedder`") and opts the tenant into embedder mode
   (every request must carry `vm_id` + `master_epoch`).
   `--tenant-secret-path` points at the operator-managed master
@@ -1960,7 +1960,7 @@ Host-side, per pi process (spawned at first acquire, joined at process exit):
 - TCP-HMAC auth (`--auth-secret-path`) is **not used**; this is
   same-host only.
 
-**No runtime broker reconfiguration.** Pi-rs's broker child is started once with the operator's stable per-tenant config and shut down once at pi process exit. Adding/removing VMs at runtime does NOT modify the broker's argv — VM lifecycle is daemon-side (each `contextfsd::start()` call carries its own `vm_id` in `DaemonConfig`); the broker accepts any valid `vm_id` for a configured tenant. Earlier draft text speculated about SIGHUP reload of the peer-uid table; that's incorrect — `contextfs-broker` has no SIGHUP handler (SIGHUP is for `contextfsd` policy reload only, per `crates/contextfsd/src/lib.rs:8-33`).
+**No runtime broker reconfiguration.** Pi-rs's broker child is started once with the operator's stable per-tenant config and shut down once at pi process exit. Adding/removing VMs at runtime does NOT modify the broker's argv — VM lifecycle is daemon-side (each `contextfsd::start()` call carries its own `vm_id` in `DaemonConfig`); the broker accepts any valid `vm_id` for a configured tenant. Earlier draft text speculated about SIGHUP reload of the peer-uid table; that's incorrect — `contextfs-broker` has no SIGHUP handler (SIGHUP is for `contextfsd` policy reload only, per `<contextfs>/crates/contextfsd/src/lib.rs:8-33`).
 
 Host-side, per VM (children of MicroVmLauncher, kill_on_drop):
 
@@ -2036,7 +2036,7 @@ flag is the TCP-HMAC path and conflicts with the UDS topology).
 `(master, tenant_id, vm_id, master_epoch)` (§3.5.2) and the broker
 verifies AuditResync against the same derivation, reading the master
 from this path. Set ONCE at broker startup (NOT per-VM — this is the
-single-tenant flag from `crates/contextfs-broker/src/main.rs:86-93`,
+single-tenant flag from `<contextfs>/crates/contextfs-broker/src/main.rs:86-93`,
 correctly used here because pi-rs's tenant model is one-tenant-per-pi-process
 even though it's many-VMs-per-tenant). Without this flag, the broker
 returns `verify_write_unavailable` on the daemon's first AuditResync
@@ -2571,12 +2571,28 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.42 (2026-05-05):** rfd-critic v0.41 returned **READY**
+  ("Critical issues: None for v0.41. Verdict: READY") — third
+  clean READY in the iteration history (v0.31, v0.38, v0.41).
+  Polish landing the suggested non-blocking deltas:
+  (1) Cross-repo cite prefix added: `crates/contextfs-...` →
+  `<contextfs>/crates/contextfs-...` for all 5 contextfs source
+  references in §3.5.5/§3.5.6/v0.41 history (paths resolve in
+  the sibling contextfs repo, not in pi-rs).
+  (2) `--sandbox-microvm-pool=force` escape hatch cut from v1
+  per critic's option (a). The flag was a knowingly-unsound
+  pooling escape on macOS/Windows; v1 ships destroy-on-release
+  only and a future RFD lifts it once each launcher has a
+  proven-clean per-call container/cgroup analog.
+  Critic's other suggestions (named integration test for
+  task/allowlist path; commit-pinned permalinks before publish)
+  deferred to publish-readiness pass.
 - **v0.41 (2026-05-05):** rfd-critic v0.40 pass found 2 critical
   + 4 small. Both criticals real and closed. (1) **Broker CLI
   syntax was wrong**: §3.5.5/§3.5.6 had
   `--tenant-peer-uid <vm>=<uid>` (equals separator) and
   `<vm_a>=<bridge_uid>` per-VM. Verified against
-  `crates/contextfs-broker/src/main.rs:188-205`: the actual format
+  `<contextfs>/crates/contextfs-broker/src/main.rs:188-205`: the actual format
   is `--tenant-peer-uid <tenant_id>:<uid>` (colon) and
   `--tenant-mode <tenant_id>=embedder` (equals — different
   separator). Identity model also wrong: `tenant_id` is **stable
@@ -2584,7 +2600,7 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
   `vm_id`. Pi-rs runs ONE tenant per pi process, N VMs share that
   tenant. SIGHUP-reload claim deleted: `contextfs-broker` has no
   SIGHUP handler (`contextfsd` does, for policy reload — verified
-  against `crates/contextfsd/src/lib.rs:8-33`). No runtime broker
+  against `<contextfs>/crates/contextfsd/src/lib.rs:8-33`). No runtime broker
   reconfiguration; broker is started once with stable tenant
   config. (2) **Stale audit_ping/fail-closed sweep**: §3
   "Filesystem semantics" still said "every write mediated by
