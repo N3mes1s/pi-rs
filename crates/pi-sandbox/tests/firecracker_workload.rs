@@ -50,11 +50,15 @@ async fn rust_workload_demo() {
         ("ls -1 /usr/local/bin/ | head -20", "what binaries the rootfs ships"),
         ("which rustc cargo apk; true", "are rust toolchain or alpine pkg mgr present?"),
         (
-            "mkdir -p /tmp/demo && cat > /tmp/demo/main.rs <<'EOF'\nfn main() { println!(\"hello from inside the microvm\"); }\nEOF\nls -la /tmp/demo/",
+            // /opt/demo, NOT /tmp/demo — per-call hygiene wipes
+            // /tmp, /var/tmp, /root between calls (RFD 0023 §"Post-call
+            // hygiene"). Anything outside those scratch paths still
+            // persists in the overlay upper for the VM's lifetime.
+            "mkdir -p /opt/demo && cat > /opt/demo/main.rs <<'EOF'\nfn main() { println!(\"hello from inside the microvm\"); }\nEOF\nls -la /opt/demo/",
             "write a Rust file and list it",
         ),
-        ("cat /tmp/demo/main.rs", "read it back — proves the file persists across bash calls in the same VM"),
-        ("wc -l /tmp/demo/main.rs", "count lines — different command, same VM, same file"),
+        ("cat /opt/demo/main.rs", "read it back — proves the file persists across bash calls in the same VM (path is outside the per-call hygiene scratch list)"),
+        ("wc -l /opt/demo/main.rs", "count lines — different command, same VM, same file"),
         (
             "apk add --no-cache cargo rust 2>&1 | head -5; echo \"exit=$?\"",
             "try to install cargo (no network — should fail loudly)",

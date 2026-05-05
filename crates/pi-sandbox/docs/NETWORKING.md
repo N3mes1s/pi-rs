@@ -310,6 +310,36 @@ Implemented in `cold_boot()` as `matches!(spec.network_policy,
 NetworkPolicy::Allow { .. })`; regression-tested in
 `tests/firecracker_web_search_proxy.rs::web_search_blocked_under_network_policy_deny`.
 
+## Per-call hygiene (RFD 0023 §"Post-call hygiene")
+
+Between every tool call on the same warm VM, the worker wipes
+writable scratch paths so files written in call N aren't visible
+in call N+1:
+
+| Path        | Wiped between calls? | Why                                                |
+|-------------|----------------------|----------------------------------------------------|
+| `/tmp`      | ✅ yes               | Conventional process scratch                       |
+| `/var/tmp`  | ✅ yes               | Long-lived scratch (still treated as scratch here) |
+| `/root`     | ✅ yes               | Default home for tools that write `~/.config` etc. |
+| `/etc`, `/usr`, `/opt`, `/home/*` | ❌ no | Persist within the VM lifetime (overlay upper). Pool retirement (`MAX_CALLS=50`, `MAX_AGE=5min`) caps the blast radius. |
+
+The bash tool is the only one that writes scratch state today; the
+read/write/edit/grep/ls/find tools either hit `host_cwd` (gone in
+v1 because virtio-fs is dropped — see §"Filesystem semantics" of
+RFD 0023) or are read-only. So the practical effect is: each
+`bash` call gets a freshly empty `/tmp`.
+
+**What this does NOT cover** — the non-scratch overlay upper
+(writes to `/etc`, `/usr`, `/opt`, etc.) still persists across
+calls. Full reset requires the v1.1 RFD plan: `pi-cfs-init` as
+PID 1 + `pi-vm-reset` sibling agent + overlay re-mount with
+`move_mount` survival list + `pivot_root` into a fresh upper.
+Until that lands, the warm-pool retirement cap (50 calls or 5
+minutes per VM, whichever fires first) is the outer hygiene
+boundary.
+
+Verified by `tests/firecracker_per_call_hygiene.rs::tmp_is_wiped_between_tool_calls_in_same_vm`.
+
 ## What this does NOT do
 
 - **No virtio-net device hot-plug.** Allow vs Deny is a boot-time

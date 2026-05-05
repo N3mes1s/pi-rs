@@ -324,11 +324,64 @@ enum ProxyError {
 }
 
 // --------------------------------------------------------------------------
+// Per-call hygiene
+// --------------------------------------------------------------------------
+
+/// Best-effort scratch-path wipe between tool calls — RFD 0023
+/// §"Post-call hygiene".
+///
+/// **What this does:** removes every entry under `/tmp`, `/var/tmp`,
+/// and `/root` (keeping the directories themselves so subsequent
+/// calls don't ENOENT). Errors are swallowed; a tmpfs-only rootfs
+/// makes these unlinks reliably cheap (no journal, no fsync).
+///
+/// **What this does NOT do:**
+/// - Does not reset writes elsewhere in the overlay upper (e.g.
+///   `/etc/foo` written by call N stays visible to call N+1). The
+///   overlay can't be unmounted and re-mounted while the worker
+///   itself runs from it; full reset needs the v1.1 RFD plan with
+///   a separate reset agent + `move_mount` survival list +
+///   `pivot_root` into a fresh overlay.
+/// - Does not kill background processes started via `bash` (e.g.
+///   `nohup ... &`). The bash tool already wraps its commands in
+///   BusyBox `timeout` which sends SIGTERM to the process group, so
+///   well-formed calls clean up; pathological cases require the
+///   reset agent.
+/// - Does not reset environment variables — bash tool calls each
+///   get a fresh subprocess, so env doesn't actually persist
+///   across calls today.
+///
+/// **Pool-level fallback:** the warm pool already retires VMs
+/// after `MAX_CALLS=50` invocations or `MAX_AGE=5min`, capping the
+/// blast radius of anything this best-effort wipe misses.
+async fn pre_call_hygiene() {
+    let started = std::time::Instant::now();
+    for path in &["/tmp", "/var/tmp", "/root"] {
+        let path = std::path::Path::new(path);
+        let Ok(entries) = std::fs::read_dir(path) else { continue };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            // Try as-directory first; fall through to file unlink.
+            if std::fs::remove_dir_all(&p).is_err() {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+    tracing::debug!(elapsed_us = %started.elapsed().as_micros(), "pre_call_hygiene done");
+}
+
+// --------------------------------------------------------------------------
 // Main entry point
 // --------------------------------------------------------------------------
 
 pub async fn dispatch_request(req: ToolRequest, work_dir: &Path) -> ToolResponse {
     let call_id = req.call_id.clone();
+
+    // Per-call hygiene: wipe writable scratch paths before running
+    // the next tool, so files written in call N aren't visible in
+    // call N+1. Cheap (a few ms in the empty case); imperfect — see
+    // `pre_call_hygiene` doc-comment for what's NOT cleaned and why.
+    pre_call_hygiene().await;
 
     // `web_search` is special: not a guest-side tool. The handler
     // proxies the call out to the host over vsock(HOST_CID,
