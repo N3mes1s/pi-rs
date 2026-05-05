@@ -82,6 +82,13 @@ impl SandboxProvider for LocalProcessProvider {
         "local-process"
     }
 
+    fn honors_tool_dispatch(&self) -> bool {
+        // local-process is a thin in-process wrapper — tools that
+        // mark themselves Unavailable under microvm (`lsp`, `monitor`)
+        // still work fine here, so don't short-circuit them.
+        false
+    }
+
     async fn execute_tool(
         &self,
         ctx: &ToolContext,

@@ -30,6 +30,43 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+/// Plan-time classification of a tool's dispatch class. Returned by
+/// `Tool::dispatch()` (default `Guest`); the runtime consults it
+/// before forwarding a tool call to a sandbox provider so it can
+/// short-circuit cleanly for tools that fundamentally don't run in
+/// the chosen sandbox shape.
+///
+/// Per RFD 0023 §"Tool dispatch boundary":
+///   - `Guest` — runs inside the sandbox provider's execution
+///     environment. The vast majority of tools are Guest.
+///   - `Unavailable { reason }` — incompatible with the active
+///     provider (e.g. `lsp` under microvm: language servers are
+///     host-process state with absolute host paths; `monitor`
+///     under microvm: streaming protocol won't fit one-shot RPC).
+///     The runtime returns the reason to the agent without
+///     dispatching, so the model gets a structured "this tool
+///     isn't available here" instead of a mysterious failure.
+///
+/// `Unavailable` is provider-aware in spirit but provider-agnostic
+/// at the wire level; tools that work under `local-process` but
+/// not under `microvm:firecracker` mark themselves `Unavailable`
+/// and rely on the operator picking a compatible provider (or the
+/// runtime steering accordingly when policy permits).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolDispatch {
+    /// Tool runs inside the sandbox provider's execution environment.
+    Guest,
+    /// Tool is not implementable under the current sandbox shape.
+    /// `reason` is shown to the operator.
+    Unavailable { reason: &'static str },
+}
+
+impl Default for ToolDispatch {
+    fn default() -> Self {
+        ToolDispatch::Guest
+    }
+}
+
 /// Errors produced by tool execution.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {

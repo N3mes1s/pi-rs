@@ -98,6 +98,25 @@ impl Tool for LspTool {
         true
     }
 
+    fn dispatch(&self) -> pi_tools::ToolDispatch {
+        // Three architectural mismatches make `lsp` non-shippable
+        // under microvm: (1) language servers (rust-analyzer etc.)
+        // are heavyweight host processes whose binaries aren't in
+        // the alpine rootfs and can't be re-spawned per-VM
+        // economically; (2) LSP identifies files by absolute host
+        // path URIs and the guest's filesystem doesn't expose them
+        // until contextfs lands; (3) LSP is heavily stateful across
+        // calls (`initialize` → many `didOpen`/`didChange` → many
+        // queries → `shutdown`) which the one-shot ToolRequest/
+        // Response RPC can't carry without significant protocol
+        // surgery. Per RFD 0023 v1 marks `lsp` Unavailable; the
+        // operator picks `--sandbox-provider=local-process` for
+        // LSP-bearing sessions.
+        pi_tools::ToolDispatch::Unavailable {
+            reason: "lsp: language servers are host-side state with absolute host paths and stateful sessions; use --sandbox-provider=local-process if you need lsp",
+        }
+    }
+
     async fn invoke(
         &self,
         ctx: &ToolContext,

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub use pi_tool_types::{ToolError, ToolResult, ToolSpec};
+pub use pi_tool_types::{ToolDispatch, ToolError, ToolResult, ToolSpec};
 
 use async_trait::async_trait;
 
@@ -38,6 +38,17 @@ impl Default for ToolContext {
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     fn read_only(&self) -> bool;
+    /// Plan-time classification: where does this tool dispatch?
+    /// Default `Guest` (the tool runs inside whatever sandbox the
+    /// runtime hands the call to). Tools that are fundamentally
+    /// incompatible with a sandboxed shape (e.g. `lsp` needs
+    /// host-side language servers; `monitor` needs streaming
+    /// protocol) return `Unavailable { reason }` and the runtime
+    /// short-circuits with a clean error.
+    /// Per RFD 0023 §"Tool dispatch boundary".
+    fn dispatch(&self) -> ToolDispatch {
+        ToolDispatch::Guest
+    }
     async fn invoke(
         &self,
         ctx: &ToolContext,

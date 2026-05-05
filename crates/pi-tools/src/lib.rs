@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 pub use pi_tools_core::{
     bash, edit, find, grep, ls, monitor, read, resolve_path, write, DuplicateName,
-    Tool, ToolContext, ToolError, ToolResult, ToolSpec,
+    Tool, ToolContext, ToolDispatch, ToolError, ToolResult, ToolSpec,
 };
 pub use pi_tools_net::web_search;
 pub use pi_tools_net::WebSearchTool;

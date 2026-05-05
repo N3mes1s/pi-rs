@@ -1675,10 +1675,35 @@ impl AgentSession {
                     }
                 }
                 let invocation = if let Some(sandbox) = &self.cfg.sandbox_provider {
+                    // Plan-time short-circuit: if the sandbox honors
+                    // `Tool::dispatch()` (true sandboxes do; thin
+                    // in-process wrappers like `local-process` opt
+                    // out), and the tool reports `Unavailable`,
+                    // synthesize a clean error without ever
+                    // dispatching. Per RFD 0023 §"Tool dispatch
+                    // boundary" — fixes mysterious "unknown tool"
+                    // errors for tools like `lsp` and `monitor`
+                    // that can't run in microvm-shaped sandboxes.
                     let started = std::time::Instant::now();
-                    let res = self
-                        .invoke_via_sandbox(sandbox.as_ref(), &tool_ctx, &call)
-                        .await;
+                    let res = if sandbox.honors_tool_dispatch() {
+                        match tool.dispatch() {
+                            pi_tools::ToolDispatch::Unavailable { reason } => {
+                                Err(format!(
+                                    "tool `{}` is unavailable under sandbox provider `{}`: {}",
+                                    call.name,
+                                    sandbox.name(),
+                                    reason
+                                ))
+                            }
+                            pi_tools::ToolDispatch::Guest => {
+                                self.invoke_via_sandbox(sandbox.as_ref(), &tool_ctx, &call)
+                                    .await
+                            }
+                        }
+                    } else {
+                        self.invoke_via_sandbox(sandbox.as_ref(), &tool_ctx, &call)
+                            .await
+                    };
                     let duration_ms = started.elapsed().as_millis() as u64;
                     // Telemetry row goes BEFORE the ToolResult so analyses
                     // that join action↔result by ordinal still line up.

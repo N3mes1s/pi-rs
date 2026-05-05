@@ -82,4 +82,16 @@ pub trait SandboxProvider: Send + Sync {
     async fn cleanup(&self) -> Result<(), SandboxError> {
         Ok(())
     }
+
+    /// Whether the runtime should consult `Tool::dispatch()` and
+    /// short-circuit on `ToolDispatch::Unavailable` BEFORE
+    /// `execute_tool()`. True for true sandbox providers (microvm,
+    /// docker, remote VMs) where tools like `lsp` and `monitor`
+    /// fundamentally don't fit. False for thin in-process wrappers
+    /// (`local-process`) where the same tools do work, since the
+    /// dispatch is just "run the tool object directly."
+    /// Default: `true`. Per RFD 0023 §"Tool dispatch boundary".
+    fn honors_tool_dispatch(&self) -> bool {
+        true
+    }
 }

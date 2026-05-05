@@ -200,6 +200,18 @@ impl Tool for MonitorTool {
         false
     }
 
+    fn dispatch(&self) -> crate::ToolDispatch {
+        // `monitor` streams stdout as a sequence of notifications on
+        // an out-of-band channel. The microvm wire protocol (one
+        // ToolRequest → one ToolResponse → channel close) can't
+        // carry that. Per RFD 0023 §"`monitor` exclusion (decided)"
+        // the v1 answer is to short-circuit: the runtime reports
+        // the tool unavailable instead of dispatching.
+        crate::ToolDispatch::Unavailable {
+            reason: "monitor: streaming protocol incompatible with sandbox one-shot RPC; use --sandbox-provider=local-process if you need monitor",
+        }
+    }
+
     async fn invoke(
         &self,
         ctx: &ToolContext,
