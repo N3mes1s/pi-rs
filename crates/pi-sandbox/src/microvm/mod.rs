@@ -7,6 +7,7 @@
 //! `VmExecution` is the output.
 
 pub mod launcher;
+pub mod provider;
 pub mod types;
 
 #[cfg(target_os = "linux")]
@@ -15,6 +16,7 @@ pub mod firecracker;
 pub use firecracker::FirecrackerLauncher;
 
 pub use launcher::{MicroVmLauncher, VmHandle};
+pub use provider::MicroVmProvider;
 pub use types::{
     CallLimits, NetworkPolicy, ProbeCheck, ProbeReport, RootfsVersion,
     VmCeiling, VmExecution, VmSpec, ROOTFS_VERSION,

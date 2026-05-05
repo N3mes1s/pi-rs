@@ -554,6 +554,15 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
 ///
 /// Currently supported values:
 /// * `"local-process"` — wraps tools with `pi_sandbox::LocalProcessProvider`.
+/// * `"microvm:firecracker"` (Linux only) — boots each tool call inside a
+///   Firecracker microVM via `pi_sandbox::MicroVmProvider`. Cold-boot ≈ 1 s,
+///   warm-pool hits ≈ tens of µs per acquire. Requires `firecracker` on PATH,
+///   `/dev/kvm` openable RW, and a Firecracker-compatible kernel + rootfs at
+///   the paths declared in `pi_sandbox::microvm::FirecrackerConfig` (or via
+///   `PI_SANDBOX_KERNEL` / `PI_SANDBOX_ROOTFS` env vars).
+///   v1 caveat: no `/work` mount yet — only tools that operate within the
+///   guest rootfs (e.g. `bash 'uname -a'`) succeed end-to-end. Reads/writes
+///   to host paths return errors until contextfs `/work` lands (Commit G3).
 pub fn install_sandbox_from_flag(
     cfg: &mut RuntimeConfig,
     kind: &str,
@@ -565,8 +574,34 @@ pub fn install_sandbox_from_flag(
                 Some(Arc::new(provider) as Arc<dyn pi_sandbox::SandboxProvider>);
             Ok(())
         }
+        #[cfg(target_os = "linux")]
+        "microvm:firecracker" => {
+            use pi_sandbox::microvm::firecracker::{FirecrackerConfig, FirecrackerLauncher};
+            // FirecrackerConfig defaults: pool_size=2, run_dir under /tmp.
+            // Kernel + rootfs paths come from env vars; absent ones surface
+            // as `acquire()` failures at first tool call rather than a
+            // hard error here, matching the LocalProcessProvider posture
+            // (errors are per-call, not per-construction).
+            let mut fc_cfg = FirecrackerConfig::default();
+            if let Ok(p) = std::env::var("PI_SANDBOX_KERNEL") {
+                fc_cfg.kernel_path = Some(p.into());
+            }
+            if let Ok(p) = std::env::var("PI_SANDBOX_ROOTFS") {
+                fc_cfg.rootfs_path = Some(p.into());
+            }
+            let launcher = Arc::new(FirecrackerLauncher::new(fc_cfg));
+            let provider = pi_sandbox::MicroVmProvider::new(launcher);
+            cfg.sandbox_provider =
+                Some(Arc::new(provider) as Arc<dyn pi_sandbox::SandboxProvider>);
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        "microvm:firecracker" => anyhow::bail!(
+            "microvm:firecracker is Linux-only; not available on this platform"
+        ),
         other => anyhow::bail!(
-            "unknown sandbox provider '{}' — expected: local-process",
+            "unknown sandbox provider '{}' — expected one of: \
+             local-process, microvm:firecracker",
             other
         ),
     }
