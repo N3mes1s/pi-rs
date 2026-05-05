@@ -185,6 +185,16 @@ struct WarmVm {
     /// Required to enforce RootfsMismatch: a pool hit with a different
     /// version must be rejected, not silently handed back.
     rootfs_version: String,
+    /// Network policy this VM was booted with. **Pool-key
+    /// partition** — every component of `NetworkPolicy::Allow`
+    /// (TAP name, guest IP/CIDR/gateway, DNS list, egress allowlist
+    /// IPs) is baked into the VM at cold-boot time and cannot
+    /// change without rebooting. A VM booted under `Allow` also
+    /// has its `<vsock>_5003` web_search proxy listener bound;
+    /// reusing it for a `Deny` acquire would silently bypass the
+    /// `Deny` policy. Two acquires with different policies must
+    /// boot different VMs.
+    network_policy: NetworkPolicy,
 }
 
 impl WarmVm {
@@ -456,6 +466,7 @@ impl MicroVmLauncher for FirecrackerLauncher {
                 vm.ceiling == spec.vm_ceiling
                     && vm.host_cwd == spec.host_cwd
                     && vm.rootfs_version == spec.rootfs_version.0
+                    && vm.network_policy == spec.network_policy
             });
             pos.map(|i| pool.remove(i).unwrap())
         };
@@ -520,6 +531,7 @@ impl MicroVmLauncher for FirecrackerLauncher {
             ceiling: vm.ceiling,
             host_cwd: vm.host_cwd,
             rootfs_version: vm.rootfs_version,
+            network_policy: vm.network_policy,
             pool: Arc::clone(&self.pool),
             pool_size,
             acquire_to_ready_ms,
@@ -542,6 +554,12 @@ pub struct FirecrackerVmHandle {
     /// Rootfs version this VM was booted with; stored so release() can
     /// push a correctly-keyed WarmVm back to the pool.
     rootfs_version: String,
+    /// Network policy this VM was booted with; pool-key partition,
+    /// preserved across acquire→release so a re-acquire under a
+    /// different policy boots a fresh VM rather than reusing this
+    /// one with stale firewall rules and an already-bound
+    /// web_search proxy listener.
+    network_policy: NetworkPolicy,
     pool: Arc<Mutex<VecDeque<WarmVm>>>,
     /// Configured pool capacity (from FirecrackerConfig::pool_size).
     /// Used by release() to cap the pool before pushing back.
@@ -675,6 +693,7 @@ impl VmHandle for FirecrackerVmHandle {
             ceiling: self.ceiling,
             host_cwd: self.host_cwd,
             rootfs_version: self.rootfs_version,
+            network_policy: self.network_policy,
         };
         {
             let mut pool = self.pool.lock().await;
@@ -900,6 +919,7 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
         ceiling: spec.vm_ceiling,
         host_cwd: spec.host_cwd.clone(),
         rootfs_version: spec.rootfs_version.0.clone(),
+        network_policy: spec.network_policy.clone(),
     })
 }
 
@@ -1478,6 +1498,7 @@ mod tests {
                 ceiling: VmCeiling::default(),
                 host_cwd: PathBuf::from("/tmp"),
                 rootfs_version: "0.1.0".to_string(),
+                network_policy: NetworkPolicy::Deny,
             });
             d
         }));
@@ -1492,6 +1513,7 @@ mod tests {
             ceiling: VmCeiling::default(),
             host_cwd: PathBuf::from("/tmp"),
             rootfs_version: "0.1.0".to_string(),
+                network_policy: NetworkPolicy::Deny,
             pool: Arc::clone(&pool),
             pool_size: 1,
             acquire_to_ready_ms: 0,
@@ -1539,6 +1561,7 @@ mod tests {
                 ceiling: VmCeiling::default(),
                 host_cwd: PathBuf::from("/tmp"),
                 rootfs_version: "0.1.0".to_string(),
+                network_policy: NetworkPolicy::Deny,
             });
             d
         }));
@@ -1553,6 +1576,7 @@ mod tests {
             ceiling: VmCeiling::default(),
             host_cwd: PathBuf::from("/tmp"),
             rootfs_version: "0.1.0".to_string(),
+                network_policy: NetworkPolicy::Deny,
             pool: Arc::clone(&pool),
             pool_size: 1,
             acquire_to_ready_ms: 0,
@@ -1632,6 +1656,7 @@ mod tests {
                 ceiling: VmCeiling::default(),
                 host_cwd: PathBuf::from("/tmp"),
                 rootfs_version: "0.1.0".to_string(),
+                network_policy: NetworkPolicy::Deny,
             });
             d
         }));
@@ -1650,6 +1675,7 @@ mod tests {
             ceiling: VmCeiling::default(),
             host_cwd: PathBuf::from("/tmp"),
             rootfs_version: "0.1.0".to_string(),
+                network_policy: NetworkPolicy::Deny,
         };
 
         let pool_size: usize = 1;

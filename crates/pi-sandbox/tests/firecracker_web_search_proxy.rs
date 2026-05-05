@@ -273,6 +273,110 @@ async fn web_search_two_calls_one_vm_latency() {
     h.release().await.expect("release");
 }
 
+/// Pool-key partition by `network_policy`: a VM cold-booted under
+/// `Allow` (search-proxy listener bound at `<vsock>_5003`) MUST NOT
+/// be returned to a `Deny` acquire. If it were, the `Deny` call's
+/// `web_search` would reach the still-bound listener and bypass
+/// the policy gate. This test acquires + releases an `Allow` VM,
+/// then immediately acquires a `Deny` VM with the same other
+/// fields; the `Deny` call's `web_search` must error with vsock
+/// connection-refused (proving the Allow VM was NOT reused).
+#[tokio::test]
+async fn pool_partitions_by_network_policy() {
+    if std::env::var("PI_SANDBOX_FC_TEST").is_err() {
+        return skip("PI_SANDBOX_FC_TEST not set");
+    }
+    if which::which("firecracker").is_err() {
+        return skip("firecracker not on PATH");
+    }
+    let kernel_path = match std::env::var("PI_SANDBOX_KERNEL") {
+        Ok(p) if !p.is_empty() => PathBuf::from(p),
+        _ => return skip("PI_SANDBOX_KERNEL not set"),
+    };
+    let rootfs_path = match std::env::var("PI_SANDBOX_ROOTFS") {
+        Ok(p) if !p.is_empty() => PathBuf::from(p),
+        _ => return skip("PI_SANDBOX_ROOTFS not set"),
+    };
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work = tempfile::tempdir().expect("work");
+    let cfg = FirecrackerConfig {
+        kernel_path: Some(kernel_path),
+        rootfs_path: Some(rootfs_path),
+        run_dir: tmp.path().join("run"),
+        // pool_size=2 so the released Allow VM stays in the pool
+        // when we acquire the next one.
+        pool_size: 2,
+        ..Default::default()
+    };
+    let launcher = FirecrackerLauncher::new(cfg);
+
+    let allow_spec = VmSpec {
+        host_cwd: work.path().to_path_buf(),
+        host_cwd_writable: true,
+        env: Default::default(),
+        network_policy: NetworkPolicy::Allow {
+            tap_name: "tap-pi0".into(),
+            guest_ip_cidr: "172.16.0.2/30".into(),
+            guest_gateway: "172.16.0.1".into(),
+            guest_dns: vec!["1.1.1.1".into()],
+            guest_mac: None,
+            egress_allowlist: vec![],
+        },
+        vm_ceiling: VmCeiling::default(),
+        rootfs_version: RootfsVersion::current(),
+    };
+    let deny_spec = VmSpec {
+        network_policy: NetworkPolicy::Deny,
+        ..allow_spec.clone()
+    };
+
+    // 1. Acquire under Allow → search-proxy listener bound for THIS VM.
+    let h = launcher.acquire(&allow_spec).await.expect("allow acquire");
+    h.release().await.expect("release back to pool");
+
+    // 2. Immediately acquire under Deny on otherwise-identical spec.
+    //    The pool has the warm Allow VM. If pool partitioning is wrong,
+    //    we'd get back the same VM and its listener would still be
+    //    reachable. Correct behaviour: cold-boot a fresh VM.
+    let h = launcher.acquire(&deny_spec).await.expect("deny acquire");
+    let r = h
+        .execute(
+            &ToolContext::default(),
+            &CallLimits {
+                wall_timeout: Duration::from_secs(15),
+                ..Default::default()
+            },
+            "web_search",
+            &json!({"query": "this should be blocked"}),
+        )
+        .await
+        .expect("dispatch");
+
+    eprintln!(
+        "deny-after-allow web_search: is_error={} body={:?}",
+        r.result.is_error, r.result.model_output
+    );
+    assert!(
+        r.result.is_error,
+        "policy-bypass: Allow VM was reused for a Deny acquire and its search-proxy listener answered. Body: {}",
+        r.result.model_output
+    );
+    let body = r.result.model_output.to_lowercase();
+    assert!(
+        body.contains("vsock") || body.contains("connection") || body.contains("refused"),
+        "expected vsock/connection-refused error after Deny acquire; got: {}",
+        r.result.model_output
+    );
+    assert!(
+        !body.contains("websearchtool") && !body.contains("api key"),
+        "Deny call reached the host listener — pool key didn't partition by network_policy. Body: {}",
+        r.result.model_output
+    );
+
+    h.release().await.expect("release deny");
+}
+
 /// `NetworkPolicy::Deny` must block the `web_search` proxy too —
 /// otherwise the operator's "no network" intent is silently bypassed
 /// by any vsock-proxied tool. The listener is never bound, so the
