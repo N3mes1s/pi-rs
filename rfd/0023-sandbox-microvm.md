@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.39 — rfd-critic READY, polish landing)
+- **Status:** Discussion (v0.40-prep — contextfs maintainer review of v0.39 landed; §3.5.4 PENDING contextfs draft)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -515,7 +515,7 @@ pub enum AcquireError {
     HostTransportSetup { detail: String },
     #[error("guest daemon ({daemon}) exited with code {exit}")]
     GuestDaemonStartFailed { daemon: String, exit: i32 },
-    // The three Broker* variants below fire ONLY on the
+    // The Broker* variants below fire ONLY on the
     // Linux/Firecracker `managed` transport mode (contextfs-mediated
     // /work). They are NOT remote-backend concerns — RFD 0026
     // remote vendors are out of scope for AcquireError. These
@@ -524,12 +524,23 @@ pub enum AcquireError {
     // each is the broker's authoritative response to a misconfigured
     // pi-rs side. Kept on `AcquireError` (not split) so callers can
     // pattern-match a single error type per acquire.
+    //
+    // Mapping is 1:1 with contextfsd's StartError taxonomy
+    // (crates/contextfsd/src/lib.rs:80-225); RFD-0025 §C.1 dropped
+    // an earlier `BrokerTenantModeMismatch` variant — that case is
+    // covered by `BrokerVmIdRequired` below — and added two new
+    // variants from RFD-0024 PR 3 (`BrokerProtocolTooOld`,
+    // `AuditInstanceClosedOnBroker`).
     #[error("contextfs broker rejected with master_epoch_too_old (configured epoch={configured_epoch}); refresh required")]
     BrokerMasterEpochTooOld { configured_epoch: u32 },
-    #[error("contextfs broker oidc denial: {code} ({detail})")]
-    BrokerOidcRejected { code: String, detail: String },
-    #[error("contextfs broker tenant-mode mismatch: {detail}")]
-    BrokerTenantModeMismatch { detail: String },
+    #[error("contextfs broker requires vm_id for tenant {tenant_id} but daemon was started without one (config error; legacy-no-vm_id mode rejected)")]
+    BrokerVmIdRequired { tenant_id: String },
+    #[error("contextfs broker oidc denial: {reason}")]
+    BrokerOidcRejected { reason: String },
+    #[error("contextfs broker at {broker_socket} doesn't speak the daemon's wire protocol: {error}; upgrade broker to >= commit 6594c3f")]
+    BrokerProtocolTooOld { broker_socket: PathBuf, error: String },
+    #[error("contextfs broker has closed daemon_instance_id={daemon_instance_id} at seq={closed_at_seq}; rotate daemon_instance.id and restart")]
+    AuditInstanceClosedOnBroker { daemon_instance_id: String, closed_at_seq: u64 },
     #[error("pool capacity exhausted (max={max})")]
     PoolExhausted { max: u32 },
 }
@@ -1761,77 +1772,107 @@ Failure routing for contextfs's three typed OIDC denials:
   the wrong validator pinned). Configuration bug; surfaced
   immediately, no retry.
 
-#### 3.5.4 — Per-mount audit-ping
+#### 3.5.4 — Audit batching via `AuditPusher` (RFD-0024 PR 3)
 
-ContextFS RFD-0023 §7 (HEAD `dbe2df5`) ships a v1 audit-ping shape:
-every successful write-class FUSE op (write / create / unlink /
-rename / setattr / xattr.set / xattr.remove) forwards the
-AuditRecord to the broker as a `Request::WriteAuditPing`. The daemon
-TOML opts in per mount.
-
-For the routine code-editing-agent use case Commit G targets,
-`fail-open` with `high_water_mark = 1024` is the default — a transient
-broker hiccup must not fail the agent's `cargo build`. Operators with
-hostile-tenancy / compliance-graded tenants set their tenant configs
-to `fail-closed`; the contextfs broker (post-`dbe2df5`) refuses writes
-with `EIO` BEFORE backend mutation when the audit-ping channel is
-saturated, so fail-closed is integrity-correct. The audit-ping queue
-is in-memory only (contextfs RFD-0023 §7 explicit note); daemon
-restarts wipe queued events.
-
-Pi-rs will expose equivalent tenant-level defaults in its sandbox
-provider config (`MicroVmProviderConfig::audit_ping`, with per-tenant
-overrides resolvable by the orchestrator). The per-tenant override
-plumbing is a Commit G deliverable.
+> **PENDING contextfs maintainer draft.** ContextFS PR 3 part 7
+> (commit `655408d`, 2026-05-04) **deleted** the audit-ping
+> mechanism this section originally described:
+> `Request::WriteAuditPing` / `Response::AuditPingAck` removed from
+> the broker wire protocol; `crates/contextfsd/src/audit_ping.rs`
+> deleted; `AuditPingConfig` / `audit_ping` TOML field deleted
+> (`#[serde(deny_unknown_fields)]` will reject any TOML still
+> containing it); the 6 fail-closed FUSE gates in
+> `fuse_bridge.rs` removed. The replacement is RFD-0024's
+> `AuditPusher` — always-on batched audit push (default size 256,
+> coalesce 1 s) consuming records via in-process broadcast,
+> emitting `Request::AuditPush` with v2 envelopes; on by default
+> when `[broker].socket_path` is set, no per-mount TOML knob.
+>
+> The contextfs maintainer offered to draft this subsection
+> directly since it's contextfs-shaped content (RFD-0024 §"Refactor
+> scope"). Pi-rs RFD 0023 v0.40 splices in their text as one
+> atomic edit. Until then, this placeholder records the surface
+> change so any reader of v0.39+ understands §3.5.4's old
+> audit-ping shape is obsolete and the §3.5.7 TOML must drop the
+> `audit_ping = { ... }` line before Commit G boots.
 
 #### 3.5.5 — Transport topology (Linux/Firecracker Stage 1) — two channels
 
 The Linux Stage 1 design has **two separate cfs-mesh channels**: a
 control plane (broker traffic) and a data plane (cfs-fs-server FUSE
-backend traffic). One bridge/listener pair per channel; one host-side
-service per channel; one guest-local UDS per channel that contextfsd
-consumes:
+backend traffic). One bridge/listener pair per channel; one
+guest-local UDS per channel that contextfsd consumes. **The broker
+is shared per pi process**, not per VM; the cfs-mesh bridge fans
+multiple VMs into one broker instance using `--tenant-peer-uid`
+SO_PEERCRED auth (one tenant id per VM, all bridge processes run
+as the same `pi-sandbox-bridge` uid):
 
 ```
-            ┌──────────────────── HOST (per VM) ─────────────────┐
-            │ contextfs-broker        cfs-fs-server               │
-            │      ↑ /run/<vm>/        ↑ /run/<vm>/                │
-            │      │  broker.sock      │  fs.sock                  │
-            │  cfs-mesh vsock-bridge  cfs-mesh vsock-bridge        │
-            │  (CID, port=P_b)        (CID, port=P_f)              │
-            └──────┼─────────────────────────┼───────────────────┘
-                   │                         │
-                   │      vsock CID =        │
-                   │      vm_id_to_cid(vm_id)│
-            ┌──────┼─────────────────────────┼─────── GUEST ─────┐
-            │ cfs-mesh vsock-listen   cfs-mesh vsock-listen      │
-            │  --port P_b --uds        --port P_f --uds          │
-            │  /run/cfs/broker.sock    /run/cfs/fs.sock          │
-            │      ↑                       ↑                     │
-            │      │     [broker]          │  [mount.remote_fs]  │
-            │      │     socket_path       │  target_uds         │
-            │  contextfsd ─── reads daemon.toml ─── mounts /work │
-            │                                                    │
-            │  pi-sandbox-worker (cwd = /work)                   │
-            └────────────────────────────────────────────────────┘
+            ┌──────────────────────── HOST (per pi process) ─────────────────────┐
+            │                                                                    │
+            │   contextfs-broker --listen-uds /run/pi-rs/broker.sock             │
+            │       --tenant-peer-uid <vm_a>=<bridge_uid>                        │
+            │       --tenant-peer-uid <vm_b>=<bridge_uid>                        │
+            │       --tenant-mode <vm_a>=embedder                                │
+            │       --tenant-mode <vm_b>=embedder ...                            │
+            │       --tenant-secret-path /run/pi-rs/cfs-tenants/<vm>.secret      │
+            │       (one process; serves N VMs concurrently)                     │
+            │                                                                    │
+            │   per-VM children of MicroVmLauncher (kill_on_drop):               │
+            │                                                                    │
+            │   for each acquired VM:                                            │
+            │     cfs-fs-server --backend-root <host_cwd>                        │
+            │         --socket /run/pi-vm-<vm_id>/fs.sock                        │
+            │     cfs-mesh vsock-bridge --target-uds /run/pi-rs/broker.sock      │
+            │         --vsock-cid <vm_cid> --vsock-port <P_b>                    │
+            │     cfs-mesh vsock-bridge --target-uds /run/pi-vm-<vm_id>/fs.sock  │
+            │         --vsock-cid <vm_cid> --vsock-port <P_f>                    │
+            └──────────────────────────────┼─────────────────────────────────────┘
+                                           │
+                                           │ vsock CID = vm_id_to_cid(vm_id)
+                                           │
+            ┌──────────────────────────────┼─────────────── GUEST (per VM) ─────┐
+            │                              ▼                                    │
+            │   cfs-mesh vsock-listen --port P_b --uds /run/contextfs/broker.sock│
+            │   cfs-mesh vsock-listen --port P_f --uds /run/contextfs/fs.sock   │
+            │           ↑                          ↑                            │
+            │           │ [broker].socket_path     │ [mount.remote_fs].target_uds│
+            │   contextfsd ─── reads daemon.toml ─── mounts /work               │
+            │   pi-sandbox-worker (cwd = /work)                                 │
+            └───────────────────────────────────────────────────────────────────┘
 ```
 
-Host-side, per VM:
+**One shared broker per pi process** (was per-VM in earlier drafts; corrected per RFD-0025 §A and contextfs maintainer review of v0.39). Cheaper to operate (one broker process serving N VMs vs. N broker processes), matches `crates/contextfs-broker`'s native multi-tenant capability (`--tenant-peer-uid` is exactly that pattern), and the per-VM tenant secret derivation in §3.5.2 doesn't require process isolation between VMs — the broker derives the same per-VM secret from `(master, tenant_id, vm_id, master_epoch)` regardless of whether one or N broker processes are running.
 
-- `contextfs-broker --listen-uds <run_dir>/<vm_id>/broker.sock
-  --tenant-peer-uid <tenant>=<bridge_uid> ...` — the broker on a
-  per-VM UDS. The broker's TCP-HMAC auth (`--auth-secret-path`) is
-  **not used**; UDS auth is by SO_PEERCRED via `--tenant-peer-uid`,
-  matching the bridge process's effective uid.
+Host-side, per pi process (one-time, spawned at first acquire, joined at process exit):
+
+- `contextfs-broker --listen-uds /run/pi-rs/broker.sock
+   --tenant-peer-uid <vm_a>=<bridge_uid> --tenant-peer-uid <vm_b>=<bridge_uid> ...
+   --tenant-mode <vm_a>=embedder --tenant-mode <vm_b>=embedder ...
+   --tenant-secret-path <run_dir>/<vm_id>/cfs-tenant-secret ...` —
+  the shared broker. UDS auth is SO_PEERCRED via `--tenant-peer-uid`,
+  matching the bridge process's effective uid (`pi-sandbox-bridge`).
+  The `--tenant-secret-path` flag is required per RFD-0024 PR 3 part 5
+  so AuditResync can answer with the same HMAC-signing bytes the
+  daemon uses; without it the broker returns `verify_write_unavailable`
+  on AuditResync and the daemon refuses to mount.
+- TCP-HMAC auth (`--auth-secret-path`) is **not used**; this is
+  same-host only.
+
+Host-side, per VM (children of MicroVmLauncher, kill_on_drop):
+
 - `cfs-fs-server --socket <run_dir>/<vm_id>/fs.sock
   --backend-root <host_cwd> --allowed-uid <bridge_uid> ...` —
   the file-server that fronts the user's cwd as the FUSE backend.
 - `cfs-mesh vsock-bridge --cid <guest-cid> --port <P_b>
   --key <broker_bridge_key> --peer-pubkey-path <guest_broker_pubkey>
-  --target-uds <run_dir>/<vm_id>/broker.sock` — control plane.
+  --target-uds /run/pi-rs/broker.sock` — control plane bridge,
+  fans this VM into the shared broker.
 - `cfs-mesh vsock-bridge --cid <guest-cid> --port <P_f>
   --key <fs_bridge_key> --peer-pubkey-path <guest_fs_pubkey>
-  --target-uds <run_dir>/<vm_id>/fs.sock` — data plane.
+  --target-uds <run_dir>/<vm_id>/fs.sock` — data plane bridge,
+  per VM (the cfs-fs-server is per VM since each VM has its own
+  `host_cwd`).
 - `<guest-cid>` is `vm_id_to_cid(vm_id)`; `P_b` and `P_f` are
   per-VM-allocated TCP-style port numbers (e.g. base 5000 + 2*pool_idx
   and base 5000 + 2*pool_idx + 1).
@@ -1869,13 +1910,14 @@ across discriminants — a misconfigured allow-list fails closed.
 
 #### 3.5.6 — Broker invocation (host-side)
 
-The host-side broker is invoked per VM with:
+The host-side broker is **shared across all VMs in one pi process** (per §3.5.5 corrected topology). Spawned at first acquire, joined at pi process exit. Operators can also force-close a daemon's instance via the broker's HTTP control plane (item 7a below).
 
 ```
 contextfs-broker \
-    --listen-uds <run_dir>/<vm_id>/broker.sock \
-    --tenant-peer-uid <tenant_id>=<bridge_uid> \
-    --tenant-mode <tenant_id>=embedder \
+    --listen-uds /run/pi-rs/broker.sock \
+    --tenant-peer-uid <vm_a>=<bridge_uid> --tenant-peer-uid <vm_b>=<bridge_uid> ...   # one entry per acquired VM; rebuilt on each VM acquire/release
+    --tenant-mode    <vm_a>=embedder     --tenant-mode    <vm_b>=embedder ...
+    --tenant-secret-path <run_dir>/<vm_id>/cfs-tenant-secret                            # REQUIRED per RFD-0024 PR 3 part 5; shared with the daemon side (§3.5.2)
     --verify-write-oidc-issuer <issuer-url> \
     --verify-write-oidc-audience <wi-audience> \
     --verify-write-oidc-alg RS256 \
@@ -1886,20 +1928,42 @@ No `--vsock*` flags (vsock termination is owned by the host-side
 `cfs-mesh vsock-bridge` per §3.5.5); no `--auth-secret-path` (that
 flag is the TCP-HMAC path and conflicts with the UDS topology).
 
+`--tenant-secret-path` (added in v0.40) points at the same per-VM
+tenant-secret file pi-rs derived in §3.5.2. Both the broker and the
+daemon read this file; the broker uses the bytes to HMAC-verify
+AuditResync at daemon startup (RFD-0024 PR 3 part 5). Without this
+flag, the broker returns `verify_write_unavailable` on the daemon's
+first AuditResync and the daemon refuses to mount.
+
 `--tenant-mode <t>=embedder` is the operator's opt-in to embedder
 mode. Without it the broker defaults to legacy mode and refuses any
-request carrying `vm_id`/`master_epoch` with a typed
-`tenant_mode_legacy_no_vm_id` denial. With it set, every request
-must carry non-empty `vm_id` + `master_epoch` (typed `vm_id_required`
-denial otherwise). Pi-rs's MicroVmProvider asserts both are set on
-its config at construction; absence is a hard error at startup, not
-at first request.
+request carrying `vm_id`/`master_epoch`. With it set, every request
+must carry non-empty `vm_id` + `master_epoch` (typed
+`BrokerVmIdRequired { tenant_id }` from `StartError` otherwise; pi-rs
+maps to `AcquireError`). Pi-rs's MicroVmProvider asserts both are
+set on its config at construction; absence is a hard error at
+startup, not at first request.
 
 `--tenant-peer-uid <t>=<bridge_uid>` pins SO_PEERCRED auth on the
 broker UDS to the cfs-mesh-bridge's effective uid. v1.0 runs the
 bridge as a dedicated `pi-sandbox-bridge` system uid; pi-rs's
 provisioning sets up the uid at first run and the `MicroVmProvider`
-holds the uid in its config.
+holds the uid in its config. The `--tenant-peer-uid` argv list grows
+on each VM acquire and shrinks on release; the broker reloads its
+peer-uid table on SIGHUP (operator-managed) or pi-rs cycles through a
+secondary broker on the next pool refill (Commit G chooses one; the
+default is SIGHUP since broker process recycle is operationally
+heavier).
+
+**Operator force-close via HTTP control plane.** Per contextfs PR 3
+part 7 (commit `655408d`), the broker exposes
+`POST /tenants/<t>/daemons/<id>/instance-close` for "agent compromise
+detected, kill the audit chain immediately" without waiting for VM
+teardown. Pi-rs operators can hit this endpoint to mint a forced
+`instance_closed` watermark; the daemon's next request will then
+fail with `StartError::AuditInstanceClosedOnBroker` and pi-rs's
+`AcquireError` mapping destroys the VM. Documented in `pi sandbox
+doctor --runbook` for incident response.
 
 #### 3.5.7 — Daemon TOML rendered at provisioning
 
@@ -1907,12 +1971,13 @@ The full operator-rendered `/etc/contextfsd/daemon.toml` inside the
 guest, matching contextfsd's actual config shape:
 
 ```toml
-tenant_id          = "tenant-a"
-vm_id              = "<pi_firecracker_uuid>"
-master_epoch       = 7
-tenant_secret_path = "/var/run/cfs/tenant_secret"   # bind-mounted from host tmpfs
-oidc_token_path    = "/var/run/secrets/token"        # bind-mounted WI token
-audit_log_path     = "/var/log/contextfs/audit.ndjson"
+tenant_id                = "tenant-a"
+vm_id                    = "<pi_firecracker_uuid>"
+master_epoch             = 7
+tenant_secret_path       = "/var/run/cfs/tenant_secret"        # bind-mounted from host tmpfs
+oidc_token_path          = "/var/run/secrets/token"             # bind-mounted WI token
+audit_log_path           = "/var/log/contextfs/audit.ndjson"
+daemon_instance_id_path  = "/var/lib/contextfs/daemon_instance.id"  # RFD-0024 PR 3 part 5: load-bearing across restarts; rotate to force fresh AuditResync
 
 [pdp]
 policy_path       = "/etc/contextfs/policy.cedar"
@@ -1927,11 +1992,26 @@ mountpoint = "/work"
 backend    = "remote-fs"                             # FUSE mediates via cfs-fs-server over Noise-IK data plane
 cache_dir  = "/var/cache/contextfs/workspace"
 read_only  = false
-audit_ping = { mode = "fail-open", high_water_mark = 1024 }
+# audit_ping = { ... }   <-- REMOVED in v0.40. ContextFS PR 3 part 7 (commit 655408d)
+#                            deleted the audit_ping mechanism and replaced it with always-on
+#                            batched AuditPusher. TOML still containing this field will be
+#                            REJECTED at daemon startup by `#[serde(deny_unknown_fields)]`.
+#                            See §3.5.4 for the replacement.
 
   [mount.remote_fs]
   target_uds = "/run/contextfs/fs.sock"              # guest-local UDS, exposed by data-plane cfs-mesh vsock-listen (§3.5.5)
 ```
+
+**Note on `daemon_instance_id_path`.** The default
+(`<audit_log_path>.parent/daemon_instance.id`) works, but explicit
+configuration lets operators rotate the file deterministically.
+**Rotating the daemon_instance.id file forces a fresh AuditResync**
+— the broker treats the new instance id as a fresh
+`(tenant, daemon_instance_id)` pair with no prior watermark. Useful
+for warm-pool VMs after master_epoch rotation, and for incident
+response (operator force-close via the HTTP control plane in §3.5.6
+mints a closed-watermark for the *current* instance id; next acquire
+boots a new instance with a rotated file).
 
 Commit G's `MicroVmProvider` renders this from a
 `MicroVmProviderConfig` struct at construction. The TOML schema is
@@ -1951,11 +2031,26 @@ that runs in CI when both repos are present.
 
 #### 3.5.8 — Version compatibility
 
-ContextFS broker MUST be `>= v0.3.0` — the version that shipped
-`vm_id`/`master_epoch`/`oidc_token` over the wire and the
-`--tenant-mode` flag. v0.2.x brokers reject any embedder request via
-serde unknown-field rejection at the first `verify_write`; that is
-the documented fail-loud signal.
+Per RFD-0025 §C.2: contextfs's `Cargo.toml` is at `version =
+"0.0.1-dev"` with no git tags. **Pi-rs Commit G pins by git
+revision** until contextfs cuts its first tagged release:
+
+```toml
+[dependencies]
+contextfsd  = { git = "https://github.com/giuseppemassaro/contextfs", rev = "<commit-sha>", default-features = false, features = ["remote-fs"] }
+```
+
+When contextfs cuts `v0.1.0` (or whatever number is right), pi-rs
+flips the pin to a `version = "X.Y.Z"` constraint and adds a CI
+constraint check.
+
+**Pre-RFD-0024 brokers (any contextfs build before commit
+`6594c3f`) surface as `StartError::BrokerProtocolTooOld
+{ broker_socket, error }`** from the daemon's `Hello` probe (RFD-0024
+§"Refactor scope" item 6 mixed-fleet rollout signal). The daemon
+refuses to mount; pi-rs's `AcquireError` mapping destroys the VM
+and reports the operator action ("upgrade contextfs broker to
+≥ commit 6594c3f"). No silent degradation.
 
 `pi sandbox doctor` performs **functional connectivity checks**, not
 argv inspection of foreign processes:
@@ -2038,14 +2133,23 @@ read-only-clean across boot.
 
 Failure surface visible to `MicroVmProvider`:
 
-| Trigger                                                | `AcquireError` variant            |
-| ------------------------------------------------------ | --------------------------------- |
-| `cfs-mesh vsock-listen` fails (vsock CID/port collision) | `HostTransportSetup`            |
-| `contextfsd` exits non-zero on startup                  | `GuestDaemonStartFailed { exit }` |
-| `contextfsd` rejects with `BrokerMasterEpochTooOld`     | `BrokerMasterEpochTooOld { epoch }` (eviction per §3.5.2) |
-| `contextfsd` rejects with `tenant_mode_legacy_no_vm_id` | `BrokerTenantModeMismatch`        |
-| `contextfsd` rejects with `oidc_*` codes                | `BrokerOidcRejected { code }`     |
-| `/run/pi-cfs/.ready` not written within `boot_timeout`  | `ReadyTimeout { boot_timeout, last_dmesg }` |
+| Trigger                                                  | `AcquireError` variant            |
+| -------------------------------------------------------- | --------------------------------- |
+| `cfs-mesh vsock-listen` fails (vsock CID/port collision) | `HostTransportSetup`              |
+| `contextfsd` exits non-zero on startup                   | `GuestDaemonStartFailed { exit }` |
+| `StartError::BrokerMasterEpochTooOld { configured_epoch }` from contextfsd | `BrokerMasterEpochTooOld { epoch }` (eviction per §3.5.2) |
+| `StartError::BrokerVmIdRequired { tenant_id }` from contextfsd (covers what earlier drafts called `tenant_mode_legacy_no_vm_id`) | `BrokerVmIdRequired { tenant_id }` (operator alert: missing `vm_id` config) |
+| `StartError::BrokerOidcRejected { reason }` from contextfsd | `BrokerOidcRejected { reason }`   |
+| `StartError::BrokerProtocolTooOld { broker_socket, error }` from contextfsd (RFD-0024 §"Refactor scope" item 6 mixed-fleet rollout signal — broker is too old to speak the daemon's wire protocol) | `BrokerProtocolTooOld { broker_socket, error }` (operator alert: upgrade contextfs broker to ≥ commit `6594c3f`) |
+| `StartError::AuditInstanceClosedOnBroker { daemon_instance_id, closed_at_seq }` from contextfsd (RFD-0024 §"Replay protection" — broker has marked this instance closed; operator force-close, sentinel emission, or 16-week TTL aged out) | `AuditInstanceClosedOnBroker { daemon_instance_id, closed_at_seq }` (operator alert: rotate `daemon_instance.id` per §3.5.7 + RUNBOOK; restart) |
+| `/run/pi-cfs/.ready` not written within `boot_timeout`   | `ReadyTimeout { boot_timeout, last_dmesg }` |
+
+**`BrokerTenantModeMismatch` removed.** v0.39 listed a row for this
+variant; per RFD-0025 §C.1 + the contextfs maintainer review of v0.39
+the variant doesn't exist in contextfs's shipping `StartError` enum —
+the legacy-no-vm_id case is covered by `BrokerVmIdRequired { tenant_id }`
+above. Pi-rs's `AcquireError` taxonomy drops `BrokerTenantModeMismatch`
+in v0.40.
 
 Schema-drift detection: pi-rs's `MicroVmProviderConfig` has a
 `#[serde(deny_unknown_fields)]` mirror of contextfsd's `DaemonConfig`
@@ -2057,6 +2161,36 @@ integration test (`tests/contextfs_schema_pin.rs`) that
 config struct, gated on a `CONTEXTFS_REPO_PATH` env var so CI can
 opt in.
 
+#### 3.5.10 — Free-surface mentions from RFD-0024 PR 3
+
+Two contextfs-side surfaces pi-rs's Linux Stage 1 inherits at zero
+implementation cost:
+
+- **Kernel-attested `caller_exe` + `caller_start_time` in `broker.log`**
+  (contextfs commit `358bcb3`). Every `verify_write` decision the
+  broker emits to `broker.log` now carries `caller_exe` (kernel
+  symlink-target via `/proc/<pid>/exe`, not `comm`-spoofable) and
+  `caller_start_time` (boot-relative process birth-tick). When pi-rs
+  ingests `broker.log` (an operator-managed file separate from
+  `SandboxAction` JSONL), these two fields can be cross-referenced
+  against pi-rs's per-VM telemetry to confirm "the verify_write the
+  broker observed came from this VM's daemon process, not a
+  same-uid impostor". v1 surfaces this as an optional read-side
+  enrichment in `pi --stats sandbox-actions`; not in the hot path.
+- **`instance_closed` sentinel on graceful shutdown** (RFD-0024 PR 3
+  part 6, contextfs commit `604f897`). When pi-cfs-init calls
+  `handle.shutdown().await` on graceful VM teardown, contextfsd
+  mints a signed sentinel that the broker pins as the close
+  watermark for the `(tenant, daemon_instance_id)` pair. Hard kills
+  (warm-pool eviction without a graceful shutdown — i.e. every
+  destroy-on-non-Clean release in pi-rs's normal flow) skip the
+  sentinel; the broker's `high_watermark` for that pair stays
+  intact, and the operator force-close HTTP endpoint (§3.5.6)
+  fills the gap if needed. Pi-rs's pool-return path *does* try
+  graceful shutdown when a VM ages out (rotation cap), so warm-pool
+  rotations under normal operation produce a clean audit chain
+  with sentinels at every boundary.
+
 ### 4. Per-OS launcher impls
 
 #### Linux: `FirecrackerLauncher` (`#[cfg(target_os = "linux")]`)
@@ -2064,7 +2198,7 @@ opt in.
 - Probes `/dev/kvm` and the `firecracker` binary at construction.
 - Maintains a **warm pool of N (default 2) pre-booted VMs per `BootSpec` ring**, as `tokio::sync::Mutex<HashMap<BootSpec, VecDeque<WarmVm>>>`. `acquire(&boot_spec)` pops a warm VM from the matching ring in O(1); release returns it to the same ring. Two callers with different `BootSpec`s (e.g. different `host_cwd` per RFD 0006 worktree) get separate rings and cannot share a warm VM. Default 2/ring because real coding-agent tool calls are dominantly sequential (write → read → bash → read); pool=2 covers one parallel subagent burst at ~512MB resident. Telemetry on pool hit-rate per ring decides whether to bump to 4. Empty rings garbage-collect after their last VM is released and an idle TTL elapses (default 5 min) so a long-running session that drifts across many cwds doesn't leak unbounded ring entries.
 - Pool refills opportunistically in the background.
-- Each Linux/Firecracker VM gets its own firecracker process, API socket, vsock socket, plus per-VM `cfs-fs-server` + `contextfs-broker` instances on per-VM run-dir UDSes (§3.5.5). macOS/vfkit and Windows/cloud-hypervisor VMs use a per-VM virtio-fs share (those launchers expose virtio-fs; Firecracker does not). Rotation: VMs are torn down and replaced after N tool calls or T seconds (default 50 calls / 5 minutes) to bound cumulative state leakage.
+- Each Linux/Firecracker VM gets its own firecracker process, API socket, vsock socket, plus a per-VM `cfs-fs-server` instance on a per-VM run-dir UDS (§3.5.5). The `contextfs-broker` is **shared across all VMs in one pi process** (per §3.5.5 corrected topology + RFD-0025 §A); it's spawned at first acquire on `/run/pi-rs/broker.sock` and joined at pi process exit. macOS/vfkit and Windows/cloud-hypervisor VMs use a per-VM virtio-fs share (those launchers expose virtio-fs; Firecracker does not). Rotation: VMs are torn down and replaced after N tool calls or T seconds (default 50 calls / 5 minutes) to bound cumulative state leakage.
 - Cribbed from aegis: vsock client wire-up; the rest is fresh.
 
 LoC estimate: 1500 (incl. pool) + 200 for tests.
@@ -2278,6 +2412,7 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 - **Per-tool network policy.** A future RFD.
 - **Custom rootfs per tool.**
 - **Per-subagent pool isolation.** v1.0: by default subagents inherit the parent's `Arc<dyn SandboxProvider>` and **share its pool** (this is the existing pi-rs pattern from RFD 0005). The mutex around `VecDeque<WarmVm>` serializes acquire/release; the pool grows on demand if both parent and subagent need a VM concurrently. Operators who want strict isolation construct a fresh `MicroVmProvider` per subagent (memory cost: ~256MB × pool_size per extra provider) — this is the halo supervisor's choice, not the default.
+- **Process lineage proofs as Cedar context.** Deferred contextfs-side (eBPF unavailable in target sandboxes; cooperative HMAC-token mode would need pi-sandbox-worker / pi-cfs-init as the trust root). Pi-rs revisits when its policies require ancestor-based gating; until then, pi-rs's UID-separation + UDS-perms + seccomp defenses (§6) are sufficient for the v1 threat model.
 
 ## Open questions
 
@@ -2318,6 +2453,53 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.40-prep (2026-05-05):** contextfs maintainer reviewed v0.39
+  against contextfs `main` @ `06e9531` (review at
+  `rfd/0023-CONTEXTFS-REVIEW-v0.39.md`). Body of RFD is sound; §3.5
+  needs 7 concrete edits before Commit G. Items 2–7 closed in this
+  prep commit; **§3.5.4 left as a `PENDING contextfs draft`
+  placeholder** because the maintainer offered to write the
+  audit_ping → AuditPusher rewrite directly (it's contextfs-shaped
+  content, RFD-0024 §"Refactor scope"). v0.40 will land as one
+  atomic commit splicing in their §3.5.4 text.
+  Closed in this prep:
+  (2) §3.5.6 broker invocation gains `--tenant-secret-path
+  <run_dir>/<vm_id>/cfs-tenant-secret` (RFD-0024 PR 3 part 5
+  AuditResync requirement; without it broker returns
+  `verify_write_unavailable`).
+  (3) §3.5.5 topology corrected: **one shared broker per pi
+  process** (was per-VM in earlier drafts; per RFD-0025 §A and
+  contextfs maintainer review). Broker uses `--tenant-peer-uid`
+  multi-tenant fan-in; one broker process serves N VMs with one
+  tenant id per VM.
+  (4) §3.5.9 failure-surface table: `BrokerTenantModeMismatch` row
+  removed (variant doesn't exist in shipping contextfs `StartError`;
+  the legacy-no-vm_id case is `BrokerVmIdRequired { tenant_id }`);
+  added rows for `BrokerProtocolTooOld { broker_socket, error }`
+  and `AuditInstanceClosedOnBroker { daemon_instance_id, closed_at_seq }`
+  (the two new variants RFD-0024 PR 3 ships). `AcquireError` enum
+  in §2 updated lockstep.
+  (5) §3.5.7 TOML drops the `audit_ping = { ... }` line (would be
+  rejected at daemon startup by `#[serde(deny_unknown_fields)]`);
+  adds explicit `daemon_instance_id_path` (RFD-0024 PR 3 part 5
+  load-bearing across restarts). Added rotation note: rotating
+  the file forces a fresh AuditResync.
+  (6) §3.5.8 version-pin section rewritten per RFD-0025 §C.2:
+  pin by git rev now, flip to `version = "X.Y.Z"` when contextfs
+  cuts its first tagged release. Pre-RFD-0024 brokers surface
+  as `BrokerProtocolTooOld` (was a stale "v0.2.x reject" claim).
+  (7) Three free-surface mentions added: §3.5.6 covers the
+  operator HTTP `POST /tenants/<t>/daemons/<id>/instance-close`
+  endpoint for incident response; new §3.5.10 covers
+  `caller_exe`/`caller_start_time` in `broker.log` (kernel-attested,
+  not `comm`-spoofable) and the `instance_closed` sentinel that
+  graceful shutdown mints.
+  (8) Process lineage proofs added to §"Out of scope / deferred"
+  per the contextfs review pointer: deferred contextfs-side;
+  pi-rs revisits when its policies require ancestor-based gating.
+  Plus a bug fix: §4 "Per-OS launcher impls" had a stale
+  "per-VM contextfs-broker" claim; corrected to "shared broker
+  per pi process" lockstep with §3.5.5.
 - **v0.39 (2026-05-05):** rfd-critic v0.38 returned **READY**
   ("Critical issues: None. The document is now implementable as
   written.") — second clean READY in the iteration history,
