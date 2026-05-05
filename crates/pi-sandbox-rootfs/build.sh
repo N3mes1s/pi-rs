@@ -41,11 +41,14 @@ trap 'rm -rf "${WORK}"' EXIT
 echo "==> Building pi-sandbox-rootfs v${VERSION} into ${OUT_ZSTD}"
 echo "==> Working dir: ${WORK}"
 
-# 1. Cross-compile pi-sandbox-worker for static-musl.
+# 1. Cross-compile pi-sandbox-worker + the vsock probe (used by the
+# seccomp regression test) for static-musl.
 echo "==> Cross-compiling pi-sandbox-worker (release, x86_64-unknown-linux-musl)"
-cargo build --release --target x86_64-unknown-linux-musl --bin pi-sandbox-worker
+cargo build --release --target x86_64-unknown-linux-musl --bin pi-sandbox-worker --bin pi-vsock-probe
 WORKER_BIN="$(pwd)/target/x86_64-unknown-linux-musl/release/pi-sandbox-worker"
+PROBE_BIN="$(pwd)/target/x86_64-unknown-linux-musl/release/pi-vsock-probe"
 [[ -x "${WORKER_BIN}" ]] || { echo "ERROR: worker not built at ${WORKER_BIN}"; exit 2; }
+[[ -x "${PROBE_BIN}" ]] || { echo "ERROR: probe not built at ${PROBE_BIN}"; exit 2; }
 
 # 2. Fetch alpine miniroot if missing.
 mkdir -p "${OUT_DIR}/cache"
@@ -60,8 +63,24 @@ mkdir -p "${ROOT}"
 echo "==> Extracting alpine miniroot"
 tar -xzf "${OUT_DIR}/cache/${ALPINE_MINI}" -C "${ROOT}"
 
-# 4. Drop the worker in /usr/local/bin.
+# 4. Drop the worker (and the vsock probe used by tests) in /usr/local/bin.
 install -m 0755 "${WORKER_BIN}" "${ROOT}/usr/local/bin/pi-sandbox-worker"
+install -m 0755 "${PROBE_BIN}" "${ROOT}/usr/local/bin/pi-vsock-probe"
+
+# 4b. UID separation (RFD 0023 §6 "Bash-can't-bypass" Layer 1).
+#     pi-worker (UID 1000) runs the worker process; pi-tool (UID 1001)
+#     runs every tool subprocess (bash, future tools). Bash can't read
+#     pi-worker's memory, signal it, or scribble on worker-owned files.
+#
+#     We APPEND minimal /etc/passwd + /etc/group entries here at build
+#     time. The chown of /opt /home/pi-tool /var/tmp is deferred to the
+#     guest init script (runs as root inside the guest, so chown works
+#     regardless of who built the rootfs).
+echo 'pi-worker:x:1000:1000:pi sandbox worker:/var/empty:/sbin/nologin' >> "${ROOT}/etc/passwd"
+echo 'pi-tool:x:1001:1001:pi sandbox tool subprocess:/home/pi-tool:/bin/sh'  >> "${ROOT}/etc/passwd"
+echo 'pi-worker:x:1000:' >> "${ROOT}/etc/group"
+echo 'pi-tool:x:1001:'   >> "${ROOT}/etc/group"
+mkdir -p "${ROOT}/home/pi-tool" "${ROOT}/opt"
 
 # 5. Write the init script. Mounts /proc, /sys; checks
 #    /proc/cmdline for the proto_version pin; sets up overlay-on-tmpfs
@@ -236,7 +255,23 @@ if [ -n "$cmdline_proto" ] && [ "$cmdline_proto" != "$expected_proto" ]; then
   echo b > /proc/sysrq-trigger
   exit 1
 fi
-exec /usr/local/bin/pi-sandbox-worker --vsock-port=5001 --work-dir=/work
+
+# UID-separation prep (RFD 0023 §6 Layer 1). /etc/passwd entries for
+# pi-worker (1000) and pi-tool (1001) were appended at build time;
+# we chown the persistent-scratch dirs at boot, when we're root in
+# the overlay (build-time chown failed because the rootfs builder
+# isn't root). After this, bash subprocesses dropping to UID 1001
+# can write to /opt + /home/pi-tool + /var/tmp.
+mkdir -p /home/pi-tool /opt /var/tmp /tmp 2>/dev/null
+chown 1001:1001 /home/pi-tool 2>/dev/null
+chmod 0700 /home/pi-tool 2>/dev/null
+chown 1001:1001 /opt 2>/dev/null
+chmod 0775 /opt 2>/dev/null
+# /tmp + /var/tmp world-writable with sticky bit (Linux convention).
+chmod 1777 /tmp 2>/dev/null
+chmod 1777 /var/tmp 2>/dev/null
+
+exec /usr/local/bin/pi-sandbox-worker --vsock-port=5001 --work-dir=/tmp
 POST_EOF
 chmod 0755 "${ROOT}/sbin/init-overlayed"
 

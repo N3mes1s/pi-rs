@@ -17,9 +17,10 @@
 //! freshly added here), run it. The seccomp filter must make
 //! `socket(AF_VSOCK, SOCK_STREAM, 0)` return EPERM.
 //!
-//! Gated on `PI_SANDBOX_FC_NET_TEST=1` (uses the Allow path so the
-//! search-proxy listener IS bound and the bypass would actually
-//! land somewhere if seccomp didn't block it).
+//! Gated on `PI_SANDBOX_FC_TEST=1`. No network required — the
+//! probe binary is precompiled into the rootfs at build time so
+//! we don't need apk-add a compiler, and the seccomp check itself
+//! happens entirely inside the guest (no host listener involved).
 
 #![cfg(target_os = "linux")]
 
@@ -38,8 +39,8 @@ fn skip(reason: &str) {
 
 #[tokio::test]
 async fn bash_cannot_open_vsock_socket() {
-    if std::env::var("PI_SANDBOX_FC_NET_TEST").is_err() {
-        return skip("PI_SANDBOX_FC_NET_TEST not set");
+    if std::env::var("PI_SANDBOX_FC_TEST").is_err() {
+        return skip("PI_SANDBOX_FC_TEST not set");
     }
     if which::which("firecracker").is_err() {
         return skip("firecracker not on PATH");
@@ -63,108 +64,41 @@ async fn bash_cannot_open_vsock_socket() {
         ..Default::default()
     };
     let launcher = FirecrackerLauncher::new(cfg);
-    // Allow + an allowlist for the alpine repos so apk add gcc works.
     let spec = VmSpec {
         host_cwd: work.path().to_path_buf(),
         host_cwd_writable: true,
         env: Default::default(),
-        network_policy: NetworkPolicy::Allow {
-            tap_name: "tap-pi0".into(),
-            guest_ip_cidr: "172.16.0.2/30".into(),
-            guest_gateway: "172.16.0.1".into(),
-            guest_dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
-            guest_mac: None,
-            egress_allowlist: vec!["dl-cdn.alpinelinux.org".into(), "151.101.0.0/16".into()],
-        },
-        // Match the apk-demo's ceiling — gcc + cargo etc. need the
-        // bigger overlay tmpfs.
-        vm_ceiling: VmCeiling {
-            mem_mib: 2048,
-            vcpus: 2,
-            disk_mib: 1536,
-        },
+        network_policy: NetworkPolicy::Deny,
+        vm_ceiling: VmCeiling::default(),
         rootfs_version: RootfsVersion::current(),
     };
 
     let h = launcher.acquire(&spec).await.expect("acquire");
 
-    // 1. Install a C compiler so we can craft the syscall test.
-    //    apk add gcc + musl-dev. This proves the network-allowed
-    //    path is intact; a separate test (apk_demo) covers the
-    //    same ground but for cargo. We need just gcc + libc
-    //    headers here.
+    // The rootfs ships a precompiled `pi-vsock-probe` at
+    // /usr/local/bin/ (see crates/pi-sandbox-rootfs/build.sh §1
+    // and §4). It tries `socket(AF_VSOCK, SOCK_STREAM, 0)` and
+    // exits with errno on failure. Under our seccomp filter the
+    // syscall is blocked → errno=1 (EPERM) → exit 1.
     let r = h
         .execute(
             &ToolContext::default(),
             &CallLimits {
-                wall_timeout: Duration::from_secs(180),
-                max_output_bytes: 256 * 1024,
+                wall_timeout: Duration::from_secs(15),
+                ..Default::default()
             },
             "bash",
             &json!({
-                "command": "apk add --no-cache gcc musl-dev 2>&1 | tail -3 ; \
-                            which gcc; gcc --version | head -1"
+                "command": "/usr/local/bin/pi-vsock-probe; echo \"rc=$?\""
             }),
         )
         .await
-        .expect("apk add gcc");
-    eprintln!("apk add gcc:\n{}", r.result.model_output);
-    assert!(
-        !r.result.is_error && r.result.model_output.contains("/usr/bin/gcc"),
-        "apk add gcc failed: {}",
-        r.result.model_output
-    );
-
-    // 2. Write a tiny C program that calls socket(AF_VSOCK, ...)
-    //    and exits with the errno on failure (or 0 on success).
-    //    AF_VSOCK == 40 on Linux. Build it. Run it. Expect EPERM (1)
-    //    from seccomp — the syscall is filtered.
-    //
-    //    Note: we put the source file under /opt/ rather than /tmp
-    //    because /tmp is wiped by per-call hygiene between calls.
-    //    Within ONE call the source persists, so this test could
-    //    use /tmp too — but writing to /opt makes the script
-    //    idempotent across re-runs of the test on the same VM.
-    let r = h
-        .execute(
-            &ToolContext::default(),
-            &CallLimits {
-                wall_timeout: Duration::from_secs(60),
-                max_output_bytes: 64 * 1024,
-            },
-            "bash",
-            &json!({
-                "command": "set -e ; mkdir -p /opt/vsocktest ; cd /opt/vsocktest ; \
-                    cat > probe.c <<'EOF'\n\
-                    #include <sys/socket.h>\n\
-                    #include <stdio.h>\n\
-                    #include <errno.h>\n\
-                    #include <string.h>\n\
-                    int main(void) {\n\
-                      int fd = socket(40 /* AF_VSOCK */, 1 /* SOCK_STREAM */, 0);\n\
-                      if (fd < 0) {\n\
-                        int e = errno;\n\
-                        printf(\"socket failed errno=%d (%s)\\n\", e, strerror(e));\n\
-                        return e;\n\
-                      }\n\
-                      printf(\"socket succeeded fd=%d (THIS IS BAD)\\n\", fd);\n\
-                      return 0;\n\
-                    }\n\
-                    EOF\n\
-                    gcc -static probe.c -o probe 2>&1 ; \
-                    ./probe ; \
-                    echo \"rc=$?\""
-            }),
-        )
-        .await
-        .expect("compile + run probe");
+        .expect("run probe");
     eprintln!("vsock probe:\n{}", r.result.model_output);
 
     let body = r.result.model_output.to_lowercase();
-    // "operation not permitted" (errno 1, EPERM) is the seccomp
-    // result. We accept either the literal string or the rc=1.
     assert!(
-        body.contains("operation not permitted") || body.contains("rc=1"),
+        body.contains("operation not permitted") && body.contains("rc=1"),
         "bash's `socket(AF_VSOCK, ...)` must be EPERM under seccomp; got: {}",
         r.result.model_output
     );

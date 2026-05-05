@@ -12,10 +12,15 @@
 //! Defense: a deny-list seccomp filter installed at fork time,
 //! BEFORE bash exec's. The filter blocks:
 //!
-//! - `socket(AF_VSOCK | AF_PACKET | AF_NETLINK, ...)` — kills the
-//!   "reach the host listener" route, the "raw L2 packet" route,
-//!   and the "configure netns from inside" route. Each is checked
-//!   on the first argument (domain). Unknown families pass.
+//! - `socket(AF_VSOCK | AF_PACKET, ...)` — kills the "reach the
+//!   host listener" route and the "raw L2 packet" route. Each is
+//!   checked on the first argument (domain). Unknown families pass.
+//!   AF_NETLINK is intentionally NOT blocked: it's used by `ip`,
+//!   `ss`, and other read-only network admin utilities that bash
+//!   payloads legitimately call. AF_NETLINK doesn't enable
+//!   exfiltration (no kernel-mediated WAN egress), and any
+//!   actual netns mutation via NETLINK requires CAP_NET_ADMIN
+//!   which the unprivileged pi-tool UID doesn't have.
 //!
 //! - filesystem-boundary syscalls: `mount`, `umount2`, `pivot_root`,
 //!   `chroot`. Bash shouldn't be remounting the overlay or
@@ -60,11 +65,10 @@ pub(super) fn install_bash_filter() -> Result<(), String> {
 }
 
 fn build_filter() -> Result<SeccompFilter, seccompiler::BackendError> {
-    // AF_VSOCK = 40, AF_NETLINK = 16, AF_PACKET = 17 on Linux.
-    // glibc/musl headers, `bits/socket.h`. These have been stable
-    // for >15 years and are part of the Linux ABI.
+    // AF_VSOCK = 40, AF_PACKET = 17 on Linux. glibc/musl headers,
+    // `bits/socket.h`. AF_NETLINK = 16 is intentionally NOT blocked
+    // — see the module-doc.
     const AF_VSOCK: u64 = 40;
-    const AF_NETLINK: u64 = 16;
     const AF_PACKET: u64 = 17;
 
     fn deny_socket_family(family: u64) -> Result<SeccompRule, seccompiler::BackendError> {
@@ -83,7 +87,6 @@ fn build_filter() -> Result<SeccompFilter, seccompiler::BackendError> {
         libc::SYS_socket,
         vec![
             deny_socket_family(AF_VSOCK)?,
-            deny_socket_family(AF_NETLINK)?,
             deny_socket_family(AF_PACKET)?,
         ],
     );

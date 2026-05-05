@@ -205,70 +205,53 @@ async fn apk_add_cargo_inside_microvm_with_network() {
         .expect("nslookup");
     eprintln!("nslookup:\n{}", r.result.model_output);
 
-    // 3. The headline demo: apk add cargo. Cargo on Alpine 3.19 pulls
-    //    in the rust toolchain as a dep. Allow up to 5 min for
-    //    download + extract.
+    // 3. **Hardened-mode security regression**: bash now runs as
+    //    pi-tool (UID 1001), not root. `apk add` requires write
+    //    access to /usr, /var/cache/apk, /lib — all root-owned.
+    //    The agent therefore CANNOT install arbitrary packages
+    //    even with network access, which is the desired
+    //    sandbox-vs-host-package-installer boundary.
+    //
+    //    Pre-hardened versions of this test demonstrated `apk add
+    //    cargo` succeeding (888 MiB, 43 packages) followed by
+    //    `cargo build` of a real Rust file. With UID separation
+    //    that capability is correctly removed.
     let r = h
         .execute(
             &ToolContext::default(),
             &CallLimits {
-                wall_timeout: Duration::from_secs(300),
-                max_output_bytes: 1024 * 1024,
-            },
-            "bash",
-            &json!({
-                "command": "apk update 2>&1 | tail -5 ; echo '---apk add---' ; \
-                            apk add --no-cache cargo 2>&1 ; apk_rc=$? ; \
-                            echo \"---apk_rc=$apk_rc---\" ; \
-                            which cargo rustc 2>&1 ; \
-                            cargo --version 2>&1 ; rustc --version 2>&1"
-            }),
-        )
-        .await
-        .expect("apk add");
-    eprintln!("apk add full output:\n{}", r.result.model_output);
-    assert!(
-        r.result.model_output.contains("apk_rc=0"),
-        "apk add cargo failed; output: {}",
-        r.result.model_output
-    );
-    assert!(
-        r.result.model_output.contains("/usr/bin/cargo"),
-        "apk add cargo did not yield /usr/bin/cargo"
-    );
-    assert!(
-        r.result.model_output.contains("/usr/bin/rustc"),
-        "apk add cargo did not yield /usr/bin/rustc (cargo's rust dep)"
-    );
-
-    // 4. Real Rust file write + cargo build inside the microVM.
-    //    Proof point: the guest can write a real Rust source file and
-    //    compile it to a static binary using the just-installed
-    //    toolchain. This is what the user asked for as the gate
-    //    before commit G3.
-    let r = h
-        .execute(
-            &ToolContext::default(),
-            &CallLimits {
-                wall_timeout: Duration::from_secs(120),
+                wall_timeout: Duration::from_secs(60),
                 max_output_bytes: 256 * 1024,
             },
             "bash",
             &json!({
-                "command": "set -e ; \
-                    mkdir -p /tmp/hello ; cd /tmp/hello ; \
-                    cargo init --name hello --bin --quiet ; \
-                    cat > src/main.rs <<'EOF'\nfn main() { println!(\"hello from inside the microvm\"); }\nEOF\n \
-                    cargo build --offline 2>&1 | tail -15 ; \
-                    ./target/debug/hello"
+                "command": "id ; echo '---apk add---' ; \
+                            out=$(apk add --no-cache cargo 2>&1) ; apk_rc=$? ; \
+                            echo \"$out\" | tail -10 ; \
+                            echo \"---apk_rc=$apk_rc---\""
             }),
         )
         .await
-        .expect("cargo build");
-    eprintln!("cargo build:\n{}", r.result.model_output);
+        .expect("apk add");
+    eprintln!("apk add (hardened) output:\n{}", r.result.model_output);
     assert!(
-        r.result.model_output.contains("hello from inside the microvm"),
-        "cargo-built binary did not produce expected output"
+        r.result.model_output.contains("uid=1001"),
+        "bash should run as uid=1001, confirming UID separation: {}",
+        r.result.model_output
+    );
+    let body = r.result.model_output.to_lowercase();
+    assert!(
+        !r.result.model_output.contains("apk_rc=0\n"),
+        "apk add succeeded under UID separation — pi-tool should NOT be able to install: {}",
+        r.result.model_output
+    );
+    assert!(
+        body.contains("permission denied")
+            || body.contains("read-only")
+            || body.contains("not permitted")
+            || body.contains("unable to lock"),
+        "expected apk-add to fail with permission-denied-like error; got: {}",
+        r.result.model_output
     );
 
     // 5. **Allowlist enforcement**: an off-allowlist host MUST be

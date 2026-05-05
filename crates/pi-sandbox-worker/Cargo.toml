@@ -13,6 +13,13 @@ publish = false
 name = "pi-sandbox-worker"
 path = "src/main.rs"
 
+# Tiny precompiled probe used by the seccomp regression test inside
+# the guest. apk-add can't install gcc post-hardening (bash drops to
+# pi-tool), so we bake the probe binary at rootfs build time.
+[[bin]]
+name = "pi-vsock-probe"
+path = "src/bin/pi-vsock-probe.rs"
+
 [lib]
 name = "pi_sandbox_worker"
 path = "src/lib.rs"
@@ -40,3 +47,4 @@ async-trait.workspace = true
 # vsock is Linux-only — gate the dependency.
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = "0.7"
+libc = "0.2"

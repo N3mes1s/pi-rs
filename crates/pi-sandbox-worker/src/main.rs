@@ -32,14 +32,23 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     init_tracing(&cli.log_level);
 
-    // Signal to `pi_tools_core::bash::seccomp` that any bash
-    // subprocess we spawn should install the seccomp deny-list
-    // filter (block AF_VSOCK socket() + mount/pivot_root/bpf/etc).
-    // Closes the bash → vsock(2,5003) policy-bypass route. The
-    // env var is inherited by every child the worker spawns; the
-    // filter itself is installed by `bash.rs` between fork and
-    // exec via `Command::pre_exec`, so the worker process itself
+    // Sandbox hardening for tool subprocesses (RFD 0023 §6
+    // "Bash-can't-bypass"). Both env vars are read by
+    // `pi_tools_core::bash`'s `pre_exec` hook, so they apply to
+    // every bash subprocess this worker spawns. The worker itself
     // is unaffected.
+    //
+    // PI_SANDBOX_BASH_DROP_PRIV=1
+    //   setgroups(0,NULL) + setgid(1001 /pi-tool/) + setuid(1001) before
+    //   exec. Bash runs as an unprivileged UID, can't read/modify
+    //   worker memory, can't signal the worker, can't write to
+    //   root-owned files.
+    //
+    // PI_SANDBOX_BASH_SECCOMP=1
+    //   Pure Rust deny-list filter blocking socket(AF_VSOCK|...),
+    //   mount/pivot_root/bpf/etc. Closes the bash → vsock(2,5003)
+    //   policy-bypass route the seccomp commit added.
+    std::env::set_var("PI_SANDBOX_BASH_DROP_PRIV", "1");
     std::env::set_var("PI_SANDBOX_BASH_SECCOMP", "1");
 
     pi_sandbox_worker::listener::serve(cli.vsock_port, cli.work_dir).await

@@ -103,25 +103,58 @@ impl Tool for BashTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        // Optional seccomp denylist for tool subprocesses, gated on
-        // `PI_SANDBOX_BASH_SECCOMP=1` (set by `pi-sandbox-worker` at
-        // startup; absent under `local-process`). Closes the
-        // `bash → vsock(2,5003)` policy-bypass route + blocks
-        // mount/pivot_root/kexec/bpf class syscalls. Pure Rust filter
-        // installed in the child between fork and exec via pre_exec.
-        // See `seccomp.rs` for what's blocked + why each entry exists.
+        // Optional sandbox hardening for tool subprocesses, gated on
+        // env vars set by `pi-sandbox-worker` at startup (absent under
+        // `local-process`). The closure runs in the child between
+        // fork() and execve(), so all of these apply to the upcoming
+        // bash process, not to the worker.
+        //
+        // Order matters:
+        //   1. setgid(pi-tool gid)  ← drops group privileges first
+        //   2. setuid(pi-tool uid)  ← drops user privileges; after this
+        //                              we can't setuid to anything else
+        //   3. seccomp filter       ← installed last (works without root)
+        //
+        // RFD 0023 §6 "Bash-can't-bypass" Layer 1 (UID separation) +
+        // Layer 2 (seccomp deny-list). Together they close the
+        // most impactful microvm-escape attack: bash → vsock(2,5003)
+        // → host's web_search proxy listener.
         #[cfg(target_os = "linux")]
-        if std::env::var("PI_SANDBOX_BASH_SECCOMP").as_deref() == Ok("1") {
-            // tokio::process::Command exposes pre_exec directly on Linux
-            // (no CommandExt import needed). Closure runs in the child
-            // between fork() and execve(), so the filter applies to the
-            // upcoming bash process, not to the worker.
-            unsafe {
-                cmd.pre_exec(|| {
-                    seccomp::install_bash_filter().map_err(|e| {
-                        std::io::Error::new(std::io::ErrorKind::Other, e)
-                    })
-                });
+        {
+            let drop_to_pi_tool =
+                std::env::var("PI_SANDBOX_BASH_DROP_PRIV").as_deref() == Ok("1");
+            let install_seccomp =
+                std::env::var("PI_SANDBOX_BASH_SECCOMP").as_deref() == Ok("1");
+            if drop_to_pi_tool || install_seccomp {
+                unsafe {
+                    cmd.pre_exec(move || {
+                        if drop_to_pi_tool {
+                            // pi-tool UID/GID baked into the rootfs at
+                            // build time; see crates/pi-sandbox-rootfs/
+                            // build.sh §"4b. UID separation".
+                            const PI_TOOL_UID: libc::uid_t = 1001;
+                            const PI_TOOL_GID: libc::gid_t = 1001;
+                            // setgroups(0, NULL) clears supplementary
+                            // groups so we don't carry root's group
+                            // membership.
+                            if libc::setgroups(0, std::ptr::null()) != 0 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                            if libc::setgid(PI_TOOL_GID) != 0 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                            if libc::setuid(PI_TOOL_UID) != 0 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                        }
+                        if install_seccomp {
+                            seccomp::install_bash_filter().map_err(|e| {
+                                std::io::Error::new(std::io::ErrorKind::Other, e)
+                            })?;
+                        }
+                        Ok(())
+                    });
+                }
             }
         }
 
