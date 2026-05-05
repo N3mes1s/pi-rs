@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.33 — vsock-proxied web_search; re-review pending)
+- **Status:** Discussion (v0.34 — vsock-proxied web_search w/ host-initiated channel)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -64,7 +64,7 @@ use pi_ai::{ToolResult, ToolSpec};
 
 Audit of `pi-tools/Cargo.toml` *at the time RFD 0023 v0.4 was written (2026-05-02)* showed `pi-ai.workspace = true` and `reqwest.workspace = true` as unconditional `[dependencies]` — the host build pulled in the whole world. As of 2026-05-04 those entries have moved to `[dev-dependencies]` (Commit A2 landed; `pi-tools` itself is a thin re-export façade over `pi-tools-core` + `pi-tools-net`). The dependency-problem framing below is preserved as historical context for *why* the A1/A2 split exists; the current state is documented in the "Resolution" paragraph.
 
-**Resolution (Commits A1/A2 — both shipped):** A1 extracts the POD types `ToolResult` / `ToolSpec` / `ToolError` into a tiny `pi-tool-types` crate (deps: `serde`/`serde_json`/`thiserror` only); `pi-ai` re-exports them for back-compat. A2 splits `pi-tools` into `pi-tools-core` (the guest-safe file/process tools — `read`/`write`/`edit`/`bash`/`grep`/`find`/`ls`/`monitor` all live here today; `monitor` is in the source tree but is **not registered** in the guest worker's tool dispatcher under v1 because the one-shot RPC can't carry its streaming output) and `pi-tools-net` (web_search), with `pi-tools` itself becoming a re-export façade. **As of 2026-05-04 both A1 and A2 are merged on `main`** (`crates/pi-tools/Cargo.toml` already pulls `pi-tools-core` + `pi-tools-net`). The remaining A-series work for guest-side completeness: extracting `ToolContext` / a `Tool` impl that doesn't transitively pull `pi-ai` (some shared trait machinery still lives in `pi-tools` re-exporting `pi-ai` types). The guest worker depends on `pi-tool-types` + `pi-tools-core` + `pi-sandbox-protocol`. Compiles statically against musl, links into a ~6–8 MB binary, fits in alpine.
+**Resolution (Commits A1/A2 — both shipped):** A1 extracts the POD types `ToolResult` / `ToolSpec` / `ToolError` into a tiny `pi-tool-types` crate (deps: `serde`/`serde_json`/`thiserror` only); `pi-ai` re-exports them for back-compat. A2 splits `pi-tools` into `pi-tools-core` (the guest-safe file/process tools — `read`/`write`/`edit`/`bash`/`grep`/`find`/`ls`/`monitor` all live here today; `monitor` is in the source tree but is **not registered** in the guest worker's tool dispatcher under v1 because the one-shot RPC can't carry its streaming output) and `pi-tools-net` (web_search), with `pi-tools` itself becoming a re-export façade. **As of 2026-05-04 both A1 and A2 are merged on `main`** (`crates/pi-tools/Cargo.toml` already pulls `pi-tools-core` + `pi-tools-net`). The remaining A-series work for guest-side completeness: extracting `ToolContext` / a `Tool` impl that doesn't transitively pull `pi-ai` (some shared trait machinery still lives in `pi-tools` re-exporting `pi-ai` types). The guest worker depends on `pi-tool-types` + `pi-tools-core` + `pi-sandbox-protocol` + `pi-search-proto` (the last is new in v0.34, ~50 LoC of wire types — does NOT pull `pi-tools-net` or `reqwest` into the guest; the worker's `web_search` handler is a pure-vsock shim that reuses `pi-search-proto::WebSearchRequest`/`Response` and forwards to the channel). Compiles statically against musl, links into a ~6–8 MB binary, fits in alpine.
 
 Estimated impact: ~600 LoC moved, no behavior change. Fully reversible.
 
@@ -300,7 +300,7 @@ This decision is upstream of Commit A3 (the protocol crate). It must land here, 
 
 **The constraint** is that the guest itself has no network in v1 (a deliberate v1 invariant, see §"Goals/non-goals"). Earlier drafts (≤v0.32) resolved this by partitioning tools into "guest-bound" and "host-bound", with `web_search` running directly on the host via `pi-tools-net`. That worked but **broke the agent's mental model**: from the model's perspective, "tools run in the sandbox" became "*most* tools run in the sandbox, except this one, which runs on the host with full network access". The asymmetry leaked into telemetry (`dispatch_path = "guest" | "host-direct"`), required a `HostBoundToolDispatcher` trait abstraction for one tool, and made the architecture's security posture harder to reason about.
 
-**v0.33 fix.** `web_search` registers in the guest worker like every other tool. Its handler is *not* a direct HTTP call; it sends a typed `WebSearchRequest` over a separate vsock control port (`VSOCK_SEARCH_PROXY_PORT = 5003`) to a tiny host-side proxy (`pi-host-search-proxy`, a new ~150 LoC binary owned by Commit G) that calls `pi-tools-net::web_search` and returns `WebSearchResponse`. From every upstream surface the call is a guest tool dispatch:
+**v0.34 fix.** `web_search` registers in the guest worker like every other tool. Its handler is *not* a direct HTTP call; instead it forwards a typed `WebSearchRequest` over a long-lived host-initiated vsock channel and reads back `WebSearchResponse`. From every upstream surface the call is a guest tool dispatch:
 
 - `tool_disposition("web_search") → SandboxToolDisposition::Guest`
 - `SandboxAction.dispatch_path` is no longer recorded — there is no longer a meaningful split (every microvm tool dispatches to the guest)
@@ -332,9 +332,13 @@ pub struct WebSearchResponse {
 }
 ```
 
-One JSON line per direction, `\n`-framed, over a vsock connection on `VSOCK_SEARCH_PROXY_PORT`. **Connection direction**: the guest worker initiates the connection to the host (host CID = 2); the host proxy listens. This is the inverse of the main sandbox protocol (which is host → guest) and is intentional: the host is the *server* in this RPC, and the guest is the *client* asking for one well-defined service.
+One JSON line per direction, `\n`-framed. **Connection topology — host-initiated, long-lived, full-duplex.** This was the v0.33→v0.34 redesign: v0.33 had the guest connecting outbound to a host-listening port, but the main sandbox protocol explicitly avoided host-listen on macOS vfkit (known quirks), so reintroducing it for the search channel hit the same platform problem. v0.34 inverts it:
 
-**Host-side proxy binary (`pi-host-search-proxy`).** Listens on the per-VM vsock port for the lifetime of one VM; accepts one `WebSearchRequest` per connection, calls `pi_tools_net::web_search(query, max_results, locale)` with the host's existing API credentials, writes one `WebSearchResponse`, and closes. Per-session rate limit (default 30 calls / minute / VM, configurable) enforced by the proxy. The proxy is launched by the `MicroVmLauncher` alongside each VM (one process per VM; bounded child of the launcher) and torn down when the VM is destroyed.
+1. **At acquire time**, after the host's main vsock connection to guest port 5001 succeeds, the launcher opens a *second* vsock connection to guest port `VSOCK_SEARCH_PROXY_PORT = 5003`. Both connections are host-initiated; the guest listens on both. This matches the main protocol's pattern and avoids host-listen on every platform.
+2. **The 5003 connection is long-lived for the VM's lifetime** — full-duplex, multiple search calls multiplex through it. Frame discipline: each `WebSearchRequest` line from the guest is matched with the next `WebSearchResponse` line from the host, in order (one in-flight at a time per VM is enough for v1; concurrent searches inside one VM are queued by the worker).
+3. **No separate `pi-host-search-proxy` binary.** The host-side handler is an async task in `pi-sandbox` that the launcher spawns alongside each VM and joins on release. Owns the host's `pi-tools-net` API credentials; per-VM rate-limit state (default 30 calls / minute / VM, configurable). The task lives inside the existing pi binary process — same auth context, same lifecycle as everything else microvm-related.
+
+This removes the "separate binary per VM" overhead of v0.33 *and* fixes the host-listen quirk: every vsock connection in v1 is host→guest.
 
 **Why this is materially better than v0.32 host-direct:**
 
@@ -344,9 +348,21 @@ One JSON line per direction, `\n`-framed, over a vsock connection on `VSOCK_SEAR
 - Auto-approve policy fires on the same code path as every other tool — identical gate semantics.
 - Adding a future "must-be-on-host" tool requires defining its own narrow vsock proxy with its own typed RPC and rate limits; there is no general-purpose host-tool registry to grow.
 
+**Bash-can't-bypass-auto-approve defense.** `vsock` is a process-family socket (`AF_VSOCK`), not filesystem-protected — a naive design would let any process inside the guest, including a `bash` tool subprocess, `socket(AF_VSOCK, ...)` and connect directly to host vsock ports, sidestepping the worker's auto-approve gate. v1 closes this with a **seccomp-bpf filter** applied by the worker before each `bash` tool spawn: the filter denies `socket(AF_VSOCK, ...)`, `bind`, `connect`, and `listen` on `AF_VSOCK` family sockets, returning `EAFNOSUPPORT`. Tool subprocesses inherit the filter; the worker itself is exempt (it's the parent that applied it). On Linux/Firecracker this is straightforward (`prctl(PR_SET_NO_NEW_PRIVS) + seccomp(SECCOMP_SET_MODE_FILTER)`); macOS/Windows v1 don't ship Firecracker but their analogous launchers will need an equivalent on the bash spawn path before macOS/Windows web_search-via-bash escape becomes a real concern. Tested: a negative integration test runs `bash 'python3 -c "import socket; socket.socket(40, socket.SOCK_STREAM)"'` (AF_VSOCK = 40 on Linux) and asserts the syscall fails with `EAFNOSUPPORT` from inside bash, while the worker's own search RPC still succeeds.
+
 **Threat-model note (unchanged):** search-result content can include prompt-injection material. That's a content-injection concern the microVM does not address either way (a model on `local-process` reads the same results); orthogonal hardening track (per-result content filter / quarantine, separate RFD).
 
-§2's `MicroVmProvider::execute_tool()` sample is now uniform: `monitor` returns `ToolUnavailable`; everything else (including `web_search`) routes through the guest worker. The host runs `pi-host-search-proxy` as a per-VM child process; that proxy is invisible to the agent loop.
+§2's `MicroVmProvider::execute_tool()` sample is now uniform: `monitor` returns `ToolUnavailable`; everything else (including `web_search`) routes through the guest worker. The host runs the search-channel async task as part of the launcher's per-VM acquire flow; no separate process.
+
+**Error mapping.** Failure modes from the search channel surface as:
+
+- Channel-establish failure at acquire (host can't connect to port 5003 within `acquire_timeout_ms`): `AcquireError::HostTransportSetup { detail: "search channel connect failed: <e>" }` — the VM is destroyed; acquire fails.
+- Channel drop mid-call (vsock RPC error): the worker's `web_search` handler returns a `ToolError::Other("search channel dropped")` to the inner tool dispatcher, which surfaces as a normal `ToolResult { is_error: true, model_output: "[search-error]" + detail, ... }`. The VM is marked `SuspectGuestState` because the persistent channel breaking is non-trivial.
+- Provider-side auth failure on the host (`pi-tools-net` returns 401/403): `WebSearchResponse { results: [], error: Some("auth: <detail>") }` flows back over the channel; the worker turns it into `ToolResult { is_error: true, model_output: "[search-error] auth failure: …" }`. VM stays `Clean` (the channel's fine, the provider config isn't).
+- Rate-limit hit (host's per-VM counter exceeded): `WebSearchResponse { results: [], error: Some("rate-limited: <window_ms>") }`; same shape as auth failure for the worker. VM stays `Clean`.
+- Protocol-version mismatch (worker built against `pi-search-proto vN`, host on `vM`): host detects the mismatch on the first `WebSearchRequest`, responds with `error: Some("proto-version-mismatch: host=M, guest=N")`, then closes the channel. Worker treats as a one-shot failure; subsequent searches go to the channel-dropped path above.
+
+**Proxy lifecycle across pooling.** The search channel is established by `MicroVmLauncher::acquire()` BEFORE `acquire()` returns: the launcher cold-boots (or pulls from pool) the VM, opens the main 5001 connection, opens the 5003 search channel, then returns the `VmHandle`. If the 5003 connection fails, the VM is destroyed and `acquire()` returns `Err(AcquireError::HostTransportSetup{..})` (no half-acquired VMs in the pool). When a VM is returned to the pool via `release(Clean)` + successful reset, the search channel survives — it's per-VM, not per-call. When the VM is destroyed (any non-`Clean` path), the host-side search task is joined and dropped along with the VM.
 
 ### Inspiration: aegis
 
@@ -740,40 +756,37 @@ pub struct MicroVmProvider {
     per_tool_call_limits: BTreeMap<String, CallLimits>,
     /// In-process dispatcher for host-bound tools (web_search in v1).
     /// `MicroVmProvider::execute_tool` first asks
-    /// Per-VM host-side proxy for `web_search` (the one tool that
-    /// needs network egress the guest doesn't have). The provider
-    /// owns the `Arc` because the proxy must outlive each tool call
-    /// — the launcher spawns one `pi-host-search-proxy` child
-    /// alongside each acquired VM and tears it down on release. The
-    /// proxy listens on `VSOCK_SEARCH_PROXY_PORT = 5003` per VM CID.
-    /// See §"web_search via vsock proxy". This is the ONLY host
-    /// surface the guest can call; no general-purpose host-tool
-    /// registry — adding another such tool requires its own
-    /// dedicated narrow vsock-proxied protocol.
-    search_proxy: Arc<dyn SearchProxyController>,
+    /// Provider-level configuration for the per-VM search-channel
+    /// async task that handles `web_search` requests from inside
+    /// the guest (§"web_search via vsock proxy"). Holds the host's
+    /// `pi-tools-net` API credentials + per-VM rate-limit policy.
+    /// The actual per-VM task is owned by `VmHandle` (so its
+    /// lifetime matches the VM exactly): `acquire()` connects
+    /// host→guest on `VSOCK_SEARCH_PROXY_PORT = 5003` and spawns
+    /// the channel-handler task before returning; `release()`
+    /// (destroy path) joins it. v1 ships `BuiltinSearchConfig`
+    /// reading credentials from the host's existing pi auth
+    /// storage. This is the ONLY host-side egress the guest can
+    /// reach; adding another "must-be-on-host" tool requires its
+    /// own dedicated narrow vsock-proxied protocol.
+    search_config: Arc<SearchConfig>,
 }
 
-/// Lifecycle controller for `pi-host-search-proxy` instances. One
-/// proxy is spawned per acquired VM (so per-VM rate-limit state and
-/// credentials don't leak across calls), and the controller hands
-/// the launcher a per-VM listening port. The trait is small on
-/// purpose — `MicroVmProvider` itself never speaks the search wire
-/// protocol; it just tells the launcher to wire the proxy in
-/// alongside vsock ports 5001/5002. v1 has one impl,
-/// `BuiltinSearchProxyController`, which spawns the
-/// `pi-host-search-proxy` binary as a child process per VM with
-/// `kill_on_drop(true)`.
-pub trait SearchProxyController: Send + Sync {
-    /// Spawn a proxy instance for a VM identified by `vm_cid`,
-    /// returning a guard whose Drop tears the proxy down. The proxy
-    /// listens for vsock connections from the guest on
-    /// `VSOCK_SEARCH_PROXY_PORT` filtered to that CID.
-    fn spawn_for(&self, vm_cid: u32) -> Result<SearchProxyGuard, SandboxError>;
+/// Per-provider config for the host-side search channel handler.
+/// One instance shared across all VMs from a given provider; the
+/// rate-limit state is held inside each VM's channel-handler task.
+pub struct SearchConfig {
+    /// API credentials inherited from the host's `pi-tools-net`
+    /// auth (same as `local-process` web_search uses).
+    pub auth: Arc<dyn pi_tools_net::SearchAuthProvider>,
+    /// Per-VM rate limit. Default 30 calls / 60s window.
+    pub rate_limit: RateLimitPolicy,
 }
 
-pub struct SearchProxyGuard {
-    pub vm_cid: u32,
-    _child: tokio::process::Child,  // killed on drop
+#[derive(Clone, Copy)]
+pub struct RateLimitPolicy {
+    pub max_calls: u32,
+    pub window: Duration,
 }
 
 impl MicroVmProvider {
@@ -978,15 +991,15 @@ pub struct SandboxOutcome {
     pub telemetry: SandboxTelemetry,
 }
 
-// `search_proxy` spawns one `pi-host-search-proxy` per acquired VM
-// (one process, kill_on_drop). The proxy listens on
-// `VSOCK_SEARCH_PROXY_PORT` per-VM-CID and serves a single typed
-// RPC: WebSearchRequest -> WebSearchResponse. The guest worker's
-// `web_search` handler connects to it; everything upstream sees
-// `web_search` as a guest tool. There is no general-purpose
-// host-bound dispatcher in v1 — adding another "must-be-on-host"
-// tool requires its own narrow vsock-proxied protocol with its
-// own typed RPC and rate limits.
+// `search_config` carries provider-level config (auth + rate
+// limits) for the per-VM search channel. The actual channel is
+// owned by VmHandle: launcher.acquire() opens host→guest vsock to
+// port 5003 + spawns an in-process async task that owns the
+// connection for the VM's lifetime. The task reads
+// WebSearchRequest, calls pi-tools-net, writes WebSearchResponse.
+// On release(destroy) the task is joined. No separate binary;
+// no host listening sockets. The seccomp filter on bash spawns
+// blocks AF_VSOCK so tool subprocesses can't bypass.
 
 // SandboxProvider's trait return is unified: every provider — local-
 // process, microvm, remote backends — returns the SAME SandboxOutcome
@@ -2106,6 +2119,50 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.34 (2026-05-05):** rfd-critic v0.33 pass: 2 critical
+  (security gap + platform-compat) + small. Both real, both
+  closed by inverting the search-channel topology.
+  (1) **Security:** `vsock` is process-family — a `bash` tool
+  subprocess could `socket(AF_VSOCK, ...)` and connect to host
+  port 5003 directly, bypassing auto-approve. Closed: `bash`
+  tool spawn now applies a **seccomp-bpf filter** denying
+  `AF_VSOCK` (`socket`/`bind`/`connect`/`listen` return
+  `EAFNOSUPPORT`); the worker is exempt because it's the parent
+  that applied the filter. Negative test:
+  `bash 'python3 -c "import socket; socket.socket(40, ...)"'`
+  asserts `EAFNOSUPPORT`. macOS/Windows analogues will need an
+  equivalent on the bash spawn path before web_search-via-bash
+  escape becomes a real concern there.
+  (2) **Platform:** v0.33 had the guest connecting outbound to a
+  host-listening port, but the main protocol explicitly avoids
+  host-listen on macOS vfkit. Closed: search channel is now
+  **host-initiated** — at acquire time, after the main 5001
+  connection succeeds, the launcher opens a *second* host→guest
+  vsock connection on guest port 5003. The connection is
+  long-lived and full-duplex for the VM's lifetime; multiple
+  search calls multiplex through it (one in-flight at a time
+  per VM in v1). Both connections are host→guest now.
+  (3) **No separate binary.** v0.33's `pi-host-search-proxy` is
+  gone. The host-side handler is an async task in `pi-sandbox`
+  that the launcher spawns alongside each VM and joins on
+  release. Lives inside the existing pi binary process; same
+  auth context. The `SearchProxyController` trait is replaced
+  by a simpler provider-level `SearchConfig { auth, rate_limit }`
+  shared across VMs, with the per-VM channel-handler task owned
+  by the `VmHandle`.
+  (4) **Error mapping** added: channel-establish failure →
+  `AcquireError::HostTransportSetup`; channel drop mid-call →
+  `ToolError::Other` + `SuspectGuestState`; provider auth/rate
+  limit failures → `WebSearchResponse.error` → `is_error=true`
+  ToolResult, VM stays `Clean`; protocol-version mismatch →
+  one-shot error then channel-dropped semantics.
+  (5) **Lifecycle pinned**: search channel established by
+  `acquire()` BEFORE return — failure destroys the half-acquired
+  VM, no half-states in the pool. Channel survives `release(Clean)`;
+  joined+dropped on destroy. (6) Background A2 paragraph: guest
+  worker deps now include `pi-search-proto` (~50 LoC of pure
+  wire types; does NOT pull `pi-tools-net` or `reqwest` into
+  the guest).
 - **v0.33 (2026-05-05):** Architectural change at maintainer
   request: **remove host-direct dispatch entirely**. v0.32 routed
   `web_search` through a host-direct path so the guest stayed
