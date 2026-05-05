@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.32 — rfd-critic READY, polish landing)
+- **Status:** Discussion (v0.33 — vsock-proxied web_search; re-review pending)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -37,9 +37,11 @@ The RFD distinguishes three orthogonal axes that v0.25 reviewers have repeatedly
 | **Provider name** | `local-process` \| `microvm` \| `e2b`/`sprites`/`daytona` (RFD 0026) | `SandboxAction.provider`, `SandboxTelemetry.provider` | `--sandbox-provider=<name>` (or `<name>:<launcher>`)          |
 | **Launcher name** | `firecracker` \| `vfkit` \| `cloud-hypervisor`            | `SandboxAction.launcher`, `MicroVmLauncher::launcher_name()` | `--sandbox-provider=microvm:<launcher>` (explicit pin)        |
 | **Transport mode**| `local` \| `managed`                                      | `BootSpec.transport_mode`                      | `--sandbox-microvm-mode=<mode>` (Linux/Firecracker only)      |
-| **Dispatch path** | `guest` \| `host-direct`                                  | `SandboxAction.dispatch_path`, `SandboxTelemetry.dispatch_path` | not user-configurable; per-tool, derived from `tool_disposition()` |
+| **Dispatch path** | `guest` (v1 microvm — every tool runs in the guest worker) | implicit; no telemetry field — `provider="microvm"` already implies it | not user-facing |
 
 `microvm:local` and `microvm:managed` are NOT CLI names; they would conflate provider/launcher with transport mode. The CLI uses `--sandbox-provider=microvm:firecracker --sandbox-microvm-mode=managed` for the Linux/managed case.
+
+**No host-direct dispatch.** Earlier drafts (≤v0.32) routed `web_search` through a host-direct path so the guest stayed network-free. v0.33 removes that asymmetry: `web_search` registers in the guest worker like every other tool; its handler sends a typed `WebSearchRequest` over a separate vsock control port to a narrow host-side proxy (`pi-host-search-proxy`). From the agent loop, telemetry, audit-approve, and `tool_disposition()`, `web_search` is a guest tool. The host's role is one-RPC pinhole, not "tool dispatcher". See §"web_search via vsock proxy" for the protocol.
 
 ## Background
 
@@ -99,8 +101,10 @@ pub enum ToolDispatchClass {
     RuntimeNative,
     /// Sandbox-managed: routed through the active SandboxProvider.
     /// SandboxProvider further partitions these into `guest` /
-    /// `host-direct` / `unavailable` (the §"Tool availability under
-    /// microvm" matrix).
+    /// `unavailable` (the §"Tool availability under microvm"
+    /// matrix). `web_search` is a `guest` tool whose handler
+    /// proxies via vsock to the host (see §"web_search via vsock
+    /// proxy"); there is no `host-direct` disposition in v1.
     SandboxManaged,
 }
 
@@ -146,9 +150,9 @@ trait changes that ripple through provider impls.
 
 The §"Tool availability under `microvm`" matrix below covers only
 the `SandboxManaged` slice of the tool surface: the `pi-tools-core`
-guest tools, `web_search` (host-direct), `monitor` (unavailable),
-`lsp` (unavailable in v1). `task` is `RuntimeNative` and never
-appears in that matrix.
+guest tools, `web_search` (guest, vsock-proxied), `monitor`
+(unavailable), `lsp` (unavailable in v1). `task` is `RuntimeNative`
+and never appears in that matrix.
 
 #### Plan-time advertisement — `SandboxProvider::tool_disposition()`
 
@@ -170,7 +174,8 @@ Commit G adds a **plan-time capability-query API**:
 // New on the SandboxProvider trait (RFD 0022 amendment):
 pub enum SandboxToolDisposition {
     Guest,        // routes through provider's guest path
-    HostDirect,   // routes through provider's host-direct path
+                  // (for `web_search` under microvm: guest tool whose
+                  // handler proxies via vsock — see §"web_search via vsock proxy")
     Unavailable,  // model should not see this tool advertised
 }
 
@@ -189,7 +194,10 @@ trait SandboxProvider {
     ///     `Unavailable`.
     ///   - `MicroVmProvider::tool_disposition()` uses an explicit
     ///     match: `Guest` for `read`/`write`/`edit`/`bash`/
-    ///     `grep`/`find`/`ls`; `HostDirect` for `web_search`;
+    ///     `grep`/`find`/`ls`/`web_search` (web_search is a guest
+    ///     tool whose worker-side handler proxies the actual HTTP
+    ///     call out via a vsock control port to the host-side
+    ///     `pi-host-search-proxy` — §"web_search via vsock proxy");
     ///     `Unavailable` for everything else (including future
     ///     tools that haven't been classified yet).
     ///
@@ -270,14 +278,10 @@ its v1 disposition:
 | `grep`              | guest        | File traversal; busybox provides it. pi-tools-core.                       |
 | `find`              | guest        | File traversal; busybox provides it. pi-tools-core.                       |
 | `ls`                | guest        | Directory listing; busybox provides it. pi-tools-core.                    |
-| `web_search`        | host-direct  | Network query, no host fs side effects; runs on host (§"web_search host-dispatch"). |
+| `web_search`        | guest (proxied) | Network query. Registered in the guest worker like every other tool; the worker-side handler proxies the HTTP call out via vsock to `pi-host-search-proxy` on the host. The guest itself has no network. From the agent loop / `tool_disposition()` / telemetry / audit-approve, this is a guest tool. (§"web_search via vsock proxy".) |
 | `monitor`           | unavailable  | One-shot RPC vs. streaming mismatch; returns `ToolUnavailable` (§"monitor exclusion"). |
-| `lsp`               | unavailable  | The current `lsp` tool lives in `crates/pi-coding-agent/src/native/lsp/tool.rs`, ABOVE `pi-sandbox` in the dependency graph — `pi-sandbox` cannot dispatch to it without a circular dep or a lower-layer rewrite. **v1 microvm marks `lsp` unavailable** (returns `ToolUnavailable` with a startup-time stderr banner if the user has LSP integration enabled). The `LspWriteTool` write-decoration path is similarly unavailable: under microvm, `write` runs guest-side without LSP post-processing. Operators who need LSP under sandbox use `--sandbox-provider=local-process`. A future RFD can re-home `lsp` into a lower crate and reclassify it as `host-direct`; that's not in Commit G's scope. |
-| Future tools        | TBD per RFD  | Each new tool RFD MUST classify into one of `guest` / `host-direct` / `unavailable`. The default (if a tool RFD forgets) is `unavailable`. |
-
-The host-direct registry in `MicroVmProvider` hardcodes **`web_search`
-only** in v1 — no operator-extensible registration, no `lsp`, to keep
-the trust boundary tight and the cross-crate dep graph clean.
+| `lsp`               | unavailable  | The current `lsp` tool lives in `crates/pi-coding-agent/src/native/lsp/tool.rs`, ABOVE `pi-sandbox` in the dependency graph — `pi-sandbox` cannot dispatch to it without a circular dep or a lower-layer rewrite. **v1 microvm marks `lsp` unavailable** (returns `ToolUnavailable` with a startup-time stderr banner if the user has LSP integration enabled). The `LspWriteTool` write-decoration path is similarly unavailable: under microvm, `write` runs guest-side without LSP post-processing. Operators who need LSP under sandbox use `--sandbox-provider=local-process`. A future RFD can re-home `lsp` into a lower crate and reclassify it; that's not in Commit G's scope. |
+| Future tools        | TBD per RFD  | Each new tool RFD MUST classify into one of `guest` / `unavailable`. There is no `host-direct` disposition in v1 — tools that need host-side resources (network, host filesystem outside `<host_cwd>`, hardware access) must define their own narrow vsock-proxied protocol like `pi-search-proto` does. The default (if a tool RFD forgets) is `unavailable`. |
 
 #### `monitor` exclusion (decided)
 
@@ -290,56 +294,59 @@ the trust boundary tight and the cross-crate dep graph clean.
 
 This decision is upstream of Commit A3 (the protocol crate). It must land here, not deferred.
 
-#### `web_search` host-dispatch (decided)
+#### `web_search` via vsock proxy (decided)
 
-`web_search` is a network-egress query — it contacts external search
-engines / LLM-as-search backends and returns text. It does NOT execute
-untrusted code on the host; it queries data. The microVM boundary
-exists to contain *code execution* (untrusted bash, file mutation,
-process spawn), not data queries.
+`web_search` is a network-egress query — it contacts external search engines / LLM-as-search backends and returns text. It does NOT execute untrusted code on the host; it queries data. The microVM's job is to contain *code execution* (untrusted bash, file mutation, process spawn), not data queries; agents lose real capability if `web_search` is excluded entirely.
 
-Excluding `web_search` would lose real capability — agents lose the
-ability to look up library docs, search for known issues, or fetch
-external references mid-task. Three options:
+**The constraint** is that the guest itself has no network in v1 (a deliberate v1 invariant, see §"Goals/non-goals"). Earlier drafts (≤v0.32) resolved this by partitioning tools into "guest-bound" and "host-bound", with `web_search` running directly on the host via `pi-tools-net`. That worked but **broke the agent's mental model**: from the model's perspective, "tools run in the sandbox" became "*most* tools run in the sandbox, except this one, which runs on the host with full network access". The asymmetry leaked into telemetry (`dispatch_path = "guest" | "host-direct"`), required a `HostBoundToolDispatcher` trait abstraction for one tool, and made the architecture's security posture harder to reason about.
 
-(a) Hide `web_search` from the advertised tool list under `microvm`.
-(b) Reject calls with `ToolUnavailable`; user must switch providers.
-(c) Keep `web_search` available; **route it to a host-side dispatch
-path** instead of the guest worker. The `MicroVmProvider` partitions
-tools into "guest-bound" (read/write/edit/bash/grep/find/ls — anything
-touching `/work` or spawning processes) and "host-bound"
-(web_search — network-only, no host fs side effects). Host-bound
-tools run on the host through the existing `pi-tools-net`
-implementation; guest-bound tools route through the vsock RPC to the
-guest worker.
+**v0.33 fix.** `web_search` registers in the guest worker like every other tool. Its handler is *not* a direct HTTP call; it sends a typed `WebSearchRequest` over a separate vsock control port (`VSOCK_SEARCH_PROXY_PORT = 5003`) to a tiny host-side proxy (`pi-host-search-proxy`, a new ~150 LoC binary owned by Commit G) that calls `pi-tools-net::web_search` and returns `WebSearchResponse`. From every upstream surface the call is a guest tool dispatch:
 
-**Decision: (c).** Rationale:
+- `tool_disposition("web_search") → SandboxToolDisposition::Guest`
+- `SandboxAction.dispatch_path` is no longer recorded — there is no longer a meaningful split (every microvm tool dispatches to the guest)
+- Auto-approve policy (RFD 0027 H4) gates the call at the host's `MicroVmProvider::execute_tool` entry, identically to bash/edit/etc.
+- Telemetry attributes the duration to `guest_duration_ms` (which now correctly includes the inner vsock round-trip + host's HTTP round-trip)
 
-- The microVM's job is to contain *code execution*. `web_search`
-  doesn't execute code; it returns text. Running it on the host
-  doesn't widen the host's blast radius beyond what host-side tooling
-  already does.
-- The host already has the network credentials and provider config;
-  proxying egress through the guest would require giving the guest
-  net access (which IS what we are explicitly preventing).
-- The agent's mental model stays consistent across providers
-  (`local-process`, `microvm:firecracker`, `microvm:vfkit`,
-  `microvm:cloud-hypervisor`, future remote backends) — the same
-  tool name behaves the same way from the model's perspective.
-- Auto-approve policy (RFD 0027 H4) governs `web_search` calls
-  identically regardless of provider.
+**Wire shape** (`crates/pi-search-proto`, new in Commit G):
 
-Threat-model note: search-result content can include prompt-injection
-material. That's a content-injection concern that the microVM does
-not address either way (a model on `local-process` reads the same
-results); it's an orthogonal hardening track (per-result content
-filter / quarantine, separate RFD).
+```rust
+pub const SEARCH_PROXY_PROTOCOL_VERSION: u32 = 1;
+pub const VSOCK_SEARCH_PROXY_PORT: u32 = 5003;
 
-§2's `MicroVmProvider::execute_tool()` sample reflects this routing:
-`monitor` returns `ToolUnavailable`; `web_search` dispatches to the
-host registry; everything else routes through the guest. The
-telemetry row gets `dispatch_path = "host-direct"` for host-bound tools
-so operators can see which path each call took.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchRequest {
+    pub proto_version: u32,
+    pub call_id: String,            // matches the outer ToolRequest.call_id
+    pub query: String,
+    pub max_results: u32,           // worker-truncated to host-policy cap
+    pub locale: Option<String>,     // optional; host-side default if None
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchResponse {
+    pub call_id: String,
+    pub results: Vec<SearchResult>,  // host-side typed; identical to pi-tools-net's shape
+    pub error: Option<String>,       // populated iff results is empty AND search failed
+}
+```
+
+One JSON line per direction, `\n`-framed, over a vsock connection on `VSOCK_SEARCH_PROXY_PORT`. **Connection direction**: the guest worker initiates the connection to the host (host CID = 2); the host proxy listens. This is the inverse of the main sandbox protocol (which is host → guest) and is intentional: the host is the *server* in this RPC, and the guest is the *client* asking for one well-defined service.
+
+**Host-side proxy binary (`pi-host-search-proxy`).** Listens on the per-VM vsock port for the lifetime of one VM; accepts one `WebSearchRequest` per connection, calls `pi_tools_net::web_search(query, max_results, locale)` with the host's existing API credentials, writes one `WebSearchResponse`, and closes. Per-session rate limit (default 30 calls / minute / VM, configurable) enforced by the proxy. The proxy is launched by the `MicroVmLauncher` alongside each VM (one process per VM; bounded child of the launcher) and torn down when the VM is destroyed.
+
+**Why this is materially better than v0.32 host-direct:**
+
+- Architecture has *one* dispatch path (everything goes through the guest worker). One mental model.
+- Host's responsibility is exactly one well-typed RPC (`WebSearchRequest → WebSearchResponse`), not "any host-bound tool we might add". The trust boundary is narrower and verifiable.
+- Telemetry has *one* shape — no `dispatch_path` enum to explain.
+- Auto-approve policy fires on the same code path as every other tool — identical gate semantics.
+- Adding a future "must-be-on-host" tool requires defining its own narrow vsock proxy with its own typed RPC and rate limits; there is no general-purpose host-tool registry to grow.
+
+**Threat-model note (unchanged):** search-result content can include prompt-injection material. That's a content-injection concern the microVM does not address either way (a model on `local-process` reads the same results); orthogonal hardening track (per-result content filter / quarantine, separate RFD).
+
+§2's `MicroVmProvider::execute_tool()` sample is now uniform: `monitor` returns `ToolUnavailable`; everything else (including `web_search`) routes through the guest worker. The host runs `pi-host-search-proxy` as a per-VM child process; that proxy is invisible to the agent loop.
 
 ### Inspiration: aegis
 
@@ -647,8 +654,8 @@ pub struct ReleaseOutcome {
     /// `SandboxTelemetry` row this maps to
     /// `Some(ResetStatus::NotApplicable)` so operators can
     /// distinguish "VM existed but no reset was attempted" from
-    /// "no VM at all" (host-direct / local-process — those rows
-    /// carry `reset_status = None`).
+    /// "no VM at all" (local-process — those rows carry
+    /// `reset_status = None`).
     pub reset_status: ResetStatus,
     /// Short human-readable reason; populated only when the
     /// disposition was non-default. Surfaces in `pi sandbox doctor
@@ -733,56 +740,40 @@ pub struct MicroVmProvider {
     per_tool_call_limits: BTreeMap<String, CallLimits>,
     /// In-process dispatcher for host-bound tools (web_search in v1).
     /// `MicroVmProvider::execute_tool` first asks
-    /// `host_tools.is_host_bound(tool_name)` and short-circuits the
-    /// VM acquire when true. Inherited unchanged across subagents
-    /// (same Arc); the dispatcher carries provider config / API
-    /// credentials for any host-side tool the operator opted into.
-    /// v1 ships exactly one impl, `BuiltinHostTools`, that hardcodes
-    /// `web_search` against `pi-tools-net`. Deliberately not extensible
-    /// from operator config in v1 — widening the host-trust boundary
-    /// before the default path is dogfooded is premature.
-    host_tools: Arc<dyn HostBoundToolDispatcher>,
+    /// Per-VM host-side proxy for `web_search` (the one tool that
+    /// needs network egress the guest doesn't have). The provider
+    /// owns the `Arc` because the proxy must outlive each tool call
+    /// — the launcher spawns one `pi-host-search-proxy` child
+    /// alongside each acquired VM and tears it down on release. The
+    /// proxy listens on `VSOCK_SEARCH_PROXY_PORT = 5003` per VM CID.
+    /// See §"web_search via vsock proxy". This is the ONLY host
+    /// surface the guest can call; no general-purpose host-tool
+    /// registry — adding another such tool requires its own
+    /// dedicated narrow vsock-proxied protocol.
+    search_proxy: Arc<dyn SearchProxyController>,
 }
 
-/// In-process executor for tools that bypass the guest microVM. Used
-/// for tools that must execute on the host (network egress, the
-/// caller's filesystem outside `<host_cwd>`, …) — currently only
-/// `web_search`. Returns the same shape the guest path returns so
-/// telemetry stays uniform.
-///
-/// **Single source of truth for host-bound classification.**
-/// `MicroVmProvider::tool_disposition(name)` returns
-/// `SandboxToolDisposition::HostDirect` **iff** `host_tools.is_host_bound(name)`
-/// returns true. The provider implementation calls
-/// `host_tools.is_host_bound(name)` to derive `tool_disposition()`,
-/// not a separate const list. A unit test in
-/// `crates/pi-sandbox/tests/host_bound_parity.rs` round-trips every
-/// pi-tools tool name through both surfaces and asserts equality;
-/// drift is impossible by construction (the second surface delegates
-/// to the first), and the test is a defense-in-depth check against
-/// future regressions when more host-bound tools land.
-#[async_trait]
-pub trait HostBoundToolDispatcher: Send + Sync {
-    /// Plan-time check: would `execute()` accept this tool?
-    /// **Source of truth.** `tool_disposition()` defers to this.
-    fn is_host_bound(&self, tool_name: &str) -> bool;
-
-    /// Execute the tool in-process on the host. Returns
-    /// `(tool_result, execution)` so the caller can build a
-    /// `SandboxOutcome` with `dispatch_path: "host-direct"`. Errors
-    /// surface as `SandboxError` with the same taxonomy as guest
-    /// dispatch (Acquire / Execute) where applicable.
-    async fn execute(
-        &self,
-        ctx: &pi_tools::ToolContext,
-        tool_name: &str,
-        tool_input: &serde_json::Value,
-    ) -> Result<HostExecOutcome, SandboxError>;
+/// Lifecycle controller for `pi-host-search-proxy` instances. One
+/// proxy is spawned per acquired VM (so per-VM rate-limit state and
+/// credentials don't leak across calls), and the controller hands
+/// the launcher a per-VM listening port. The trait is small on
+/// purpose — `MicroVmProvider` itself never speaks the search wire
+/// protocol; it just tells the launcher to wire the proxy in
+/// alongside vsock ports 5001/5002. v1 has one impl,
+/// `BuiltinSearchProxyController`, which spawns the
+/// `pi-host-search-proxy` binary as a child process per VM with
+/// `kill_on_drop(true)`.
+pub trait SearchProxyController: Send + Sync {
+    /// Spawn a proxy instance for a VM identified by `vm_cid`,
+    /// returning a guard whose Drop tears the proxy down. The proxy
+    /// listens for vsock connections from the guest on
+    /// `VSOCK_SEARCH_PROXY_PORT` filtered to that CID.
+    fn spawn_for(&self, vm_cid: u32) -> Result<SearchProxyGuard, SandboxError>;
 }
 
-pub struct HostExecOutcome {
-    pub tool_result: ToolResult,
-    pub execution: SandboxExecution,
+pub struct SearchProxyGuard {
+    pub vm_cid: u32,
+    _child: tokio::process::Child,  // killed on drop
 }
 
 impl MicroVmProvider {
@@ -841,31 +832,10 @@ impl SandboxProvider for MicroVmProvider {
                          (one-shot RPC; use --sandbox-provider=local-process)",
             });
         }
-        // web_search: network-egress query, runs on the host (the guest
-        // has no network by design). See §"web_search host-dispatch".
-        if self.host_tools.is_host_bound(tool_name) {
-            let started = Instant::now();
-            let host_outcome = self.host_tools.execute(ctx, tool_name, tool_input).await?;
-            // host_outcome is itself a (ToolResult, SandboxExecution) pair —
-            // pi-tools-net's executor returns both.
-            return Ok(SandboxOutcome {
-                tool_result: host_outcome.tool_result,
-                execution: host_outcome.execution,
-                telemetry: SandboxTelemetry {
-                    provider: "microvm",
-                    launcher: None,                   // no VM involved
-                    dispatch_path: Some("host-direct"),
-                    acquire_to_ready_ms: None,
-                    guest_duration_ms: None,                  // host-direct: no guest involved; use duration_ms
-                    cold_boot: None,
-                    cost_usd: None,
-                    pool_disposition: None,           // no VM existed
-                    reset_status: None,               // no VM existed
-                    release_reason: None,
-                },
-            });
-        }
-        // Everything else routes through the guest microVM.
+        // No host-direct branch in v0.33+. web_search registers in
+        // the guest worker as a regular tool; its handler proxies
+        // out via vsock to pi-host-search-proxy. From here, every
+        // tool routes through the same guest dispatch path.
         let spec = self.spec_for(ctx);
         let limits = self.build_call_limits(ctx, tool_name);
         let vm = self.launcher.acquire(&spec).await
@@ -918,7 +888,6 @@ impl SandboxProvider for MicroVmProvider {
             telemetry: SandboxTelemetry {
                 provider: "microvm",
                 launcher: Some(self.launcher.launcher_name()),  // "firecracker" | "vfkit" | "cloud-hypervisor"
-                dispatch_path: Some("guest"),
                 acquire_to_ready_ms: Some(exec.acquire_to_ready_ms),
                 guest_duration_ms: Some(exec.guest_duration_ms),
                 cold_boot: Some(exec.cold_boot),
@@ -1009,13 +978,15 @@ pub struct SandboxOutcome {
     pub telemetry: SandboxTelemetry,
 }
 
-// `host_tools` is the in-process dispatcher for host-bound tools.
-// In v1 it hardcodes `web_search` as the only host-bound tool —
-// no operator-extensible registry, since making host-direct
-// extensible in the first release would widen the trust boundary
-// before the default path is proven. v1.1 may revisit if telemetry
-// shows demand. Guest-bound tools (read/write/edit/bash/grep/find/
-// ls) always route through the launcher.
+// `search_proxy` spawns one `pi-host-search-proxy` per acquired VM
+// (one process, kill_on_drop). The proxy listens on
+// `VSOCK_SEARCH_PROXY_PORT` per-VM-CID and serves a single typed
+// RPC: WebSearchRequest -> WebSearchResponse. The guest worker's
+// `web_search` handler connects to it; everything upstream sees
+// `web_search` as a guest tool. There is no general-purpose
+// host-bound dispatcher in v1 — adding another "must-be-on-host"
+// tool requires its own narrow vsock-proxied protocol with its
+// own typed RPC and rate limits.
 
 // SandboxProvider's trait return is unified: every provider — local-
 // process, microvm, remote backends — returns the SAME SandboxOutcome
@@ -1029,23 +1000,19 @@ pub struct SandboxTelemetry {
     pub provider: &'static str,          // "microvm" | "local-process" | "e2b" | "sprites" | "daytona"
     /// For microvm only: which launcher backend booted the VM.
     pub launcher: Option<&'static str>,  // "firecracker" | "vfkit" | "cloud-hypervisor"
-    /// For microvm only: which leg of the partition handled the
-    /// tool — guest microVM vs the host-bound dispatch path
-    /// (web_search, future host-bound tools per §"Tool availability").
-    pub dispatch_path: Option<&'static str>, // "guest" | "host-direct"
-    pub acquire_to_ready_ms: Option<u32>,// None for local-process or host-direct, Some for microvm-guest/remote
+    pub acquire_to_ready_ms: Option<u32>,// None for local-process, Some for microvm/remote
     pub guest_duration_ms: Option<u32>,
     pub cold_boot: Option<bool>,
     pub cost_usd: Option<f64>,           // remote-backend per-call billing
     /// Did the VM survive into the warm pool, or was it destroyed?
     /// Set from `ReleaseOutcome.pool_disposition`. None for
-    /// host-direct and local-process (no VM).
+    /// local-process (no VM).
     pub pool_disposition: Option<PoolDisposition>,
     /// Outcome of the per-call filesystem-reset choreography
     /// (§"Post-call hygiene"). Set from `ReleaseOutcome.reset_status`.
-    /// `None` only when no VM existed at all (host-direct,
-    /// local-process). Guest-VM paths populate this even when no
-    /// reset was attempted: macOS/Windows v1 destroy-only +
+    /// `None` only when no VM existed at all (local-process).
+    /// Guest-VM paths populate this even when no reset was
+    /// attempted: macOS/Windows v1 destroy-only +
     /// suspect/cancelled releases set `Some(NotApplicable)`. This
     /// asymmetry lets operators distinguish "no VM" from "VM, no
     /// reset" without inspecting other fields.
@@ -1072,18 +1039,16 @@ Telemetry rows extend the existing `SessionEntryKind::SandboxAction` from RFD 00
 SandboxAction {
     provider: String,           // "microvm" | "local-process" | "e2b" | "sprites" | "daytona"
     tool_name: String,
-    duration_ms: u64,           // total host-observed; sum of acquire + guest (or just elapsed for host-direct)
+    duration_ms: u64,           // total host-observed; sum of acquire + guest, or elapsed for local-process
     exit_status: i32,
     is_error: bool,
-    // NEW (this RFD — local microVM, three-field split per v0.9):
+    // NEW (this RFD — local microVM, two-field split per v0.33):
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    launcher: Option<String>,   // "firecracker" | "vfkit" | "cloud-hypervisor" (microvm-guest only)
+    launcher: Option<String>,   // "firecracker" | "vfkit" | "cloud-hypervisor" (microvm only)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    dispatch_path: Option<String>, // "guest" | "host-direct" (microvm only)
+    acquire_to_ready_ms: Option<u32>,  // host-observed time-to-first-byte (None for local-process)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    acquire_to_ready_ms: Option<u32>,  // host-observed time-to-first-byte (None for host-direct / local-process)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    guest_duration_ms: Option<u32>,    // measured INSIDE the guest (Some for microvm-guest; None for host-direct, local-process, remote)
+    guest_duration_ms: Option<u32>,    // measured INSIDE the guest (Some for microvm; None for local-process, remote)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cold_boot: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1100,9 +1065,9 @@ SandboxAction {
 }
 ```
 
-The new fields are added as an **amendment to RFD 0022** (which is currently marked Implemented v1.0 — adding optional fields is non-breaking; existing telemetry rows deserialize fine because of `#[serde(default)]`). RFD 0022's revision history will be appended with an `(amended by RFDs 0023 + 0026)` note when those RFDs land. `pi-stats::ingest` adds the following nullable columns to the `sandbox_actions` SQLite table — one per new struct field: `launcher TEXT`, `dispatch_path TEXT`, `acquire_to_ready_ms INTEGER`, `guest_duration_ms INTEGER`, `cold_boot INTEGER`, `pool_disposition TEXT`, `reset_status TEXT`, `release_reason TEXT`, `cost_usd REAL`, `round_trip_ms INTEGER`.
+The new fields are added as an **amendment to RFD 0022** (which is currently marked Implemented v1.0 — adding optional fields is non-breaking; existing telemetry rows deserialize fine because of `#[serde(default)]`). RFD 0022's revision history will be appended with an `(amended by RFDs 0023 + 0026)` note when those RFDs land. `pi-stats::ingest` adds the following nullable columns to the `sandbox_actions` SQLite table — one per new struct field: `launcher TEXT`, `acquire_to_ready_ms INTEGER`, `guest_duration_ms INTEGER`, `cold_boot INTEGER`, `pool_disposition TEXT`, `reset_status TEXT`, `release_reason TEXT`, `cost_usd REAL`, `round_trip_ms INTEGER`.
 
-**JSONL backward compatibility** — pre-amendment rows lack the new fields; `#[serde(default)]` makes them deserialize as `None`, and `pi-stats::ingest` writes `NULL` to the new columns. **Migration ordering**: schema migration (`ALTER TABLE sandbox_actions ADD COLUMN ...` × 10 new) MUST run before any pi binary speaking the new fields ingests rows; otherwise the binary will refuse to start with `schema_migration_required`. v1 ships an integration test (`tests/sandbox_action_compat.rs`) that loads a fixture of pre-amendment rows and asserts both the old binary's rows are still readable AND the new binary's rows have the new fields populated. The `provider` field already exists on the struct in RFD 0022 and is not new here.
+**JSONL backward compatibility** — pre-amendment rows lack the new fields; `#[serde(default)]` makes them deserialize as `None`, and `pi-stats::ingest` writes `NULL` to the new columns. **Migration ordering**: schema migration (`ALTER TABLE sandbox_actions ADD COLUMN ...` × 9 new) MUST run before any pi binary speaking the new fields ingests rows; otherwise the binary will refuse to start with `schema_migration_required`. v1 ships an integration test (`tests/sandbox_action_compat.rs`) that loads a fixture of pre-amendment rows and asserts both the old binary's rows are still readable AND the new binary's rows have the new fields populated. The `provider` field already exists on the struct in RFD 0022 and is not new here. (v0.33 dropped `dispatch_path` from the v0.32 schema — there's no longer a meaningful host-direct/guest split. Pre-amendment rows trivially deserialize regardless.)
 
 **Public API impact.** Two surfaces, two audiences:
 
@@ -2135,12 +2100,40 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ### Dogfood (per phase)
 
-- After Phase 3 + G: `pi --sandbox-provider=microvm:firecracker "ls + read + edit a marker file"` on Manjaro. Confirm session JSONL has the expected `provider="microvm"`, `launcher="firecracker"`, `dispatch_path="guest"`, `acquire_to_ready_ms`, and `cold_boot` telemetry fields, and the host file actually changed.
+- After Phase 3 + G: `pi --sandbox-provider=microvm:firecracker "ls + read + edit a marker file"` on Manjaro. Confirm session JSONL has the expected `provider="microvm"`, `launcher="firecracker"`, `acquire_to_ready_ms`, and `cold_boot` telemetry fields, and the host file actually changed. Also exercise `web_search` and confirm the row has the same `provider`/`launcher`/`guest_duration_ms` shape as a `bash` row (no `dispatch_path` field — every microvm tool dispatches through the guest).
 - Same dogfood on macos-14 + windows runner once D and F have landed.
-- `pi --stats sandbox-actions` must show non-zero rows with `provider` populated, and where applicable `launcher` / `dispatch_path` / `acquire_to_ready_ms` / `guest_duration_ms` / `cold_boot`.
+- `pi --stats sandbox-actions` must show non-zero rows with `provider` populated, and where applicable `launcher` / `acquire_to_ready_ms` / `guest_duration_ms` / `cold_boot`.
 
 ## Revision history
 
+- **v0.33 (2026-05-05):** Architectural change at maintainer
+  request: **remove host-direct dispatch entirely**. v0.32 routed
+  `web_search` through a host-direct path so the guest stayed
+  network-free; the maintainer flagged that as breaking the
+  agent's mental model ("tools run in the sandbox" became "*most*
+  tools run in the sandbox, except this one"). v0.33 keeps
+  `web_search` registered in the guest worker like every other
+  tool; its handler proxies the HTTP call out via vsock to a new
+  host-side `pi-host-search-proxy` (~150 LoC, owned by Commit G)
+  on `VSOCK_SEARCH_PROXY_PORT = 5003`, one process per VM with
+  per-VM rate limits. Wire shape: new `pi-search-proto` crate
+  (`WebSearchRequest { query, max_results, locale } →
+  WebSearchResponse { results, error }`). Surface changes:
+  removed `SandboxToolDisposition::HostDirect` variant; removed
+  `HostBoundToolDispatcher` trait + `HostExecOutcome` shape;
+  `SandboxTelemetry.dispatch_path` and `SandboxAction.dispatch_path`
+  fields dropped (every microvm tool dispatches through the
+  guest now — no meaningful split). `MicroVmProvider.host_tools`
+  field replaced by `search_proxy: Arc<dyn SearchProxyController>`
+  (lifecycle controller for the per-VM proxy child process).
+  SQLite migration column count: × 9 new (was × 10 in v0.32 —
+  `dispatch_path TEXT` removed). Net wins: one dispatch path,
+  one telemetry shape, narrow well-typed host RPC instead of
+  open-ended host-tool registry, identical auto-approve gate
+  semantics for every tool. Tradeoff: one extra vsock round-trip
+  per `web_search` (negligible vs the actual HTTP) and one new
+  protocol crate to version. Will re-run rfd-critic now that
+  v0.32 was READY-baseline.
 - **v0.32 (2026-05-04):** rfd-critic v0.31 returned **READY**
   ("Critical issues: None.") after 28 iterations from v0.4. This
   polish pass lands the three non-blocking suggested deltas:
