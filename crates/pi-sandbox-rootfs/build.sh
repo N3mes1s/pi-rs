@@ -104,6 +104,17 @@ cat > "${ROOT}/init" << INIT_EOF
 #!/bin/sh
 mount -t proc none /proc 2>/dev/null
 mount -t sysfs none /sys 2>/dev/null
+# Writable scratch areas on tmpfs over the read-only rootfs. The drive
+# itself is RO at the VMM layer because warm-pool VMs share one
+# rootfs.img file and ext4 is not a cluster fs (corruption otherwise).
+# These tmpfs mounts give bash + tools a writable /tmp /root /run for
+# ephemeral state. State is per-VM; warm-pool reuse leaks tmpfs across
+# calls within one VM (the per-call reset choreography in RFD §Post-call
+# hygiene addresses that — separate commit).
+mount -t tmpfs -o size=64m,mode=1777   tmpfs /tmp  2>/dev/null
+mount -t tmpfs -o size=16m,mode=0700   tmpfs /root 2>/dev/null
+mount -t tmpfs -o size=8m,mode=0755    tmpfs /run  2>/dev/null
+mount -t tmpfs -o size=16m,mode=0755   tmpfs /var  2>/dev/null
 # Load vsock + virtiofs kernel modules if bundled (needed when they are
 # not built-in to the kernel, e.g. Ubuntu 6.8.x generic kernels).
 MODS_DIR="/lib/modules/${BUNDLED_KVER}"
@@ -131,6 +142,11 @@ cat > "${ROOT}/init" <<'INIT_EOF'
 #!/bin/sh
 mount -t proc none /proc 2>/dev/null
 mount -t sysfs none /sys 2>/dev/null
+# Writable scratch areas on tmpfs over the read-only rootfs.
+mount -t tmpfs -o size=64m,mode=1777   tmpfs /tmp  2>/dev/null
+mount -t tmpfs -o size=16m,mode=0700   tmpfs /root 2>/dev/null
+mount -t tmpfs -o size=8m,mode=0755    tmpfs /run  2>/dev/null
+mount -t tmpfs -o size=16m,mode=0755   tmpfs /var  2>/dev/null
 # /work is the virtio-fs mount point. Attempt mount but do not abort if it
 # fails: the worker starts either way and reports an error per failing call.
 mkdir -p /work 2>/dev/null || true
