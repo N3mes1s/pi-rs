@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.40 — contextfs maintainer review closed; §3.5.4 spliced verbatim)
+- **Status:** Discussion (v0.41 — broker CLI syntax + audit_ping sweep)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -1587,7 +1587,10 @@ The transport differs per OS:
 
 - **Linux/Firecracker Stage 1:** `/work` is a contextfs FUSE mount,
   backed by host-side `cfs-fs-server` over a Noise-IK channel; every
-  write is mediated by contextfsd's PDP and audit-ping (§3.5).
+  write is mediated by contextfsd's PDP and recorded into the
+  daemon's local audit chain (§3.5.4). Broker replication is
+  asynchronous batched best-effort via `AuditPusher`; FUSE writes
+  are NEVER gated on broker reachability.
   `virtiofsd` is **not** required on Linux Stage 1.
 - **macOS/Windows v1.0:** `/work` is a virtio-fs RW share (no
   contextfs); writes are direct. A follow-up RFD brings contextfs to
@@ -1892,19 +1895,18 @@ backend traffic). One bridge/listener pair per channel; one
 guest-local UDS per channel that contextfsd consumes. **The broker
 is shared per pi process**, not per VM; the cfs-mesh bridge fans
 multiple VMs into one broker instance using `--tenant-peer-uid`
-SO_PEERCRED auth (one tenant id per VM, all bridge processes run
-as the same `pi-sandbox-bridge` uid):
+SO_PEERCRED auth (one stable `tenant_id` per pi process; all
+VMs in this process share that tenant_id and differ via `vm_id`;
+the bridge process effective uid is `pi-sandbox-bridge`):
 
 ```
             ┌──────────────────────── HOST (per pi process) ─────────────────────┐
             │                                                                    │
             │   contextfs-broker --listen-uds /run/pi-rs/broker.sock             │
-            │       --tenant-peer-uid <vm_a>=<bridge_uid>                        │
-            │       --tenant-peer-uid <vm_b>=<bridge_uid>                        │
-            │       --tenant-mode <vm_a>=embedder                                │
-            │       --tenant-mode <vm_b>=embedder ...                            │
-            │       --tenant-secret-path /run/pi-rs/cfs-tenants/<vm>.secret      │
-            │       (one process; serves N VMs concurrently)                     │
+            │       --tenant-peer-uid <tenant_id>:<bridge_uid>                   │
+            │       --tenant-mode <tenant_id>=embedder                           │
+            │       --tenant-secret-path <master_secret_path>                    │
+            │       (one process; one tenant; N VMs concurrently)                │
             │                                                                    │
             │   per-VM children of MicroVmLauncher (kill_on_drop):               │
             │                                                                    │
@@ -1932,20 +1934,33 @@ as the same `pi-sandbox-bridge` uid):
 
 **One shared broker per pi process** (was per-VM in earlier drafts; corrected per RFD-0025 §A and contextfs maintainer review of v0.39). Cheaper to operate (one broker process serving N VMs vs. N broker processes), matches `crates/contextfs-broker`'s native multi-tenant capability (`--tenant-peer-uid` is exactly that pattern), and the per-VM tenant secret derivation in §3.5.2 doesn't require process isolation between VMs — the broker derives the same per-VM secret from `(master, tenant_id, vm_id, master_epoch)` regardless of whether one or N broker processes are running.
 
-Host-side, per pi process (one-time, spawned at first acquire, joined at process exit):
+**Identity model.** `tenant_id` is **stable per pi process** (operator-configured, e.g. `"pi-rs-default"` or one tenant per orchestrated workload). All VMs in one pi process share that tenant_id. **Per-VM differentiation is via `vm_id`** (RFD-0023 §5; pi-rs supplies a UUIDv4-based `pi-job-<uuid>` per VM in the daemon's `DaemonConfig`). The broker derives the per-VM secret from `(master_secret, tenant_id, vm_id, master_epoch)`. Pi-rs does NOT reconfigure broker tenants at runtime — the broker is started with stable per-tenant config; per-VM differentiation happens via `vm_id` in each daemon's TOML, verified broker-side using the shared master secret in `--tenant-secret-path`.
+
+Host-side, per pi process (spawned at first acquire, joined at process exit):
 
 - `contextfs-broker --listen-uds /run/pi-rs/broker.sock
-   --tenant-peer-uid <vm_a>=<bridge_uid> --tenant-peer-uid <vm_b>=<bridge_uid> ...
-   --tenant-mode <vm_a>=embedder --tenant-mode <vm_b>=embedder ...
-   --tenant-secret-path <run_dir>/<vm_id>/cfs-tenant-secret ...` —
-  the shared broker. UDS auth is SO_PEERCRED via `--tenant-peer-uid`,
-  matching the bridge process's effective uid (`pi-sandbox-bridge`).
-  The `--tenant-secret-path` flag is required per RFD-0024 PR 3 part 5
-  so AuditResync can answer with the same HMAC-signing bytes the
-  daemon uses; without it the broker returns `verify_write_unavailable`
-  on AuditResync and the daemon refuses to mount.
+   --tenant-peer-uid <tenant_id>:<bridge_uid>
+   --tenant-mode <tenant_id>=embedder
+   --tenant-secret-path <master_secret_path>
+   --verify-write-oidc-issuer <issuer-url>
+   --verify-write-oidc-audience <wi-audience>
+   --verify-write-oidc-alg RS256 ...` — the shared broker.
+  UDS auth is SO_PEERCRED via `--tenant-peer-uid <tenant_id>:<uid>`
+  (colon separator per `crates/contextfs-broker/src/main.rs:188-195`
+  doc text "Format: `<tenant_id>:<uid>`"). The bridge process's
+  effective uid is `pi-sandbox-bridge`. `--tenant-mode` uses the
+  equals separator (different format from `--tenant-peer-uid`; see
+  `crates/contextfs-broker/src/main.rs:205` "Format:
+  `<tenant_id>=embedder`") and opts the tenant into embedder mode
+  (every request must carry `vm_id` + `master_epoch`).
+  `--tenant-secret-path` points at the operator-managed master
+  secret file the daemon's per-VM secret is derived from (§3.5.2);
+  set ONCE at broker startup, NOT per-VM. All VMs in this pi process
+  share this master secret.
 - TCP-HMAC auth (`--auth-secret-path`) is **not used**; this is
   same-host only.
+
+**No runtime broker reconfiguration.** Pi-rs's broker child is started once with the operator's stable per-tenant config and shut down once at pi process exit. Adding/removing VMs at runtime does NOT modify the broker's argv — VM lifecycle is daemon-side (each `contextfsd::start()` call carries its own `vm_id` in `DaemonConfig`); the broker accepts any valid `vm_id` for a configured tenant. Earlier draft text speculated about SIGHUP reload of the peer-uid table; that's incorrect — `contextfs-broker` has no SIGHUP handler (SIGHUP is for `contextfsd` policy reload only, per `crates/contextfsd/src/lib.rs:8-33`).
 
 Host-side, per VM (children of MicroVmLauncher, kill_on_drop):
 
@@ -2003,9 +2018,9 @@ The host-side broker is **shared across all VMs in one pi process** (per §3.5.5
 ```
 contextfs-broker \
     --listen-uds /run/pi-rs/broker.sock \
-    --tenant-peer-uid <vm_a>=<bridge_uid> --tenant-peer-uid <vm_b>=<bridge_uid> ...   # one entry per acquired VM; rebuilt on each VM acquire/release
-    --tenant-mode    <vm_a>=embedder     --tenant-mode    <vm_b>=embedder ...
-    --tenant-secret-path <run_dir>/<vm_id>/cfs-tenant-secret                            # REQUIRED per RFD-0024 PR 3 part 5; shared with the daemon side (§3.5.2)
+    --tenant-peer-uid <tenant_id>:<bridge_uid>   # colon separator; format per crates/contextfs-broker/src/main.rs:188-195
+    --tenant-mode    <tenant_id>=embedder        # equals separator; format per crates/contextfs-broker/src/main.rs:205
+    --tenant-secret-path <master_secret_path>    # set ONCE at startup; pi-rs's per-VM secrets are daemon-side derivations
     --verify-write-oidc-issuer <issuer-url> \
     --verify-write-oidc-audience <wi-audience> \
     --verify-write-oidc-alg RS256 \
@@ -2016,32 +2031,37 @@ No `--vsock*` flags (vsock termination is owned by the host-side
 `cfs-mesh vsock-bridge` per §3.5.5); no `--auth-secret-path` (that
 flag is the TCP-HMAC path and conflicts with the UDS topology).
 
-`--tenant-secret-path` (added in v0.40) points at the same per-VM
-tenant-secret file pi-rs derived in §3.5.2. Both the broker and the
-daemon read this file; the broker uses the bytes to HMAC-verify
-AuditResync at daemon startup (RFD-0024 PR 3 part 5). Without this
-flag, the broker returns `verify_write_unavailable` on the daemon's
-first AuditResync and the daemon refuses to mount.
+`--tenant-secret-path` is the broker's master tenant secret. Pi-rs's
+**daemon side** derives the per-VM secret from
+`(master, tenant_id, vm_id, master_epoch)` (§3.5.2) and the broker
+verifies AuditResync against the same derivation, reading the master
+from this path. Set ONCE at broker startup (NOT per-VM — this is the
+single-tenant flag from `crates/contextfs-broker/src/main.rs:86-93`,
+correctly used here because pi-rs's tenant model is one-tenant-per-pi-process
+even though it's many-VMs-per-tenant). Without this flag, the broker
+returns `verify_write_unavailable` on the daemon's first AuditResync
+and the daemon refuses to mount.
 
-`--tenant-mode <t>=embedder` is the operator's opt-in to embedder
-mode. Without it the broker defaults to legacy mode and refuses any
-request carrying `vm_id`/`master_epoch`. With it set, every request
-must carry non-empty `vm_id` + `master_epoch` (typed
+`--tenant-mode <tenant_id>=embedder` is the operator's opt-in to
+embedder mode. Without it the broker defaults to legacy mode and
+refuses any request carrying `vm_id`/`master_epoch`. With it set,
+every request must carry non-empty `vm_id` + `master_epoch` (typed
 `BrokerVmIdRequired { tenant_id }` from `StartError` otherwise; pi-rs
 maps to `AcquireError`). Pi-rs's MicroVmProvider asserts both are
 set on its config at construction; absence is a hard error at
 startup, not at first request.
 
-`--tenant-peer-uid <t>=<bridge_uid>` pins SO_PEERCRED auth on the
-broker UDS to the cfs-mesh-bridge's effective uid. v1.0 runs the
-bridge as a dedicated `pi-sandbox-bridge` system uid; pi-rs's
+`--tenant-peer-uid <tenant_id>:<bridge_uid>` pins SO_PEERCRED auth
+on the broker UDS to the cfs-mesh-bridge's effective uid. v1.0 runs
+the bridge as a dedicated `pi-sandbox-bridge` system uid; pi-rs's
 provisioning sets up the uid at first run and the `MicroVmProvider`
-holds the uid in its config. The `--tenant-peer-uid` argv list grows
-on each VM acquire and shrinks on release; the broker reloads its
-peer-uid table on SIGHUP (operator-managed) or pi-rs cycles through a
-secondary broker on the next pool refill (Commit G chooses one; the
-default is SIGHUP since broker process recycle is operationally
-heavier).
+holds the uid in its config. **No runtime reconfiguration**: the
+flag is set ONCE at broker startup. Earlier draft text speculated
+about SIGHUP reload of the peer-uid table; that's wrong —
+`contextfs-broker` has no SIGHUP handler (SIGHUP is `contextfsd`
+policy reload only). VMs come and go daemon-side; the broker
+accepts any valid `vm_id` for the configured tenant without per-VM
+broker reconfiguration.
 
 **Operator force-close via HTTP control plane.** Per contextfs PR 3
 part 7 (commit `655408d`), the broker exposes
@@ -2108,14 +2128,15 @@ that of contextfsd; the canonical source is
 serde-aligned struct on the pi-rs side that fails loud on schema
 drift. **Drift detection is runtime** (`#[serde(deny_unknown_fields)]`
 catches new fields contextfsd added; missing-required-field catches
-fields contextfsd removed; pinned `contextfs >= v0.3.0` constraint
-catches breaking semver bumps). It's NOT compile-time — the config
-lives in a sibling repo with independent semver, so a "broken match
-→ compile-time error" promise would be wrong. The guarantee is
-"fail-loud-at-config-load before any guest is booted", which is
-enough for v1; combined with the pinned-compat integration test
-(`tests/contextfs_schema_pin.rs`, gated on `CONTEXTFS_REPO_PATH`)
-that runs in CI when both repos are present.
+fields contextfsd removed; the git-rev pin per §3.5.8 catches
+breaking changes when pi-rs's CI bumps its contextfs commit). It's
+NOT compile-time — the config lives in a sibling repo with
+independent semver, so a "broken match → compile-time error"
+promise would be wrong. The guarantee is "fail-loud-at-config-load
+before any guest is booted", which is enough for v1; combined with
+the pinned-compat integration test (`tests/contextfs_schema_pin.rs`,
+gated on `CONTEXTFS_REPO_PATH`) that runs in CI when both repos are
+present.
 
 #### 3.5.8 — Version compatibility
 
@@ -2157,7 +2178,7 @@ Stage 1:
 
 | Binary / file                                  | Source                                  | Purpose                              |
 | ---------------------------------------------- | --------------------------------------- | ------------------------------------ |
-| `/usr/local/bin/contextfsd`                    | `contextfs-v0.3.0` static-musl release  | FUSE mount + verify_write loop       |
+| `/usr/local/bin/contextfsd`                    | contextfs static-musl build, pinned to the same git rev declared in `Cargo.toml` per §3.5.8 | FUSE mount + verify_write loop |
 | `/usr/local/bin/cfs-mesh`                      | same                                    | vsock-listen subcommand              |
 | `/usr/local/bin/pi-cfs-init`                   | pi-rs (NEW, owned by Commit G)          | rootfs init wrapper + readiness gate |
 | `/etc/contextfsd/daemon.toml`                  | rendered at provisioning (§3.5.7)       | daemon config                        |
@@ -2326,7 +2347,7 @@ microvm:firecracker  ✓ available  (Firecracker v1.15.0, probe 87ms, mode=manag
                        checks: kvm_open_rw ✓, kvm_group_member ✓,
                                vsock_module ✓, fc_binary ✓,
                                contextfs_broker ✓, cfs_fs_server ✓,
-                               cfs_mesh ✓, contextfs_cli ✓ (v0.3.2)
+                               cfs_mesh ✓, contextfs_cli ✓ (rev 06e9531)
 microvm:vfkit        ✗ unavailable
                        blocker: vfkit binary not found on $PATH
                        remediation: brew install vfkit  # or download from https://...
@@ -2392,11 +2413,20 @@ integration introduces new threat categories beyond plain virtio-fs:
   token, scoped per-job. Mitigation: short token TTL (host-rotation
   cadence ≤ token_lifetime), per-VM secret regenerated on every fresh
   pool boot, and warm-pool VMs torn down per §4 rotation policy.
-- **Audit-ping loss window.** Between successful FUSE write and broker
-  ping, an in-guest attacker who crashes the VM mid-write wipes the
-  pending event. Bounded by the contextfs RFD-0023 §7 in-memory queue
-  drain (default 1s); fail-closed shrinks the window to zero at the
-  cost of broker-availability coupling.
+- **AuditPusher replication-lag window.** Between successful FUSE
+  write and broker push, an in-guest attacker who crashes the VM
+  mid-batch loses the unpushed records from the broker's view —
+  but **not from the daemon's local audit chain**, which is the
+  forensic source of truth. AuditPusher v1 has **no per-write
+  fail-closed gate** (RFD-0024 PR 3 §"Refactor scope" item 1
+  removed it deliberately — agent-blocking on broker liveness was
+  judged a worse failure mode than bounded replication lag).
+  Bounded by AuditPusher's coalesce window (default 1 s, 256
+  records). Operators who want broker-roundtrip-or-bust posture
+  monitor `broker.log` for `audit_pusher_transport_dropped` lag
+  signals and can hard-close the chain via the operator HTTP
+  `instance-close` endpoint (§3.5.6); pi-rs's `SandboxAction`
+  telemetry surfaces these post-hoc.
 - **Vsock handshake DoS.** A rogue guest can open half-open Noise-IK
   handshakes from a forged CID at line rate; the host-side
   `cfs-mesh vsock-bridge` rate-limits per the contextfs RFD-0023 §4
@@ -2541,6 +2571,33 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.41 (2026-05-05):** rfd-critic v0.40 pass found 2 critical
+  + 4 small. Both criticals real and closed. (1) **Broker CLI
+  syntax was wrong**: §3.5.5/§3.5.6 had
+  `--tenant-peer-uid <vm>=<uid>` (equals separator) and
+  `<vm_a>=<bridge_uid>` per-VM. Verified against
+  `crates/contextfs-broker/src/main.rs:188-205`: the actual format
+  is `--tenant-peer-uid <tenant_id>:<uid>` (colon) and
+  `--tenant-mode <tenant_id>=embedder` (equals — different
+  separator). Identity model also wrong: `tenant_id` is **stable
+  per pi process**, not per VM; per-VM differentiation is via
+  `vm_id`. Pi-rs runs ONE tenant per pi process, N VMs share that
+  tenant. SIGHUP-reload claim deleted: `contextfs-broker` has no
+  SIGHUP handler (`contextfsd` does, for policy reload — verified
+  against `crates/contextfsd/src/lib.rs:8-33`). No runtime broker
+  reconfiguration; broker is started once with stable tenant
+  config. (2) **Stale audit_ping/fail-closed sweep**: §3
+  "Filesystem semantics" still said "every write mediated by
+  contextfsd's PDP and audit-ping"; corrected to "PDP + local
+  audit chain; broker replication is async best-effort via
+  AuditPusher". §6 threat-model "Audit-ping loss window /
+  fail-closed shrinks the window to zero" rewritten as
+  "AuditPusher replication-lag window: no per-write fail-closed
+  knob in PR 3; operators respond via broker.log lag signals +
+  HTTP instance-close". Plus stale `v0.3.0`/`v0.3.2` mentions
+  cleaned: §3.5.7 schema-drift paragraph + §3.5.9 rootfs manifest
+  + §3.5.9 doctor sample now reference the git-rev pin per
+  §3.5.8 ("rev 06e9531") instead of floating `v0.3.x` numbers.
 - **v0.40 (2026-05-05):** contextfs maintainer dropped the §3.5.4
   draft (`rfd/0023-CONTEXTFS-REVIEW-v0.39-section-3.5.4-draft.md`),
   then a v2 trimmed-against-d6cdafa revision dropping duplication
