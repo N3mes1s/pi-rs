@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.37 — bridge mount path, unified disposition match)
+- **Status:** Discussion (v0.38 — telemetry on error paths + Linux=operator-managed framing)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -10,6 +10,8 @@
 RFD 0022 shipped the `SandboxProvider` trait but only a passthrough `LocalProcessProvider` whose own docstring admits it doesn't isolate anything: `tool.invoke()` runs inline, same fs / same UID / same network. The wiring is correct, the contents are vapor. End-to-end dogfood produced `duration_ms: 0` per call — proof nothing forks.
 
 This RFD ships the first **real isolation backend**: a `MicroVmProvider` that runs each tool call inside a Linux microVM, with one rootfs and one wire protocol shared by per-OS launchers (Firecracker on Linux, vfkit on macOS, cloud-hypervisor+WHPX on Windows). **Phased rollout:** explicit launcher pins (`--sandbox-provider=microvm:firecracker`, `…:vfkit`, `…:cloud-hypervisor`) ship per platform as each launcher lands and dogfoods clean. The unqualified `--sandbox-provider=microvm` *auto-pick* form ships only after all three OS paths meet the cross-platform GA bar (probe, dogfood, parity tests green on each).
+
+**Linux/Firecracker v1 is operator-managed** — not the self-contained "just install pi and go" backend that the macOS and Windows launchers deliver. Because Firecracker has no virtio-fs (per `rfd/0023-known-issues.md` and upstream issue #1180), the Linux `/work` mount goes through contextfs, which requires an operator-deployed contextfs broker + `cfs-fs-server` + `cfs-mesh` and per-VM tenant secret derivation (§3.5). This is honest in the CLI UX: `pi sandbox doctor` on a Linux host with no contextfs config tells the user explicitly that Linux/Firecracker is "operator-managed mode (requires contextfs broker)" and points at the alternatives (`local-process`, or a future macOS/Windows host). macOS/Windows v1 ship a self-contained virtio-fs RW path with no broker — that's the "just works" UX. v1 does NOT ship a self-contained Linux mode; that's a follow-on RFD when Firecracker either gains virtio-fs or pi-rs gains a guest-side FUSE proxy that doesn't depend on contextfs.
 
 Remote sandbox vendors (E2B, Sprites, Daytona) are split into a sister RFD — see **RFD 0026** — because they share only the `SandboxProvider` surface, none of the rootfs/protocol/launcher infrastructure.
 
@@ -563,6 +565,48 @@ pub enum SandboxError {
     ToolUnavailable { tool: String, reason: String },
 }
 
+/// Error-path return shape that **always carries telemetry** so the
+/// runtime can record `provider`/`launcher`/`pool_disposition`/
+/// `reset_status`/`release_reason` on failure rows, not only on
+/// success rows. v0.37 used `Result<SandboxOutcome, SandboxError>`
+/// which silently dropped telemetry on the error branch — operators
+/// could see *that* an acquire failed but not which launcher,
+/// whether a VM had been booted then destroyed, etc.
+///
+/// The provider's `execute_tool` now returns
+/// `Result<SandboxOutcome, SandboxFailure>`. `SandboxFailure`
+/// carries the same `SandboxTelemetry` shape as `SandboxOutcome`,
+/// with all non-applicable fields set to `None`. The runtime emits
+/// one `SandboxAction` row per tool call regardless of outcome,
+/// populated from whichever arm fired.
+#[derive(Debug)]
+pub struct SandboxFailure {
+    pub error: SandboxError,
+    pub telemetry: SandboxTelemetry,
+}
+
+impl From<SandboxError> for SandboxFailure {
+    /// Convenience for sites that have nothing to fill in beyond
+    /// `provider`. Used at the very-early reject paths
+    /// (Unavailable / ToolUnavailable) where no VM was acquired.
+    fn from(error: SandboxError) -> Self {
+        SandboxFailure {
+            error,
+            telemetry: SandboxTelemetry {
+                provider: "microvm",
+                launcher: None,
+                acquire_to_ready_ms: None,
+                guest_duration_ms: None,
+                cold_boot: None,
+                cost_usd: None,
+                pool_disposition: None,
+                reset_status: None,
+                release_reason: None,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VmSpec {
     /// Host path mounted at /work in the guest.
@@ -814,8 +858,6 @@ pub struct MicroVmProvider {
     /// Per-tool overrides. `bash` typically wants a longer timeout
     /// than `read`/`ls`. Looked up by tool name.
     per_tool_call_limits: BTreeMap<String, CallLimits>,
-    /// In-process dispatcher for host-bound tools (web_search in v1).
-    /// `MicroVmProvider::execute_tool` first asks
     /// Provider-level configuration for the per-VM search-channel
     /// async task that handles `web_search` requests from inside
     /// the guest (§"web_search via vsock proxy"). Holds the host's
@@ -860,7 +902,20 @@ impl DispatchClassRegistry {
     /// `Unavailable` per the safety rule in §"Plan-time API".
     pub fn from_tools(reg: &pi_tools::ToolRegistry) -> Self { /* iterate + collect */ unimplemented!() }
     pub fn lookup(&self, tool_name: &str) -> ToolDispatchClass {
-        self.inner.get(tool_name).copied().unwrap_or(ToolDispatchClass::SandboxManaged) // fallback for tools added after construction
+        // Two-enum design clarification: `ToolDispatchClass` only
+        // has `RuntimeNative` | `SandboxManaged` (orthogonal axis
+        // — does the runtime handle it, or does the sandbox?).
+        // Availability is a SEPARATE query on the provider via
+        // `SandboxToolDisposition` (`Guest` | `Unavailable`). For
+        // an unknown tool reaching this registry, the safe answer
+        // is `SandboxManaged` (we don't know it's runtime-native;
+        // assume not). The provider's `tool_disposition()` then
+        // returns `Unavailable` per the §"Plan-time API" safety
+        // default, and the unified match in `execute_tool` raises
+        // `ToolUnavailable`. So unknown tools cannot reach guest
+        // dispatch — but the gating happens via `tool_disposition()`,
+        // not via this registry.
+        self.inner.get(tool_name).copied().unwrap_or(ToolDispatchClass::SandboxManaged)
     }
 }
 
@@ -921,7 +976,7 @@ impl SandboxProvider for MicroVmProvider {
         tool_use_id: &str,                   // NEW: threaded from outer ToolCall.call_id (RFD 0022 trait amendment)
         tool_name: &str,
         tool_input: &serde_json::Value,
-    ) -> Result<SandboxOutcome, SandboxError> {
+    ) -> Result<SandboxOutcome, SandboxFailure> {
         // Runtime-native orchestration tools (task / subagent — anything
         // that drives the agent's outer loop, per RFD 0005) bypass
         // SandboxProvider entirely BEFORE we get here. The runtime
@@ -945,10 +1000,10 @@ impl SandboxProvider for MicroVmProvider {
         match self.tool_disposition(tool_name) {
             SandboxToolDisposition::Guest => { /* fall through to guest dispatch */ }
             SandboxToolDisposition::Unavailable => {
-                return Err(SandboxError::ToolUnavailable {
+                return Err(SandboxFailure::from(SandboxError::ToolUnavailable {
                     tool: tool_name.into(),
                     reason: format!("unavailable under provider '{}'", self.name()),
-                });
+                }));
             }
         }
         // Every Guest tool routes through the same guest dispatch path.
@@ -958,7 +1013,24 @@ impl SandboxProvider for MicroVmProvider {
         let spec = self.spec_for(ctx);
         let limits = self.build_call_limits(ctx, tool_name);
         let vm = self.launcher.acquire(&spec).await
-            .map_err(SandboxError::Acquire)?;
+            .map_err(|e| SandboxFailure {
+                error: SandboxError::Acquire(e),
+                // Acquire failed: no launcher succeeded fully, so
+                // launcher name is still meaningful (which path was
+                // attempted). No VM ever existed, so pool/reset are
+                // None.
+                telemetry: SandboxTelemetry {
+                    provider: "microvm",
+                    launcher: Some(self.launcher.launcher_name()),
+                    acquire_to_ready_ms: None,
+                    guest_duration_ms: None,
+                    cold_boot: None,
+                    cost_usd: None,
+                    pool_disposition: None,
+                    reset_status: None,
+                    release_reason: None,
+                },
+            })?;
         // Cancel-safe release. Wrap the VM in a guard whose Drop
         // releases with `Cancelled` if the future is dropped between
         // acquire and explicit release. A normal completion calls
@@ -1000,7 +1072,22 @@ impl SandboxProvider for MicroVmProvider {
         // SuspectGuestState. Cancelled propagates separately via
         // ReleaseGuard::Drop.
         let release_outcome = guard.release(outcome_hint).await;  // disarms Drop; structured result
-        let exec = exec_result.map_err(SandboxError::Execute)?;
+        let exec = exec_result.map_err(|e| SandboxFailure {
+            error: SandboxError::Execute(e),
+            // Execute failed mid-flight: VM did exist; release_outcome
+            // already carries pool_disposition/reset_status/reason.
+            telemetry: SandboxTelemetry {
+                provider: "microvm",
+                launcher: Some(self.launcher.launcher_name()),
+                acquire_to_ready_ms: None,    // we have it from the prior acquire but pseudocode keeps it terse
+                guest_duration_ms: None,
+                cold_boot: None,
+                cost_usd: None,
+                pool_disposition: Some(release_outcome.pool_disposition),
+                reset_status: Some(release_outcome.reset_status),
+                release_reason: release_outcome.reason.clone(),
+            },
+        })?;
         Ok(SandboxOutcome {
             tool_result: exec.tool_result,
             execution: exec.execution,        // raw stdout/stderr/exit_status, separate from model_output
@@ -2231,6 +2318,13 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.38 (2026-05-05):** rfd-critic v0.37 pass: 2 critical
+  (telemetry-on-error + Linux v1 framing) + small. Both real,
+  both closed.
+  (1) **Telemetry on error paths.** `execute_tool() -> Result<SandboxOutcome, SandboxError>` silently dropped `launcher`/`pool_disposition`/`reset_status`/`release_reason` on the Err arm — operators saw "an acquire failed" but not which launcher, whether a VM had been booted then destroyed, etc. Fixed: introduced `SandboxFailure { error: SandboxError, telemetry: SandboxTelemetry }`; `execute_tool()` now returns `Result<SandboxOutcome, SandboxFailure>`. The runtime emits one `SandboxAction` row per tool call regardless of outcome, populated from whichever arm fired. Pseudocode updated for the three error sites: ToolUnavailable (no VM, telemetry has only `provider`), Acquire failure (launcher attempted, no VM created), Execute failure (VM existed, release_outcome already known). `From<SandboxError> for SandboxFailure` provides the "no VM" convenience.
+  (2) **Linux v1 framing.** Summary previously claimed "first real local microVM backend"; in reality Linux/Firecracker v1 is hard-coupled to contextfs broker + `cfs-fs-server` + `cfs-mesh` + per-VM OIDC, which ordinary `pi --sandbox-provider=microvm` users won't have. Narrowed Summary: Linux v1 is **operator-managed mode** (requires contextfs broker), macOS/Windows v1 are self-contained. CLI UX is honest: `pi sandbox doctor` flags this on a Linux host with no contextfs config and points at alternatives. Self-contained Linux mode deferred to follow-on RFD (when Firecracker gains virtio-fs OR pi-rs gains a non-contextfs guest-side FUSE proxy).
+  (3) `DispatchClassRegistry::lookup` fallback comment clarified: unknown tools default to `SandboxManaged` (the registry's job is RuntimeNative-vs-SandboxManaged classification only); availability gating happens via the separate `tool_disposition()` query, which defaults to `Unavailable` for unknown tools per the §"Plan-time API" safety rule.
+  (4) Stale `search_config` field doc cleaned up (was prefixed with the v0.32 `host_tools` paragraph).
 - **v0.37 (2026-05-05):** rfd-critic v0.36 cleanup pass: small
   but real findings around the v0.36 redesign. (1) Bridge UDS
   was at `/run/pi-search-bridge.sock` but the reset survival
