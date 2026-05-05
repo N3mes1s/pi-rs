@@ -29,9 +29,15 @@
 //!    worst-case latency is `ceil(timeout_ms / 1000) + 1` seconds.
 
 use pi_sandbox_protocol::{ToolRequest, ToolResponse};
+use pi_search_proto::{
+    self as search_proto, FramingError, WebSearchRequest, WebSearchResponse, CURRENT_PROTO_VERSION,
+    DEFAULT_MAX_LINE_BYTES, HOST_CID, VSOCK_SEARCH_PORT,
+};
 use pi_tools_core::{ToolContext, ToolRegistry};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Instant;
+use tokio::io::BufReader;
 use tracing::warn;
 
 static REGISTRY: OnceLock<ToolRegistry> = OnceLock::new();
@@ -174,11 +180,163 @@ fn harden_bash_input(input: serde_json::Value, timeout_ms: u32) -> (serde_json::
 }
 
 // --------------------------------------------------------------------------
+// web_search vsock proxy (RFD 0023 §"web_search via vsock proxy")
+// --------------------------------------------------------------------------
+
+/// Proxy a `web_search` ToolRequest out to the host over vsock so the
+/// upstream API key (EXA / Brave / …) never enters the guest. The
+/// host's listener at `(HOST_CID, VSOCK_SEARCH_PORT)` invokes the real
+/// `WebSearchTool` with its own `AuthStorage`, returns the result.
+///
+/// Wire shape per `pi_search_proto`: one newline-delimited
+/// `WebSearchRequest` out, one newline-delimited `WebSearchResponse`
+/// in, channel closed. No long-lived fd in the worker.
+async fn proxy_web_search(req: ToolRequest) -> ToolResponse {
+    let started = Instant::now();
+    let call_id = req.call_id.clone();
+
+    // Translate ToolRequest input → WebSearchRequest. Tool input is a
+    // serde_json::Value mirroring the host WebSearchTool's schema:
+    // `{ "query": "...", "provider": "exa", "max_results": 5 }`.
+    let query = req
+        .tool_input
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let Some(query) = query else {
+        let msg = "web_search input missing required `query` field".to_string();
+        return ToolResponse {
+            call_id,
+            stdout: msg.clone(),
+            stderr: msg,
+            exit_status: 1,
+            guest_duration_ms: started.elapsed().as_millis() as u32,
+            is_error: true,
+        };
+    };
+    let provider = req
+        .tool_input
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let max_results = req
+        .tool_input
+        .get("max_results")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+    let proxy_req = WebSearchRequest {
+        proto_version: CURRENT_PROTO_VERSION,
+        call_id: call_id.clone(),
+        query,
+        provider,
+        max_results,
+    };
+
+    match do_proxy_call(&proxy_req).await {
+        Ok(resp) if resp.error.is_none() => ToolResponse {
+            call_id,
+            stdout: resp.result_text,
+            stderr: String::new(),
+            exit_status: 0,
+            guest_duration_ms: started.elapsed().as_millis() as u32,
+            is_error: false,
+        },
+        Ok(resp) => {
+            let err = resp.error.unwrap_or_default();
+            let msg = if resp.result_text.is_empty() {
+                format!("web_search failed: {err}")
+            } else {
+                format!("web_search failed: {err}\n{}", resp.result_text)
+            };
+            ToolResponse {
+                call_id,
+                stdout: msg.clone(),
+                stderr: msg,
+                exit_status: 1,
+                guest_duration_ms: started.elapsed().as_millis() as u32,
+                is_error: true,
+            }
+        }
+        Err(e) => {
+            let msg = format!("web_search vsock proxy error: {e}");
+            warn!(err = %e, "web_search proxy failed");
+            ToolResponse {
+                call_id,
+                stdout: msg.clone(),
+                stderr: msg,
+                exit_status: 1,
+                guest_duration_ms: started.elapsed().as_millis() as u32,
+                is_error: true,
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn do_proxy_call(req: &WebSearchRequest) -> Result<WebSearchResponse, ProxyError> {
+    use tokio_vsock::{VsockAddr, VsockStream};
+
+    let addr = VsockAddr::new(HOST_CID, VSOCK_SEARCH_PORT);
+    let mut stream = VsockStream::connect(addr).await.map_err(ProxyError::Io)?;
+    search_proto::write_request(&mut stream, req)
+        .await
+        .map_err(ProxyError::Frame)?;
+    // Newline framing makes a half-close unnecessary; the host's
+    // reader stops at `\n`. Just read the response on the same
+    // connection.
+    let mut reader = BufReader::new(stream);
+    let resp = search_proto::read_response(&mut reader, DEFAULT_MAX_LINE_BYTES)
+        .await
+        .map_err(ProxyError::Frame)?;
+    if resp.proto_version != CURRENT_PROTO_VERSION {
+        return Err(ProxyError::ProtoMismatch {
+            expected: CURRENT_PROTO_VERSION,
+            got: resp.proto_version,
+        });
+    }
+    if resp.call_id != req.call_id {
+        return Err(ProxyError::CallIdMismatch {
+            expected: req.call_id.clone(),
+            got: resp.call_id,
+        });
+    }
+    Ok(resp)
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn do_proxy_call(_req: &WebSearchRequest) -> Result<WebSearchResponse, ProxyError> {
+    Err(ProxyError::Unsupported)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ProxyError {
+    #[error("vsock io: {0}")]
+    Io(std::io::Error),
+    #[error("framing: {0}")]
+    Frame(FramingError),
+    #[error("proto version mismatch: expected {expected}, got {got}")]
+    ProtoMismatch { expected: u32, got: u32 },
+    #[error("call_id mismatch: sent {expected}, got {got}")]
+    CallIdMismatch { expected: String, got: String },
+    #[cfg(not(target_os = "linux"))]
+    #[error("vsock proxy not supported on this platform (Linux only)")]
+    Unsupported,
+}
+
+// --------------------------------------------------------------------------
 // Main entry point
 // --------------------------------------------------------------------------
 
 pub async fn dispatch_request(req: ToolRequest, work_dir: &Path) -> ToolResponse {
     let call_id = req.call_id.clone();
+
+    // `web_search` is special: not a guest-side tool. The handler
+    // proxies the call out to the host over vsock(HOST_CID,
+    // VSOCK_SEARCH_PORT) so the upstream API key never enters the
+    // guest. See RFD 0023 §"web_search via vsock proxy".
+    if req.tool_name == "web_search" {
+        return proxy_web_search(req).await;
+    }
 
     // Look up the tool by name.
     let Some(tool) = registry().get(&req.tool_name) else {

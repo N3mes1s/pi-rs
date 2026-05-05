@@ -13,6 +13,7 @@ members = [
     "crates/pi-stats", "crates/pi-sandbox",
     "crates/pi-sandbox-protocol",
     "crates/pi-sandbox-worker",
+    "crates/pi-search-proto",
     "crates/pi-sandbox-rootfs",
     "crates/pi-sdk",
     "crates/pi-sdk-canary",
@@ -94,6 +95,7 @@ pi-stats = { path = "crates/pi-stats", version = "0.1.0" }
 pi-sandbox = { path = "crates/pi-sandbox", version = "0.1.0" }
 pi-sandbox-protocol = { path = "crates/pi-sandbox-protocol", version = "0.1.0" }
 pi-sandbox-worker = { path = "crates/pi-sandbox-worker", version = "0.1.0" }
+pi-search-proto = { path = "crates/pi-search-proto", version = "0.1.0" }
 pi-sandbox-rootfs = { path = "crates/pi-sandbox-rootfs", version = "0.1.0" }
 pi-orchestrate = { path = "crates/pi-orchestrate", version = "0.1.0" }
 pi-sdk = { path = "crates/pi-sdk", version = "0.1.0" }

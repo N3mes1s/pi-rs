@@ -31,12 +31,60 @@ pub struct VmSpec {
     pub rootfs_version: RootfsVersion,
 }
 
-/// Network policy enum. v1.0 only supports `Deny`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Network policy enum.
+///
+/// `Deny` is the v1 production default — guest has no network. `Allow` is
+/// gated behind explicit caller opt-in (typically inside a pasta-managed
+/// netns with nftables allowlist for selective egress, per RFD §"selective
+/// network egress" follow-up). The launcher does NOT create or destroy
+/// the host TAP — the caller is responsible. The guest's `eth0` is
+/// configured at boot from kernel-cmdline-injected values.
+///
+/// **Operator-facing doc:** `crates/pi-sandbox/docs/NETWORKING.md`
+/// describes the host setup (pasta, nftables, unprivileged userns)
+/// and the auto-install ladder that runs on
+/// `[sandbox.network] enabled = true`. Read that before changing
+/// anything about how Allow is wired host-side.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkPolicy {
     /// Guest has no network access.
     Deny,
-    // Future: AllowList(Vec<DomainPattern>), AllowAll
+    /// Guest gets a network interface backed by the named host TAP device.
+    Allow {
+        /// Name of an existing host TAP device (e.g. `tap-pi0`).
+        tap_name: String,
+        /// Static IPv4 + prefix the guest will assign to eth0
+        /// (e.g. `172.16.0.2/30`).
+        guest_ip_cidr: String,
+        /// Default gateway the guest will use (e.g. `172.16.0.1`).
+        guest_gateway: String,
+        /// DNS resolver(s) — written to `/etc/resolv.conf` in the guest.
+        guest_dns: Vec<String>,
+        /// MAC address for the guest interface. If `None`, the launcher
+        /// generates a stable per-VM MAC from `vm_id`.
+        guest_mac: Option<String>,
+        /// Egress allowlist. Each entry is either:
+        ///   - a literal IPv4 address (`151.101.130.132`),
+        ///   - an IPv4 CIDR (`151.101.0.0/16`), or
+        ///   - a DNS hostname (`dl-cdn.alpinelinux.org`).
+        /// Hostnames are resolved at netns-setup time inside the
+        /// pasta-managed netns; the resulting IPs become the nft
+        /// `accept` set. UDP/53 to `guest_dns` is always permitted
+        /// regardless of this list — without it the resolution
+        /// itself would fail and bootstrap would deadlock.
+        ///
+        /// **Empty list = no new outbound connections allowed**
+        /// (defense-in-depth: a guest that can't reach anything is
+        /// surprising but safe). The launcher only enforces what
+        /// the embedder's policy file (Cedar / auto-approve TOML)
+        /// declares; it does not invent permissions.
+        ///
+        /// Future: replace this static set with a per-connection
+        /// broker that consults the host's policy engine on each
+        /// connect() — see `crates/pi-sandbox/docs/NETWORKING.md`
+        /// §"Future: per-connection broker".
+        egress_allowlist: Vec<String>,
+    },
 }
 
 /// VM-level ceiling. Set at acquire(); cannot change without

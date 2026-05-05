@@ -56,6 +56,58 @@ pub fn run_update() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `pi --sandbox doctor` — probe the host for `microvm:firecracker`
+/// preconditions and print a per-check report. Exit 0 if every blocker
+/// is clear; exit 1 if at least one blocker remains. Advisory checks
+/// (NetworkPolicy::Allow extras: pasta, nft, unprivileged userns) are
+/// reported but do NOT contribute to the exit code — `Deny` mode is
+/// fine without them, and the operator opts in via their pi config.
+pub async fn run_sandbox_doctor() -> anyhow::Result<i32> {
+    use pi_sandbox::microvm::firecracker::{FirecrackerConfig, FirecrackerLauncher};
+    use pi_sandbox::microvm::launcher::MicroVmLauncher;
+
+    let launcher = FirecrackerLauncher::new(FirecrackerConfig::default());
+    let report = launcher
+        .probe()
+        .await
+        .map_err(|e| anyhow::anyhow!("probe failed: {e}"))?;
+
+    println!("pi sandbox doctor — transport: {}", report.transport);
+    if let Some(v) = &report.version {
+        println!("  version: {v}");
+    }
+    println!("  probe duration: {} ms", report.probe_duration_ms);
+    println!("  available: {}", if report.available { "yes" } else { "NO" });
+    println!();
+    println!("Checks:");
+    for c in &report.checks {
+        let mark = if c.passed { "✓" } else { "✗" };
+        let detail = c.detail.as_deref().unwrap_or("");
+        println!("  {mark} {} — {}", c.name, detail);
+    }
+    if !report.blockers.is_empty() {
+        println!();
+        println!("Blockers (must clear before microvm:firecracker can boot):");
+        for b in &report.blockers {
+            println!("  · {b}");
+        }
+    }
+    if !report.remediation.is_empty() {
+        println!();
+        println!("Remediation:");
+        for r in &report.remediation {
+            println!("  → {r}");
+        }
+    }
+    println!();
+    println!("Network policy (`NetworkPolicy::Allow`) is opt-in; the four advisory");
+    println!("checks above (pasta, nft, unprivileged userns, TAP-in-userns) only");
+    println!("matter when `[sandbox.network] enabled = true` in your pi config.");
+    println!("See crates/pi-sandbox/docs/NETWORKING.md for the auto-install ladder.");
+
+    Ok(if report.available { 0 } else { 1 })
+}
+
 pub async fn run_router_fetch_embeddings() -> anyhow::Result<()> {
     let path = fetch_default_embeddings().await?;
     validate_embedding_model(&path)?;

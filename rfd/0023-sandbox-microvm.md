@@ -639,10 +639,24 @@ pub struct VmSpec {
     pub rootfs_version: RootfsVersion,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NetworkPolicy {
     Deny,
-    // Future: AllowList(Vec<DomainPattern>), AllowAll
+    /// Selective egress via an unprivileged user+net namespace
+    /// owned by the pi process, with pasta as the userspace TCP/UDP
+    /// relay and nftables as the allowlist filter. The full
+    /// host-side wiring + auto-install ladder is documented in
+    /// `crates/pi-sandbox/docs/NETWORKING.md`. v1.1 only carries
+    /// the boot-time knobs the guest /init needs (IP, gateway,
+    /// DNS); the host's allowlist is rendered from
+    /// `[sandbox.network].allowlist` in the embedder's pi config.
+    Allow {
+        tap_name: String,
+        guest_ip_cidr: String,
+        guest_gateway: String,
+        guest_dns: Vec<String>,
+        guest_mac: Option<String>,
+    },
 }
 
 /// `BootSpec.transport_mode` — `local` vs `managed` per the §3.5

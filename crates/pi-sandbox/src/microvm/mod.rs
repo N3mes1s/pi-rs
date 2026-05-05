@@ -15,6 +15,9 @@ pub mod firecracker;
 #[cfg(target_os = "linux")]
 pub use firecracker::FirecrackerLauncher;
 
+#[cfg(target_os = "linux")]
+mod search_proxy;
+
 pub use launcher::{MicroVmLauncher, VmHandle};
 pub use provider::MicroVmProvider;
 pub use types::{

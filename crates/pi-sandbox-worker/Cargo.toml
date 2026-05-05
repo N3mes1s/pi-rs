@@ -25,6 +25,7 @@ tempfile.workspace = true
 pi-sandbox-protocol.workspace = true
 pi-tool-types.workspace = true
 pi-tools-core.workspace = true
+pi-search-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

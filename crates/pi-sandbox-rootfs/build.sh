@@ -119,13 +119,16 @@ fi
 # the VMM-drive layer because warm-pool VMs share one rootfs.img file —
 # ext4 isn't a cluster fs); upper=tmpfs in guest RAM, ephemeral per-VM.
 # State leaks across tool calls within ONE warm VM (no per-call reset
-# yet; RFD §"Post-call hygiene" is the eventual fix). Bounded at 256 MiB
-# so a runaway dd doesn't OOM the VM under the 512 MiB default ceiling.
+# yet; RFD §"Post-call hygiene" is the eventual fix). Size driven by
+# the host's VmCeiling.disk_mib via pi.overlay.size_mib= cmdline; 256
+# MiB is the floor when cmdline is missing/invalid.
 # /run itself is on the RO rootfs; mount a tmpfs there first so we can
 # build the overlay scaffolding under it.
+overlay_size=\$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.overlay\.size_mib=//p')
+case "\$overlay_size" in ''|*[!0-9]*) overlay_size=256 ;; esac
 mount -t tmpfs -o size=8m tmpfs /run
 mkdir -p /run/overlay
-mount -t tmpfs -o size=256m tmpfs /run/overlay
+mount -t tmpfs -o size=\${overlay_size}m tmpfs /run/overlay
 mkdir -p /run/overlay/upper /run/overlay/work /run/overlay/newroot
 if mount -t overlay -o lowerdir=/,upperdir=/run/overlay/upper,workdir=/run/overlay/work overlay /run/overlay/newroot; then
   # Carry critical mounts across pivot_root + create the put_old dir.
@@ -205,6 +208,29 @@ umount -l /old_root 2>/dev/null
 rmdir /old_root 2>/dev/null
 mkdir -p /work 2>/dev/null
 mount -t virtiofs work /work 2>/dev/null || echo "WARN: virtiofs mount skipped (not available)"
+
+# Optional eth0 setup. The host injects `pi.net.ip=<cidr>`,
+# `pi.net.gw=<gw>`, `pi.net.dns=<csv>` on the kernel cmdline when the
+# launcher's NetworkPolicy is `Allow`. When absent (default `Deny`),
+# eth0 stays down and no /etc/resolv.conf is written.
+#
+# The host-side wiring (pasta, nftables, unprivileged userns) is
+# documented in crates/pi-sandbox/docs/NETWORKING.md.
+net_ip=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.net\.ip=//p')
+net_gw=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.net\.gw=//p')
+net_dns=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.net\.dns=//p')
+if [ -n "$net_ip" ] && [ -n "$net_gw" ]; then
+  ip link set eth0 up 2>/dev/null
+  ip addr add "$net_ip" dev eth0 2>/dev/null
+  ip route add default via "$net_gw" 2>/dev/null
+  if [ -n "$net_dns" ]; then
+    : > /etc/resolv.conf
+    for ns in $(echo "$net_dns" | tr ',' ' '); do
+      echo "nameserver $ns" >> /etc/resolv.conf
+    done
+  fi
+fi
+
 expected_proto=1
 cmdline_proto=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.proto_version=//p')
 if [ -n "$cmdline_proto" ] && [ "$cmdline_proto" != "$expected_proto" ]; then

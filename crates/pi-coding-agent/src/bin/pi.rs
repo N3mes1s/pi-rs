@@ -44,6 +44,20 @@ fn main() -> anyhow::Result<()> {
             .build()?;
         return rt.block_on(cmd::run_refresh_models());
     }
+    if let Some(verb) = &cli.sandbox_subcommand {
+        match verb.as_str() {
+            "doctor" => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                let exit = rt.block_on(cmd::run_sandbox_doctor())?;
+                std::process::exit(exit);
+            }
+            other => {
+                anyhow::bail!("unknown --sandbox verb: {other}");
+            }
+        }
+    }
     if cli.internal_evolve_tick {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()

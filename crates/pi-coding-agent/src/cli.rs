@@ -116,6 +116,20 @@ pub struct Cli {
     #[arg(long)]
     pub install: Option<String>,
 
+    /// Sandbox subcommand. Currently supports:
+    ///   `doctor` — probe the host for `microvm:firecracker`
+    ///   prerequisites (KVM, firecracker, virtiofsd, vsock, plus
+    ///   NetworkPolicy::Allow extras: pasta, nftables, unprivileged
+    ///   userns) and print a per-check report. Exit 0 if everything
+    ///   the configured provider needs is available; exit 1 if a
+    ///   blocker is missing.
+    #[arg(
+        long = "sandbox",
+        value_name = "VERB",
+        value_parser = clap::builder::PossibleValuesParser::new(["doctor"])
+    )]
+    pub sandbox_subcommand: Option<String>,
+
     #[arg(long, action = ArgAction::SetTrue)]
     pub list: bool,
 

@@ -35,7 +35,7 @@ use pi_tool_types::ToolResult;
 use pi_tools::ToolContext;
 
 use crate::microvm::{
-    CallLimits, ProbeCheck, ProbeReport, VmCeiling, VmExecution, VmSpec,
+    CallLimits, NetworkPolicy, ProbeCheck, ProbeReport, VmCeiling, VmExecution, VmSpec,
 };
 use crate::microvm::launcher::{MicroVmLauncher, VmHandle};
 use crate::provider::SandboxError;
@@ -343,6 +343,96 @@ impl MicroVmLauncher for FirecrackerLauncher {
             name: "virtiofsd_binary",
             passed: vfs_ok,
             detail: vfs_path.map(|p| p.display().to_string()),
+        });
+
+        // 5-8. NetworkPolicy::Allow preconditions. These are NOT
+        // promoted to blockers — `Deny` mode (the default) doesn't
+        // need any of them. They're surfaced as advisory checks so
+        // the operator can preflight before flipping their config to
+        // `[sandbox.network] enabled = true`. Per
+        // `crates/pi-sandbox/docs/NETWORKING.md` §"Auto-install".
+        let pasta_ok = which::which("pasta").is_ok();
+        checks.push(ProbeCheck {
+            name: "pasta_binary (NetworkPolicy::Allow)",
+            passed: pasta_ok,
+            detail: if pasta_ok {
+                Some("found".into())
+            } else {
+                Some(
+                    "missing — install `passt` package; see crates/pi-sandbox/docs/NETWORKING.md"
+                        .into(),
+                )
+            },
+        });
+
+        let nft_ok = which::which("nft").is_ok();
+        checks.push(ProbeCheck {
+            name: "nft_binary (NetworkPolicy::Allow)",
+            passed: nft_ok,
+            detail: if nft_ok {
+                Some("found".into())
+            } else {
+                Some(
+                    "missing — install `nftables` package; see crates/pi-sandbox/docs/NETWORKING.md"
+                        .into(),
+                )
+            },
+        });
+
+        let unpriv_userns_ok = std::process::Command::new("unshare")
+            .args(["-rUn", "/bin/true"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        checks.push(ProbeCheck {
+            name: "unprivileged_userns (NetworkPolicy::Allow)",
+            passed: unpriv_userns_ok,
+            detail: if unpriv_userns_ok {
+                Some("`unshare -rUn` succeeds".into())
+            } else {
+                Some(
+                    "`unshare -rUn` failed — kernel may have \
+                     `kernel.unprivileged_userns_clone=0`; \
+                     `sudo sysctl -w kernel.unprivileged_userns_clone=1`"
+                        .into(),
+                )
+            },
+        });
+
+        // Only test TAP creation if the userns probe passed (otherwise
+        // the unshare itself will fail and the result is meaningless).
+        let tap_create_ok = if unpriv_userns_ok {
+            std::process::Command::new("unshare")
+                .args([
+                    "-rUn",
+                    "sh",
+                    "-c",
+                    "ip tuntap add tap-pi-doctor mode tap && ip tuntap del tap-pi-doctor mode tap",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        checks.push(ProbeCheck {
+            name: "tap_in_userns (NetworkPolicy::Allow)",
+            passed: tap_create_ok,
+            detail: if tap_create_ok {
+                Some("ip tuntap add/del in `unshare -rUn` succeeds".into())
+            } else if !unpriv_userns_ok {
+                Some("skipped (unprivileged userns prerequisite failed)".into())
+            } else {
+                Some(
+                    "`ip tuntap add … in `unshare -rUn` failed — \
+                     check that the iproute2 package is current"
+                        .into(),
+                )
+            },
         });
 
         let available = blockers.is_empty();
@@ -746,7 +836,75 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
 
     // Spawn Firecracker. Debug mode (PI_SANDBOX_FC_DEBUG=1) captures
     // stdout/stderr to /tmp/pi-sandbox-fc-debug/<vm_id>/ so smoke-test
-    // failures are diagnosable.
+    // failures are diagnosable. When `spec.network_policy` is
+    // `NetworkPolicy::Allow`, the FC argv is built behind a
+    // pasta + bash wrapper that creates an unprivileged user+net
+    // namespace, sets up the TAP and nft rules, then `exec`s
+    // firecracker (see `crates/pi-sandbox/docs/NETWORKING.md`).
+    let netns_setup = build_netns_setup_script(spec)?;
+    // Optional egress trace: when PI_SANDBOX_FC_PCAP_DIR is set, the
+    // pasta invocation grows `--pcap <dir>/<vm_id>.pcap` (full L2
+    // capture, openable in tcpdump/wireshark) and
+    // `--log-file <dir>/<vm_id>.pasta.log` (text log of pasta's
+    // userspace forwarding decisions). Both files are written from
+    // inside pasta — outside the netns, owned by the pi process,
+    // suitable for post-hoc audit.
+    let pcap_dir = std::env::var("PI_SANDBOX_FC_PCAP_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
+    if let Some(dir) = &pcap_dir {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let pcap_path = pcap_dir
+        .as_ref()
+        .map(|d| d.join(format!("{vm_id}.pcap")));
+    let pasta_log_path = pcap_dir
+        .as_ref()
+        .map(|d| d.join(format!("{vm_id}.pasta.log")));
+    if pcap_path.is_some() {
+        eprintln!(
+            "PI_SANDBOX_FC_PCAP_DIR: pcap+pasta log at {}/{vm_id}.{{pcap,pasta.log}}",
+            pcap_dir.as_ref().unwrap().display()
+        );
+    }
+    let make_fc_command = || -> tokio::process::Command {
+        match &netns_setup {
+            Some(setup) => {
+                // pasta [--pcap PCAP] [--log-file LOG] --config-net --
+                //   bash -c 'setup; exec "$@"' --
+                //   firecracker --api-sock SOCK --config-file CFG
+                let inner = format!("{setup}\nexec \"$@\"\n");
+                let mut c = tokio::process::Command::new("pasta");
+                if let Some(p) = &pcap_path {
+                    c.arg("--pcap").arg(p);
+                }
+                if let Some(p) = &pasta_log_path {
+                    c.arg("--log-file").arg(p);
+                }
+                c.arg("--config-net")
+                    .arg("--")
+                    .arg("bash")
+                    .arg("-c")
+                    .arg(inner)
+                    .arg("--") // becomes $0 inside bash -c, padding for $@
+                    .arg(&fc_bin)
+                    .arg("--api-sock")
+                    .arg(&api_sock)
+                    .arg("--config-file")
+                    .arg(&config_path);
+                c
+            }
+            None => {
+                let mut c = tokio::process::Command::new(&fc_bin);
+                c.arg("--api-sock")
+                    .arg(&api_sock)
+                    .arg("--config-file")
+                    .arg(&config_path);
+                c
+            }
+        }
+    };
     let fc_proc = if std::env::var("PI_SANDBOX_FC_DEBUG").as_deref() == Ok("1") {
         let dbg_dir = std::path::PathBuf::from("/tmp/pi-sandbox-fc-debug").join(&vm_id);
         std::fs::create_dir_all(&dbg_dir)?;
@@ -754,28 +912,41 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
         let fc_stdout = std::fs::File::create(dbg_dir.join("fc.stdout"))?;
         let fc_stderr = std::fs::File::create(dbg_dir.join("fc.stderr"))?;
         eprintln!("PI_SANDBOX_FC_DEBUG: logs at {}", dbg_dir.display());
-        tokio::process::Command::new(&fc_bin)
-            .arg("--api-sock")
-            .arg(&api_sock)
-            .arg("--config-file")
-            .arg(&config_path)
-            .stdin(Stdio::null())
+        let mut cmd = make_fc_command();
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::from(fc_stdout))
             .stderr(Stdio::from(fc_stderr))
             .kill_on_drop(true)
             .spawn()?
     } else {
-        tokio::process::Command::new(&fc_bin)
-            .arg("--api-sock")
-            .arg(&api_sock)
-            .arg("--config-file")
-            .arg(&config_path)
-            .stdin(Stdio::null())
+        let mut cmd = make_fc_command();
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()?
     };
+
+    // Bind the per-VM `web_search` proxy listener at
+    // `<vsock_sock>_5003` only when the operator's policy actually
+    // allows network. Vsock is a parallel channel to eth0/TAP/nft,
+    // so without this gate `web_search` would silently bypass
+    // `NetworkPolicy::Deny`. Tying the listener to `Allow` makes
+    // the operator's policy authoritative across both channels:
+    //
+    //   Deny  → listener never binds → guest's web_search proxy
+    //           gets "vsock io: Connection refused" → clean
+    //           ToolResponse with is_error=true
+    //   Allow → listener binds → web_search round-trips through
+    //           the host's WebSearchTool with host AuthStorage
+    //
+    // Per-tool finer-grained gates (e.g. "Allow eth0 but disable
+    // web_search proxy") are an additive v1.1 refinement.
+    if matches!(spec.network_policy, NetworkPolicy::Allow { .. }) {
+        if let Err(e) = crate::microvm::search_proxy::spawn_search_proxy_listener(&vsock_sock) {
+            warn!(err = %e, "failed to bind web_search proxy listener; web_search calls from this VM will fail");
+        }
+    }
 
     // Wait for the guest vsock worker to be reachable.
     wait_for_vsock_ready(&vsock_sock, cid).await?;
@@ -890,16 +1061,37 @@ fn build_fc_config(
     virtiofs_sock: &std::path::Path,
     spec: &VmSpec,
 ) -> serde_json::Value {
-    let config = serde_json::json!({
+    // Build kernel cmdline. Append pi.net.* knobs when a network policy
+    // requests Allow so the guest's init script can configure eth0
+    // without further out-of-band signals.
+    let mut boot_args = format!(
+        "console=ttyS0 reboot=k panic=1 pci=off \
+         i8042.nokbd i8042.noaux \
+         root=/dev/vda rw init=/init \
+         pi.proto_version={} \
+         pi.overlay.size_mib={}",
+        CURRENT_PROTOCOL_VERSION,
+        spec.vm_ceiling.disk_mib,
+    );
+    if let NetworkPolicy::Allow {
+        guest_ip_cidr,
+        guest_gateway,
+        guest_dns,
+        ..
+    } = &spec.network_policy
+    {
+        // Replace any whitespace in DNS list (cmdline can't have spaces in a value).
+        let dns_csv = guest_dns.join(",");
+        boot_args.push_str(&format!(
+            " pi.net.ip={} pi.net.gw={} pi.net.dns={}",
+            guest_ip_cidr, guest_gateway, dns_csv
+        ));
+    }
+
+    let mut config = serde_json::json!({
         "boot-source": {
             "kernel_image_path": kernel_path.display().to_string(),
-            "boot_args": format!(
-                "console=ttyS0 reboot=k panic=1 pci=off \
-                 i8042.nokbd i8042.noaux \
-                 root=/dev/vda rw init=/init \
-                 pi.proto_version={}",
-                CURRENT_PROTOCOL_VERSION
-            )
+            "boot_args": boot_args,
         },
         "drives": [
             {
@@ -929,9 +1121,228 @@ fn build_fc_config(
         ]
     });
 
-    let _ = spec; // spec used for vm_ceiling above; other fields may be used in future
+    // network_interfaces: only present when policy is Allow. Caller must
+    // have created the TAP and (typically) wrapped it with pasta+nftables.
+    if let NetworkPolicy::Allow {
+        tap_name,
+        guest_mac,
+        ..
+    } = &spec.network_policy
+    {
+        let mac = guest_mac
+            .clone()
+            .unwrap_or_else(|| derive_guest_mac_from_cid(cid));
+        config["network-interfaces"] = serde_json::json!([
+            {
+                "iface_id": "eth0",
+                "host_dev_name": tap_name,
+                "guest_mac": mac,
+            }
+        ]);
+    }
 
     config
+}
+
+/// Derive a stable, locally-administered MAC from the per-VM CID so
+/// nftables rules can pin per-VM filters by source MAC if desired.
+/// Format: `02:00:<cid_be>` — the locally-administered bit is set in
+/// the OUI so it doesn't collide with vendor MACs.
+fn derive_guest_mac_from_cid(cid: u32) -> String {
+    let bytes = cid.to_be_bytes();
+    format!(
+        "02:00:{:02x}:{:02x}:{:02x}:{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3]
+    )
+}
+
+/// Build the bash setup script that runs *inside* the pasta-managed
+/// child user+net namespace before `exec firecracker …`. Returns
+/// `Ok(None)` for `NetworkPolicy::Deny` (the launcher then spawns
+/// firecracker directly, no wrapper).
+///
+/// The script:
+///   1. creates the named TAP and assigns the host-side `/30` address,
+///   2. brings up the TAP,
+///   3. opens a `pi-fw` filter chain (forward, policy accept for
+///      v1.1 — selective allowlist deferred),
+///   4. opens a `pi-nat` postrouting chain that masquerades the
+///      guest subnet out the netns's pasta-provided default-route
+///      interface,
+///   5. enables IPv4 forwarding inside the netns.
+///
+/// Failure modes are surfaced as `SandboxError::Provider`.
+///
+/// This function is the runtime counterpart to the auto-install
+/// ladder documented in `crates/pi-sandbox/docs/NETWORKING.md`.
+/// When prerequisites (pasta, nft, kernel-allowed unpriv userns)
+/// are missing, `acquire()` returns the doctor-pointing error
+/// described there.
+fn build_netns_setup_script(spec: &VmSpec) -> Result<Option<String>, SandboxError> {
+    let (tap_name, guest_ip_cidr, guest_gateway, guest_dns, egress_allowlist) =
+        match &spec.network_policy {
+            NetworkPolicy::Deny => return Ok(None),
+            NetworkPolicy::Allow {
+                tap_name,
+                guest_ip_cidr,
+                guest_gateway,
+                guest_dns,
+                egress_allowlist,
+                ..
+            } => (
+                tap_name,
+                guest_ip_cidr,
+                guest_gateway,
+                guest_dns,
+                egress_allowlist,
+            ),
+        };
+    if which::which("pasta").is_err() {
+        return Err(SandboxError::Provider(
+            "NetworkPolicy::Allow requires `pasta` (passt package). \
+             Install it (Debian/Ubuntu: `sudo apt install passt`; \
+             Arch/Manjaro: `sudo pacman -S passt`; Fedora/RHEL: \
+             `sudo dnf install passt`) and run `pi sandbox doctor`."
+                .into(),
+        ));
+    }
+    if which::which("nft").is_err() {
+        return Err(SandboxError::Provider(
+            "NetworkPolicy::Allow requires `nft` (nftables package). \
+             Install it via your distro's package manager and run \
+             `pi sandbox doctor`."
+                .into(),
+        ));
+    }
+    // Validate every allowlist entry on the way in. Sh-quoting any
+    // entry that survives is unsafe regardless of validation, so we
+    // also reject entries that contain shell metacharacters even if
+    // they superficially look like a hostname.
+    for entry in egress_allowlist {
+        if entry.is_empty()
+            || entry
+                .chars()
+                .any(|c| c.is_ascii_whitespace() || matches!(c, '\'' | '"' | '`' | '$' | ';' | '|' | '&' | '\\'))
+        {
+            return Err(SandboxError::Provider(format!(
+                "NetworkPolicy::Allow.egress_allowlist rejects entry containing whitespace or shell metacharacters: {entry:?}"
+            )));
+        }
+    }
+    let prefix = guest_ip_cidr
+        .split_once('/')
+        .map(|(_, p)| p.to_string())
+        .ok_or_else(|| {
+            SandboxError::Provider(format!(
+                "NetworkPolicy::Allow.guest_ip_cidr lacks `/PREFIX`: {guest_ip_cidr}"
+            ))
+        })?;
+    let host_tap_cidr = format!("{guest_gateway}/{prefix}");
+    let masq_subnet = compute_subnet(guest_ip_cidr)?;
+
+    // DNS allow set: always permit UDP/53 (and TCP/53 for fallback)
+    // to the host-injected resolvers — without these the guest can't
+    // even resolve the allowlist hostnames it WAS authorised for.
+    let dns_set = if guest_dns.is_empty() {
+        // No DNS configured — allowlist is pure-IP, that's the
+        // operator's call. Don't add a DNS rule.
+        String::new()
+    } else {
+        format!(
+            "nft add rule ip pi-fw forward iifname {tap} ip daddr {{ {} }} udp dport 53 accept\n\
+             nft add rule ip pi-fw forward iifname {tap} ip daddr {{ {} }} tcp dport 53 accept\n",
+            guest_dns.join(", "),
+            guest_dns.join(", "),
+            tap = tap_name,
+        )
+    };
+
+    // Build the resolver block + accept rule. We resolve hostnames
+    // INSIDE the netns at setup time (so DNS goes through pasta's
+    // userspace forwarder), then translate the resolved IPs into
+    // a single nft accept rule. CIDRs and bare IPs pass through
+    // unchanged.
+    //
+    // The allowlist entries are space-separated literals already
+    // validated to contain no shell metacharacters; embedding them
+    // in the heredoc-free `for entry in <literals>` form is safe.
+    let allowlist_block = if egress_allowlist.is_empty() {
+        // Empty list + drop default = closed network. The guest can
+        // boot, /etc/resolv.conf is written, but no new flow leaves.
+        String::new()
+    } else {
+        let entries = egress_allowlist.join(" ");
+        format!(
+            r#"
+allow_set=""
+for entry in {entries}; do
+  case "$entry" in
+    *[!0-9./]*) ;;  # not a bare IP/CIDR — fall through to DNS
+    *)
+      allow_set="$allow_set, $entry"
+      continue ;;
+  esac
+  ips=$(getent ahostsv4 "$entry" 2>/dev/null | awk '{{print $1}}' | sort -u)
+  if [ -z "$ips" ]; then
+    echo "pi-sandbox: cannot resolve egress allowlist entry '$entry'" >&2
+    exit 1
+  fi
+  for ip in $ips; do allow_set="$allow_set, $ip"; done
+done
+allow_set=$(echo "$allow_set" | sed 's/^, //')
+[ -n "$allow_set" ] || {{ echo "pi-sandbox: egress allowlist resolved to empty set" >&2; exit 1; }}
+nft add rule ip pi-fw forward iifname {tap} ip daddr "{{ $allow_set }}" accept
+"#,
+            entries = entries,
+            tap = tap_name,
+        )
+    };
+
+    Ok(Some(format!(
+        r#"set -e
+ip tuntap add {tap} mode tap
+ip addr add {host_cidr} dev {tap}
+ip link set {tap} up
+nft add table ip pi-fw
+nft add chain ip pi-fw forward '{{ type filter hook forward priority 0 ; policy drop ; }}'
+# Return path: any flow we permitted outbound gets its replies back.
+nft add rule ip pi-fw forward ct state established,related accept
+{dns_set}{allowlist_block}
+nft add table ip pi-nat
+nft add chain ip pi-nat post '{{ type nat hook postrouting priority 100 ; }}'
+out_iface=$(ip route get 1.1.1.1 2>/dev/null | awk '{{for(i=1;i<=NF;i++) if($i=="dev") {{print $(i+1); exit}}}}')
+[ -n "$out_iface" ] || {{ echo "pi-sandbox: no default route inside netns" >&2; exit 1; }}
+nft add rule ip pi-nat post oifname "$out_iface" ip saddr {masq_subnet} masquerade
+echo 1 > /proc/sys/net/ipv4/ip_forward
+"#,
+        tap = tap_name,
+        host_cidr = host_tap_cidr,
+        masq_subnet = masq_subnet,
+        dns_set = dns_set,
+        allowlist_block = allowlist_block,
+    )))
+}
+
+/// Compute the network address for an IPv4 CIDR (`addr/PREFIX`).
+/// E.g. `compute_subnet("172.16.0.2/30") == "172.16.0.0/30"`.
+fn compute_subnet(cidr: &str) -> Result<String, SandboxError> {
+    let (addr_s, prefix_s) = cidr.split_once('/').ok_or_else(|| {
+        SandboxError::Provider(format!("invalid CIDR (no `/`): {cidr}"))
+    })?;
+    let prefix: u8 = prefix_s.parse().map_err(|_| {
+        SandboxError::Provider(format!("invalid CIDR prefix `{prefix_s}` in `{cidr}`"))
+    })?;
+    if prefix > 32 {
+        return Err(SandboxError::Provider(format!(
+            "CIDR prefix /{prefix} > 32 in `{cidr}`"
+        )));
+    }
+    let ip: std::net::Ipv4Addr = addr_s.parse().map_err(|_| {
+        SandboxError::Provider(format!("invalid CIDR address `{addr_s}` in `{cidr}`"))
+    })?;
+    let mask: u32 = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+    let network = u32::from(ip) & mask;
+    Ok(format!("{}/{prefix}", std::net::Ipv4Addr::from(network)))
 }
 
 /// Wait until the guest vsock worker is reachable on `VSOCK_DEFAULT_PORT`.
@@ -1027,6 +1438,53 @@ mod tests {
     fn config_default_pool_size_is_two() {
         let cfg = FirecrackerConfig::default();
         assert_eq!(cfg.pool_size, DEFAULT_POOL_SIZE);
+    }
+
+    #[test]
+    fn compute_subnet_basic_cases() {
+        assert_eq!(
+            compute_subnet("172.16.0.2/30").unwrap(),
+            "172.16.0.0/30"
+        );
+        assert_eq!(
+            compute_subnet("10.0.0.5/24").unwrap(),
+            "10.0.0.0/24"
+        );
+        assert_eq!(
+            compute_subnet("192.168.1.130/26").unwrap(),
+            "192.168.1.128/26"
+        );
+        // /32: a single host — network == host.
+        assert_eq!(
+            compute_subnet("8.8.8.8/32").unwrap(),
+            "8.8.8.8/32"
+        );
+        // /0: full mask off — everything maps to 0.0.0.0/0.
+        assert_eq!(
+            compute_subnet("1.2.3.4/0").unwrap(),
+            "0.0.0.0/0"
+        );
+    }
+
+    #[test]
+    fn compute_subnet_rejects_garbage() {
+        assert!(compute_subnet("not-a-cidr").is_err());
+        assert!(compute_subnet("172.16.0.2").is_err()); // missing /
+        assert!(compute_subnet("172.16.0.2/33").is_err()); // /33 out of range
+        assert!(compute_subnet("999.999.999.999/24").is_err()); // bad addr
+    }
+
+    #[test]
+    fn build_netns_setup_script_returns_none_for_deny() {
+        let spec = VmSpec {
+            host_cwd: PathBuf::from("/tmp"),
+            host_cwd_writable: true,
+            env: Default::default(),
+            network_policy: NetworkPolicy::Deny,
+            vm_ceiling: VmCeiling::default(),
+            rootfs_version: crate::microvm::RootfsVersion::current(),
+        };
+        assert!(build_netns_setup_script(&spec).unwrap().is_none());
     }
 
     #[test]

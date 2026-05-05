@@ -17,6 +17,7 @@ chrono.workspace = true
 tracing.workspace = true
 pi-tools.workspace = true
 pi-tool-types.workspace = true
+pi-search-proto.workspace = true
 # pi-sandbox-rootfs is a workspace-internal `publish = false` crate
 # (build-recipe scaffolding only). Pre-pass-6 finding #1: depending
 # on it would have made pi-sandbox unpublishable to crates.io.

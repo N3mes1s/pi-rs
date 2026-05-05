@@ -61,7 +61,7 @@ impl MicroVmProvider {
             host_cwd: ctx.cwd.clone(),
             host_cwd_writable: true,
             env: Default::default(),
-            network_policy: self.default_network_policy,
+            network_policy: self.default_network_policy.clone(),
             vm_ceiling: self.default_vm_ceiling,
             rootfs_version: self.rootfs_version.clone(),
         }
