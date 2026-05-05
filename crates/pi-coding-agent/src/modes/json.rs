@@ -53,12 +53,21 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
         current_agent: None,
     };
     let _ = crate::native::task::tool::with_runtime(handle, session.prompt(prompt)).await;
+
+    // Trajectory needs the session id; capture it before dropping.
+    let session_id = session.id().to_string();
+    // Drop the session so the only retained EventSender (held by
+    // AgentSessionInner) is released and the printer's `rx.recv()`
+    // returns None even on terminal-Err paths that — for whatever
+    // reason — haven't emitted TurnComplete/Aborted. Defense in
+    // depth against future runtime regressions.
+    drop(session);
     printer.await.ok();
 
     let _ = crate::native::trajectory::finalize_for_runtime(
         &startup.runtime_config,
         &startup.settings,
-        session.id(),
+        &session_id,
     )
     .await;
 

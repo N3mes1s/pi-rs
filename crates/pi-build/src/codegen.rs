@@ -221,6 +221,16 @@ async fn main() -> std::process::ExitCode {{
         Ok(_) => 0,
         Err(e) => map_runtime_error_to_exit(e),
     }};
+    // Drop the session before awaiting the pump so the only retained
+    // EventSender (held by AgentSessionInner) is released and the
+    // pump's `event_rx.recv().await` returns None. The runtime
+    // already emits `TurnComplete` on every terminal-Err path
+    // (regression-tested), but this guards the pump against a future
+    // runtime regression that adds an Err return without the
+    // accompanying terminal event — the pump would otherwise hang
+    // forever waiting on a sender that this function still owns.
+    drop(session);
+    drop(_runtime);
     let _ = pump.await;
     std::process::ExitCode::from(exit)
 }}
