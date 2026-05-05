@@ -1,6 +1,6 @@
 # RFD 0023 — Local MicroVM Sandbox (Linux/macOS/Windows)
 
-- **Status:** Discussion (v0.38 — telemetry on error paths + Linux=operator-managed framing)
+- **Status:** Discussion (v0.39 — rfd-critic READY, polish landing)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
 - **Implemented:** (pending)
@@ -983,7 +983,7 @@ impl SandboxProvider for MicroVmProvider {
         // dispatcher checks `tool.dispatch_class()` first and never
         // calls SandboxProvider::execute_tool for `RuntimeNative`
         // tools (task/subagent/etc.). The provider is constructed
-        // with a `dispatch_class_registry: Arc<dyn DispatchClassRegistry>`
+        // with a `dispatch_class_registry: DispatchClassRegistry`
         // that maps tool name → ToolDispatchClass; the assert below
         // is defense-in-depth only. Reaching this branch is a
         // runtime bug, not a sandbox concern. The registry is the
@@ -1277,7 +1277,7 @@ The new fields are added as an **amendment to RFD 0022** (which is currently mar
 
 **Public API impact.** Two surfaces, two audiences:
 
-- **`SandboxProvider` implementers** (downstream embedders, alt-providers): source-breaking changes are `execute_tool(ctx, tool_use_id, tool_name, tool_input) -> Result<SandboxOutcome, SandboxError>` — the `tool_use_id: &str` parameter is new — and `SandboxOutcome` itself replaces RFD 0022's bare `ToolResult` return. Every `impl SandboxProvider for X` must adapt.
+- **`SandboxProvider` implementers** (downstream embedders, alt-providers): source-breaking changes are `execute_tool(ctx, tool_use_id, tool_name, tool_input) -> Result<SandboxOutcome, SandboxFailure>` — the `tool_use_id: &str` parameter is new, and the error arm now carries telemetry instead of a bare `SandboxError` — and `SandboxOutcome` replaces RFD 0022's execution-only return (the previous `SandboxExecution` raw `stdout`/`stderr`/`exit_status` shape). Every `impl SandboxProvider for X` must adapt.
 - **`MicroVmLauncher` implementers** (anyone shipping a new launcher backend): source-breaking change is `VmHandle::release(self, hint) -> ReleaseOutcome` (was `-> ()`). `SandboxProvider` implementers do NOT see this — `release()` is a launcher-internal trait.
 
 `SandboxAction` / `SandboxTelemetry` field additions are backward-compatible serde/schema expansion (new optional fields with `#[serde(default)]`). Pre-amendment JSONL/SQLite rows deserialize cleanly; new rows populate the new fields.
@@ -2318,6 +2318,23 @@ The `Phase 3` commits ship integration tests gated on env vars; CI invokes the a
 
 ## Revision history
 
+- **v0.39 (2026-05-05):** rfd-critic v0.38 returned **READY**
+  ("Critical issues: None. The document is now implementable as
+  written.") — second clean READY in the iteration history,
+  after the v0.33 architectural pivot to vsock-proxied
+  web_search forced a redesign that took 6 more iterations
+  (v0.33 → v0.38). Polish landing the suggested non-blocking
+  text deltas: (1) Public API impact paragraph signature
+  updated `Result<SandboxOutcome, SandboxError>` →
+  `Result<SandboxOutcome, SandboxFailure>` and clarified that
+  `SandboxOutcome` replaces 0022's *execution-only* return
+  (raw stdout/stderr/exit_status), not its bare `ToolResult`.
+  (2) `MicroVmProvider::execute_tool` commentary now references
+  `dispatch_class_registry: DispatchClassRegistry` (not
+  `Arc<dyn>` — the trait was simplified to a frozen map in
+  v0.37). External-citation tightening (Firecracker #1180,
+  vfkit host-listen quirk, aegis line refs) deferred to a
+  publish-readiness pass.
 - **v0.38 (2026-05-05):** rfd-critic v0.37 pass: 2 critical
   (telemetry-on-error + Linux v1 framing) + small. Both real,
   both closed.
