@@ -61,8 +61,15 @@ const VSOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub struct FirecrackerConfig {
     /// Path to the `firecracker` binary. If `None`, resolved via PATH.
     pub firecracker_bin: Option<PathBuf>,
-    /// Path to `virtiofsd` binary. If `None`, resolved via PATH.
-    pub virtiofsd_bin: Option<PathBuf>,
+    // Note: `virtiofsd_bin` was removed in Commit G2-cleanup. The
+    // released Firecracker binary (≤ v1.15.0 at time of writing)
+    // silently drops the `fs` device config block (upstream issue
+    // #1180), so spawning a virtiofsd helper accomplished nothing.
+    // Per RFD 0023 §"Filesystem semantics" the v1 Linux/Firecracker
+    // file-sharing path is operator-managed contextfs, deferred to
+    // Commit G3. Until then `host_cwd` in `VmSpec` is informational
+    // (used as a warm-pool partition key); the guest does not see
+    // it under `/work`.
     /// Directory under which per-VM runtime sockets are placed.
     /// Defaults to `$XDG_RUNTIME_DIR/pi-sandbox` (typically
     /// `/run/user/$UID/pi-sandbox`), falling back to
@@ -85,7 +92,6 @@ impl Default for FirecrackerConfig {
     fn default() -> Self {
         Self {
             firecracker_bin: None,
-            virtiofsd_bin: None,
             run_dir: default_run_dir(),
             kernel_path: None,
             rootfs_path: None,
@@ -152,38 +158,6 @@ impl FirecrackerConfig {
         which::which("firecracker").ok()
     }
 
-    /// Resolve the `virtiofsd` binary path.
-    ///
-    /// Resolution order:
-    ///   1. `PI_SANDBOX_VIRTIOFSD` env var override.
-    ///   2. Explicit `virtiofsd_bin` field in config.
-    ///   3. `which virtiofsd` (PATH lookup).
-    ///   4. Hard-coded well-known path `/usr/lib/virtiofsd` (Debian/Ubuntu package).
-    ///
-    /// Returns `None` only when all four options fail.
-    fn resolved_virtiofsd(&self) -> Option<PathBuf> {
-        // 1. Env override (mirrors PI_SANDBOX_KERNEL pattern).
-        if let Ok(p) = std::env::var("PI_SANDBOX_VIRTIOFSD") {
-            let path = PathBuf::from(p);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-        // 2. Explicit config field.
-        if let Some(p) = &self.virtiofsd_bin {
-            return Some(p.clone());
-        }
-        // 3. PATH lookup.
-        if let Some(p) = which::which("virtiofsd").ok() {
-            return Some(p);
-        }
-        // 4. Well-known fallback: Debian/Ubuntu virtiofsd package location.
-        let fallback = PathBuf::from("/usr/lib/virtiofsd");
-        if fallback.exists() {
-            return Some(fallback);
-        }
-        None
-    }
 }
 
 // ── Warm pool entry ─────────────────────────────────────────────────────────
@@ -195,15 +169,17 @@ struct WarmVm {
     /// The firecracker process. Kept alive by holding this handle;
     /// `kill_on_drop(true)` ensures it dies if we drop it.
     _fc_proc: Child,
-    /// virtiofsd process (one per VM). Also `kill_on_drop(true)`.
-    _vfs_proc: Option<Child>,
     /// When this VM was booted.
     born_at: Instant,
     /// Number of tool calls executed through this VM.
     call_count: u32,
     /// The VmCeiling this VM was booted with (for pool keying).
     ceiling: VmCeiling,
-    /// The host cwd virtio-fs path this VM is sharing.
+    /// `host_cwd` from the VmSpec at boot. Pool-key partition only;
+    /// the guest does NOT see this path under `/work` in v1
+    /// (Firecracker silently drops the virtio-fs `fs` device — see
+    /// the FirecrackerConfig comment). The host_cwd→/work
+    /// integration is deferred to Commit G3 via contextfs.
     host_cwd: PathBuf,
     /// The rootfs version this VM was booted with (for pool keying).
     /// Required to enforce RootfsMismatch: a pool hit with a different
@@ -222,7 +198,7 @@ impl WarmVm {
 /// Firecracker-based `MicroVmLauncher` for Linux.
 ///
 /// Maintains a warm pool of pre-booted Firecracker VMs; each pool entry
-/// owns its Firecracker + virtiofsd child processes. VMs are retired
+/// owns its Firecracker child process. VMs are retired
 /// after `MAX_CALLS` tool calls or `MAX_AGE` seconds.
 pub struct FirecrackerLauncher {
     config: Arc<FirecrackerConfig>,
@@ -265,8 +241,10 @@ impl MicroVmLauncher for FirecrackerLauncher {
         "firecracker"
     }
 
-    /// Probe: checks firecracker binary, /dev/kvm access, vsock module,
-    /// virtiofsd binary. Fast (≤ 200 ms even when binaries are missing).
+    /// Probe: checks firecracker binary, /dev/kvm access, vsock
+    /// module, plus advisory NetworkPolicy::Allow preconditions
+    /// (pasta, nft, unprivileged userns). Fast (≤ 200 ms even when
+    /// binaries are missing).
     async fn probe(&self) -> Result<ProbeReport, SandboxError> {
         let start = Instant::now();
         let mut checks: Vec<ProbeCheck> = Vec::new();
@@ -344,23 +322,7 @@ impl MicroVmLauncher for FirecrackerLauncher {
             },
         });
 
-        // 4. virtiofsd binary (PATH, PI_SANDBOX_VIRTIOFSD, or /usr/lib/virtiofsd)
-        let vfs_path = self.config.resolved_virtiofsd();
-        let vfs_ok = vfs_path.is_some();
-        if !vfs_ok {
-            blockers.push(
-                "virtiofsd binary not found (tried $PI_SANDBOX_VIRTIOFSD, $PATH, /usr/lib/virtiofsd)".into(),
-            );
-            remediation
-                .push("Install virtiofsd: https://gitlab.com/virtio-fs/virtiofsd  or  apt install virtiofsd".into());
-        }
-        checks.push(ProbeCheck {
-            name: "virtiofsd_binary",
-            passed: vfs_ok,
-            detail: vfs_path.map(|p| p.display().to_string()),
-        });
-
-        // 5-8. NetworkPolicy::Allow preconditions. These are NOT
+        // 4-7. NetworkPolicy::Allow preconditions. These are NOT
         // promoted to blockers — `Deny` mode (the default) doesn't
         // need any of them. They're surfaced as advisory checks so
         // the operator can preflight before flipping their config to
@@ -553,7 +515,6 @@ impl MicroVmLauncher for FirecrackerLauncher {
             id: vm.id,
             vsock_path: vm.vsock_path,
             _fc_proc: tokio::sync::Mutex::new(vm._fc_proc),
-            _vfs_proc: tokio::sync::Mutex::new(vm._vfs_proc),
             born_at: vm.born_at,
             call_count: std::sync::atomic::AtomicU32::new(vm.call_count),
             ceiling: vm.ceiling,
@@ -574,7 +535,6 @@ pub struct FirecrackerVmHandle {
     id: String,
     vsock_path: PathBuf,
     _fc_proc: tokio::sync::Mutex<Child>,
-    _vfs_proc: tokio::sync::Mutex<Option<Child>>,
     born_at: Instant,
     call_count: std::sync::atomic::AtomicU32,
     ceiling: VmCeiling,
@@ -705,13 +665,11 @@ impl VmHandle for FirecrackerVmHandle {
         // VM was leased; pushing unconditionally would let the pool grow
         // beyond `pool_size`.
         let fc_proc = self._fc_proc.into_inner();
-        let vfs_proc = self._vfs_proc.into_inner();
         let vm_id = self.id.clone();
         let warm = WarmVm {
             id: self.id,
             vsock_path: self.vsock_path,
             _fc_proc: fc_proc,
-            _vfs_proc: vfs_proc,
             born_at: self.born_at,
             call_count: self.call_count.load(std::sync::atomic::Ordering::Relaxed),
             ceiling: self.ceiling,
@@ -752,7 +710,6 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
     let api_sock = run_dir.join("api.sock");
     let vsock_sock = run_dir.join("vsock.sock");
     let config_path = run_dir.join("fc-config.json");
-    let virtiofs_sock = run_dir.join("virtiofs.sock");
 
     let kernel_path = config.resolved_kernel_path();
 
@@ -796,53 +753,21 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
     let fc_bin = config
         .resolved_firecracker()
         .ok_or_else(|| SandboxError::Unavailable("firecracker binary not found".into()))?;
-    // virtiofsd is REQUIRED: the /work virtio-fs share is load-bearing for
-    // every tool call. Without it the guest cannot access the host cwd and
-    // write/edit/bash calls are silently broken. Error early rather than
-    // boot a VM that will fail all path-sensitive tool calls.
-    let vfs_bin = config.resolved_virtiofsd().ok_or_else(|| {
-        SandboxError::Unavailable(
-            "virtiofsd binary not found (tried $PI_SANDBOX_VIRTIOFSD, $PATH, /usr/lib/virtiofsd); \
-             cannot mount /work share in guest".into(),
-        )
-    })?;
 
     // CID must be unique per-VM. Use a hash of the vm_id UUID for uniqueness
     // in range [3, 2^32-1] (0=hypervisor, 1=reserved, 2=host).
     let cid = vm_id_to_cid(&vm_id);
 
-    // Spawn virtiofsd first (it must be ready before Firecracker boots).
-    // --shared-dir  : the host directory to expose as /work in the guest.
-    // --socket-path : the UDS path Firecracker references in its "fs" config.
-    let vfs_socket_path = virtiofs_sock.display().to_string();
-    let shared_dir = spec.host_cwd.display().to_string();
-    let vfs_proc = tokio::process::Command::new(&vfs_bin)
-        .args([
-            "--socket-path",
-            &vfs_socket_path,
-            "--shared-dir",
-            &shared_dir,
-            "--sandbox",
-            "none",
-            "--seccomp",
-            "none",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()?;
-    // Give virtiofsd a moment to create its socket before Firecracker tries
-    // to connect to it.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Write Firecracker config JSON.
+    // Write Firecracker config JSON. The legacy virtio-fs `fs` block
+    // is no longer included — Firecracker silently dropped it
+    // anyway (upstream issue #1180), and the guest now uses an
+    // overlay-on-tmpfs root instead of mounting /work over virtio-fs.
+    // host_cwd integration returns in Commit G3 via contextfs.
     let fc_config = build_fc_config(
         &kernel_path,
         &rootfs_path,
         &vsock_sock,
         cid,
-        &virtiofs_sock,
         spec,
     );
     let config_json = serde_json::to_string_pretty(&fc_config)
@@ -970,7 +895,6 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
         id: vm_id,
         vsock_path: vsock_sock,
         _fc_proc: fc_proc,
-        _vfs_proc: Some(vfs_proc),
         born_at: Instant::now(),
         call_count: 0,
         ceiling: spec.vm_ceiling,
@@ -1059,21 +983,16 @@ fn vm_id_to_cid(vm_id: &str) -> u32 {
 
 /// Build the Firecracker config JSON value.
 ///
-/// The `virtiofs_sock` is the **virtiofsd daemon socket path** that
-/// Firecracker connects to for the virtio-fs device — NOT the shared
-/// directory. virtiofsd itself is told the shared directory via
-/// `--shared-dir`; Firecracker only needs the socket.
-///
-/// Firecracker's `fs` device schema (as of v1.x):
-/// ```json
-/// { "fs_id": "work", "socket": "/path/to/virtiofs.sock", "tag": "work" }
-/// ```
+/// No virtio-fs `fs` block: Firecracker (≤ v1.15.0) silently ignores
+/// it (upstream issue #1180). The guest's `/work` mount is therefore
+/// not provided in v1; the file-sharing path returns under contextfs
+/// in Commit G3. `host_cwd` is still in `spec` for warm-pool keying
+/// but is NOT visible to the guest.
 fn build_fc_config(
     kernel_path: &std::path::Path,
     rootfs_path: &std::path::Path,
     vsock_sock: &std::path::Path,
     cid: u32,
-    virtiofs_sock: &std::path::Path,
     spec: &VmSpec,
 ) -> serde_json::Value {
     // Build kernel cmdline. Append pi.net.* knobs when a network policy
@@ -1123,17 +1042,7 @@ fn build_fc_config(
         "vsock": {
             "guest_cid": cid,
             "uds_path": vsock_sock.display().to_string()
-        },
-        // virtio-fs share: point Firecracker at the virtiofsd socket.
-        // The guest kernel mounts tag "work" at /work via the init script.
-        // The `socket` field is the virtiofsd UDS, not the shared directory.
-        "fs": [
-            {
-                "fs_id": "work",
-                "socket": virtiofs_sock.display().to_string(),
-                "tag": "work"
-            }
-        ]
+        }
     });
 
     // network_interfaces: only present when policy is Allow. Caller must
@@ -1564,7 +1473,6 @@ mod tests {
                 id: "already-in-pool".to_string(),
                 vsock_path: PathBuf::from("/dev/null"),
                 _fc_proc: dummy_child(),
-                _vfs_proc: None,
                 born_at: Instant::now(),
                 call_count: 0,
                 ceiling: VmCeiling::default(),
@@ -1579,7 +1487,6 @@ mod tests {
             id: "leased-vm".to_string(),
             vsock_path: PathBuf::from("/dev/null"),
             _fc_proc: tokio::sync::Mutex::new(dummy_child()),
-            _vfs_proc: tokio::sync::Mutex::new(None),
             born_at: Instant::now(),
             call_count: std::sync::atomic::AtomicU32::new(0),
             ceiling: VmCeiling::default(),
@@ -1627,7 +1534,6 @@ mod tests {
                 id: "expired-in-pool".to_string(),
                 vsock_path: PathBuf::from("/dev/null"),
                 _fc_proc: dummy_child(),
-                _vfs_proc: None,
                 born_at: Instant::now(),
                 call_count: MAX_CALLS, // already at rotation cap
                 ceiling: VmCeiling::default(),
@@ -1642,7 +1548,6 @@ mod tests {
             id: "live-vm".to_string(),
             vsock_path: PathBuf::from("/dev/null"),
             _fc_proc: tokio::sync::Mutex::new(dummy_child()),
-            _vfs_proc: tokio::sync::Mutex::new(None),
             born_at: Instant::now(),
             call_count: std::sync::atomic::AtomicU32::new(0),
             ceiling: VmCeiling::default(),
@@ -1722,7 +1627,6 @@ mod tests {
                     .kill_on_drop(true)
                     .spawn()
                     .expect("spawn sleep"),
-                _vfs_proc: None,
                 born_at: Instant::now(),
                 call_count: 0,
                 ceiling: VmCeiling::default(),
@@ -1741,7 +1645,6 @@ mod tests {
                 .kill_on_drop(true)
                 .spawn()
                 .expect("spawn sleep"),
-            _vfs_proc: None,
             born_at: Instant::now(),
             call_count: 0,
             ceiling: VmCeiling::default(),

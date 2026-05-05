@@ -8,8 +8,6 @@
 //! export PI_SANDBOX_FC_TEST=1           # gates the test
 //! export PI_SANDBOX_KERNEL=/path/to/vmlinux  # Firecracker-compatible vmlinux
 //! export PI_SANDBOX_ROOTFS=/path/to/rootfs.img  # built by crates/pi-sandbox-rootfs/build.sh
-//! # firecracker must be on $PATH (virtiofsd optional — used only if the
-//! # Firecracker binary supports the fs device; silently skipped otherwise)
 //! ```
 //!
 //! When any prerequisite is absent the test prints a skip message and exits 0.
@@ -22,17 +20,15 @@
 //! 3. `execute()` of the "bash" tool runs `cat /etc/pi-sandbox-version`
 //!    inside the guest and returns the rootfs version string.
 //!    This validates the full end-to-end path (boot → vsock → worker →
-//!    tool execution → response) without requiring virtio-fs.
+//!    tool execution → response).
 //! 4. `release()` returns the VM to the pool.
 //!
-//! # Note on virtio-fs
+//! # No virtio-fs in v1
 //!
-//! The virtio-fs device (`"fs"` section in Firecracker config) is silently
-//! absent in some Firecracker builds (e.g. when compiled without the
-//! feature). The init script attempts the mount but does NOT abort on
-//! failure, so the worker still starts and vsock-based tool calls work.
-//! A future smoke-test variant can verify virtiofs separately once a
-//! virtiofs-capable Firecracker binary is available.
+//! Firecracker (≤ v1.15.0) silently drops the `fs` device config block
+//! (upstream issue #1180). The smoke test does NOT exercise `/work`
+//! sharing — `host_cwd` from the VmSpec is informational only in v1.
+//! Cross-namespace file sharing returns under contextfs (Commit G3).
 
 #![cfg(target_os = "linux")]
 
@@ -70,19 +66,6 @@ async fn firecracker_smoke_boot_read_release() {
     if which::which("firecracker").is_err() {
         skip("firecracker binary not on $PATH");
         return;
-    }
-
-    // virtiofsd: check PI_SANDBOX_VIRTIOFSD env, then PATH, then /usr/lib/virtiofsd.
-    // virtiofsd is optional — if not found the smoke test still runs but
-    // /work won't be mounted in the guest (vsock tool calls still work).
-    let virtiofsd_found = std::env::var("PI_SANDBOX_VIRTIOFSD")
-        .ok()
-        .map(|p| std::path::Path::new(&p).exists())
-        .unwrap_or(false)
-        || which::which("virtiofsd").is_ok()
-        || std::path::Path::new("/usr/lib/virtiofsd").exists();
-    if !virtiofsd_found {
-        eprintln!("NOTE: virtiofsd not found — /work will not be mounted in guest (vsock still tested)");
     }
 
     let kernel_path = match std::env::var("PI_SANDBOX_KERNEL") {
@@ -150,18 +133,11 @@ async fn firecracker_smoke_boot_read_release() {
     );
     eprintln!("probe OK: {:?}", report.version);
 
-    // Spec: use a temp dir as the shared cwd.
-    // Note: with the installed Firecracker binary (compiled without virtiofs
-    // support) the /work mount will be skipped; the smoke test verifies the
-    // vsock path by running a bash command that reads a rootfs-embedded file.
+    // host_cwd is informational in v1 (Firecracker silently drops
+    // the virtio-fs `fs` device — see RFD 0023 §"Filesystem
+    // semantics"). The smoke test reads a rootfs-embedded file
+    // (`/etc/pi-sandbox-version`) instead of anything host-shared.
     let work_dir = tempfile::tempdir().expect("work_dir tempdir");
-    let sentinel_content = "sandbox-smoke-ok-0.1.0";
-    // Write a sentinel file to host work_dir. When virtiofs IS available this
-    // file will be visible at /work/smoke-sentinel.txt in the guest. When
-    // virtiofs is absent, the file is only on the host side (for future use).
-    std::fs::write(work_dir.path().join("smoke-sentinel.txt"), sentinel_content)
-        .expect("write sentinel file");
-
     let spec = VmSpec {
         host_cwd: work_dir.path().to_path_buf(),
         host_cwd_writable: true,

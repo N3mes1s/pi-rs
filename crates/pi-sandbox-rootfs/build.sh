@@ -17,11 +17,11 @@
 # Optional env vars:
 #   PI_SANDBOX_KERNEL_MODULES_DIR - path to /lib/modules/<kver> directory
 #     containing host kernel modules. If set and the directory exists, the
-#     virtiofs + vsock modules are decompressed and bundled into the rootfs
-#     at /lib/modules/<kver>/ so init can insmod them at boot.
-#     Required when using a generic kernel (e.g. Ubuntu 6.8.x) where
-#     virtiofs and vsock are .ko modules rather than built-in.
-#     Firecracker-optimised kernels have them built-in; no bundling needed.
+#     vsock + overlayfs modules are decompressed and bundled into the rootfs
+#     at /lib/modules/<kver>/ so init can insmod them at boot. Required
+#     when using a generic kernel (e.g. Ubuntu 6.8.x) where these are .ko
+#     modules rather than built-in. Firecracker-optimised kernels have them
+#     built-in; no bundling needed.
 
 set -euo pipefail
 
@@ -63,11 +63,12 @@ tar -xzf "${OUT_DIR}/cache/${ALPINE_MINI}" -C "${ROOT}"
 # 4. Drop the worker in /usr/local/bin.
 install -m 0755 "${WORKER_BIN}" "${ROOT}/usr/local/bin/pi-sandbox-worker"
 
-# 5. Write the init script. Mounts /proc, /sys, /work; checks
-#    /proc/cmdline for the proto_version pin; execs the worker.
-#    virtiofs is attempted but NOT fatal if unavailable (e.g. when
-#    the Firecracker build was compiled without virtiofs support).
-#    The worker always starts; tools needing /work will fail gracefully.
+# 5. Write the init script. Mounts /proc, /sys; checks
+#    /proc/cmdline for the proto_version pin; sets up overlay-on-tmpfs
+#    root + (optional) network from cmdline pi.net.* knobs; execs the
+#    worker. NOTE: /work is NOT mounted in v1 — Firecracker silently
+#    drops its `fs` device config block (upstream issue #1180), so
+#    the host_cwd→/work share is deferred to Commit G3 via contextfs.
 mkdir -p "${ROOT}/sbin"
 
 # Determine kernel version for modules (if PI_SANDBOX_KERNEL_MODULES_DIR is set).
@@ -75,11 +76,13 @@ BUNDLED_KVER=""
 BUNDLE_MODULES=0
 if [[ -n "${PI_SANDBOX_KERNEL_MODULES_DIR:-}" ]] && [[ -d "${PI_SANDBOX_KERNEL_MODULES_DIR}" ]]; then
   BUNDLED_KVER="$(basename "${PI_SANDBOX_KERNEL_MODULES_DIR}")"
+  # virtiofs.ko intentionally NOT bundled — Firecracker drops the
+  # `fs` device anyway (issue #1180). Re-add when contextfs lands
+  # in Commit G3 if its in-guest client needs it.
   MODULES_TO_BUNDLE=(
     "kernel/net/vmw_vsock/vsock.ko.zst"
     "kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko.zst"
     "kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko.zst"
-    "kernel/fs/fuse/virtiofs.ko.zst"
     "kernel/fs/overlayfs/overlay.ko.zst"
   )
   DEST_MODS="${ROOT}/lib/modules/${BUNDLED_KVER}"
@@ -105,12 +108,12 @@ cat > "${ROOT}/init" << INIT_EOF
 #!/bin/sh
 mount -t proc none /proc 2>/dev/null
 mount -t sysfs none /sys 2>/dev/null
-# Load vsock + virtiofs kernel modules if bundled (needed when they are
+# Load vsock + overlayfs kernel modules if bundled (needed when they are
 # not built-in to the kernel, e.g. Ubuntu 6.8.x generic kernels). We do
 # this BEFORE pivot_root because /lib/modules lives on the rootfs lower.
 MODS_DIR="/lib/modules/${BUNDLED_KVER}"
 if [ -d "\$MODS_DIR" ]; then
-  for m in vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport virtiofs overlay; do
+  for m in vsock vmw_vsock_virtio_transport_common vmw_vsock_virtio_transport overlay; do
     ko=\$(find "\$MODS_DIR" -name "\${m}.ko" 2>/dev/null | head -1)
     [ -n "\$ko" ] && insmod "\$ko" 2>/dev/null || true
   done
@@ -148,8 +151,6 @@ mount -t tmpfs -o size=64m,mode=1777   tmpfs /tmp  2>/dev/null
 mount -t tmpfs -o size=16m,mode=0700   tmpfs /root 2>/dev/null
 mount -t tmpfs -o size=8m,mode=0755    tmpfs /run  2>/dev/null
 mount -t tmpfs -o size=16m,mode=0755   tmpfs /var  2>/dev/null
-mkdir -p /work 2>/dev/null || true
-mount -t virtiofs work /work 2>/dev/null || echo "WARN: virtiofs mount skipped (not available)"
 expected_proto=1
 cmdline_proto=\$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.proto_version=//p')
 if [ -n "\$cmdline_proto" ] && [ "\$cmdline_proto" != "\$expected_proto" ]; then
@@ -157,7 +158,7 @@ if [ -n "\$cmdline_proto" ] && [ "\$cmdline_proto" != "\$expected_proto" ]; then
   echo b > /proc/sysrq-trigger
   exit 1
 fi
-exec /usr/local/bin/pi-sandbox-worker --vsock-port=5001 --work-dir=/work
+exec /usr/local/bin/pi-sandbox-worker --vsock-port=5001 --work-dir=/tmp
 INIT_EOF
 else
 cat > "${ROOT}/init" <<'INIT_EOF'
@@ -183,10 +184,6 @@ mount -t tmpfs -o size=64m,mode=1777   tmpfs /tmp  2>/dev/null
 mount -t tmpfs -o size=16m,mode=0700   tmpfs /root 2>/dev/null
 mount -t tmpfs -o size=8m,mode=0755    tmpfs /run  2>/dev/null
 mount -t tmpfs -o size=16m,mode=0755   tmpfs /var  2>/dev/null
-# /work is the virtio-fs mount point. Attempt mount but do not abort if it
-# fails: the worker starts either way and reports an error per failing call.
-mkdir -p /work 2>/dev/null || true
-mount -t virtiofs work /work 2>/dev/null || echo "WARN: virtiofs mount skipped (not available)"
 expected_proto=1
 cmdline_proto=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.proto_version=//p')
 if [ -n "$cmdline_proto" ] && [ "$cmdline_proto" != "$expected_proto" ]; then
@@ -194,7 +191,7 @@ if [ -n "$cmdline_proto" ] && [ "$cmdline_proto" != "$expected_proto" ]; then
   echo b > /proc/sysrq-trigger
   exit 1
 fi
-exec /usr/local/bin/pi-sandbox-worker --vsock-port=5001 --work-dir=/work
+exec /usr/local/bin/pi-sandbox-worker --vsock-port=5001 --work-dir=/tmp
 INIT_EOF
 fi
 chmod 0755 "${ROOT}/init"
@@ -206,8 +203,9 @@ cat > "${ROOT}/sbin/init-overlayed" << 'POST_EOF'
 # Lazy-umount the old root so its tmpfs upper releases when references drop.
 umount -l /old_root 2>/dev/null
 rmdir /old_root 2>/dev/null
-mkdir -p /work 2>/dev/null
-mount -t virtiofs work /work 2>/dev/null || echo "WARN: virtiofs mount skipped (not available)"
+# /work is intentionally not mounted in v1 — Firecracker silently
+# drops the virtio-fs `fs` device (upstream issue #1180). The
+# host_cwd→/work share returns under contextfs in Commit G3.
 
 # Optional eth0 setup. The host injects `pi.net.ip=<cidr>`,
 # `pi.net.gw=<gw>`, `pi.net.dns=<csv>` on the kernel cmdline when the
