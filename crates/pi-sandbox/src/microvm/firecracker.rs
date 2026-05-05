@@ -64,7 +64,12 @@ pub struct FirecrackerConfig {
     /// Path to `virtiofsd` binary. If `None`, resolved via PATH.
     pub virtiofsd_bin: Option<PathBuf>,
     /// Directory under which per-VM runtime sockets are placed.
-    /// Defaults to `/run/pi-sandbox`.
+    /// Defaults to `$XDG_RUNTIME_DIR/pi-sandbox` (typically
+    /// `/run/user/$UID/pi-sandbox`), falling back to
+    /// `/tmp/pi-sandbox-$UID` when `XDG_RUNTIME_DIR` is unset.
+    /// `/run/pi-sandbox` was the prior default but it's root-only
+    /// on every distro the maintainer has tested, so unprivileged
+    /// runs (which is the main use case) hit `EACCES`.
     pub run_dir: PathBuf,
     /// Kernel image path. Defaults to `$PI_SANDBOX_KERNEL` or
     /// `~/.cache/pi/sandbox/kernel/vmlinux`.
@@ -81,12 +86,22 @@ impl Default for FirecrackerConfig {
         Self {
             firecracker_bin: None,
             virtiofsd_bin: None,
-            run_dir: PathBuf::from("/run/pi-sandbox"),
+            run_dir: default_run_dir(),
             kernel_path: None,
             rootfs_path: None,
             pool_size: DEFAULT_POOL_SIZE,
         }
     }
+}
+
+fn default_run_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("XDG_RUNTIME_DIR") {
+        if !p.is_empty() {
+            return PathBuf::from(p).join("pi-sandbox");
+        }
+    }
+    let user = std::env::var("USER").unwrap_or_else(|_| "default".into());
+    PathBuf::from(format!("/tmp/pi-sandbox-{user}"))
 }
 
 impl FirecrackerConfig {

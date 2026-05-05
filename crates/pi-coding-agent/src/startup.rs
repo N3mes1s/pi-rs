@@ -577,6 +577,7 @@ pub fn install_sandbox_from_flag(
         #[cfg(target_os = "linux")]
         "microvm:firecracker" => {
             use pi_sandbox::microvm::firecracker::{FirecrackerConfig, FirecrackerLauncher};
+            use pi_sandbox::microvm::NetworkPolicy;
             // FirecrackerConfig defaults: pool_size=2, run_dir under /tmp.
             // Kernel + rootfs paths come from env vars; absent ones surface
             // as `acquire()` failures at first tool call rather than a
@@ -590,7 +591,16 @@ pub fn install_sandbox_from_flag(
                 fc_cfg.rootfs_path = Some(p.into());
             }
             let launcher = Arc::new(FirecrackerLauncher::new(fc_cfg));
-            let provider = pi_sandbox::MicroVmProvider::new(launcher);
+            // Default NetworkPolicy is `Deny` (safe). Operators opt in
+            // to host-proxied `web_search` + selective eth0 egress via
+            // `PI_SANDBOX_NETWORK=allow` (or `=allow:host1,host2,...`
+            // to add specific hostnames/IPs to the egress allowlist).
+            // The bare `=allow` form leaves the eth0 egress allowlist
+            // empty (vsock-proxied tools work, eth0 has nothing it
+            // can reach).
+            let network_policy = parse_network_policy_env();
+            let provider =
+                pi_sandbox::MicroVmProvider::with_network_policy(launcher, network_policy);
             cfg.sandbox_provider =
                 Some(Arc::new(provider) as Arc<dyn pi_sandbox::SandboxProvider>);
             Ok(())
@@ -604,6 +614,56 @@ pub fn install_sandbox_from_flag(
              local-process, microvm:firecracker",
             other
         ),
+    }
+}
+
+/// Parse `PI_SANDBOX_NETWORK` into a [`pi_sandbox::microvm::NetworkPolicy`].
+///
+/// Accepted shapes:
+/// - unset / empty / "deny" → `Deny`
+/// - "allow"                → `Allow` with empty `egress_allowlist`
+///   (vsock-proxied tools work, eth0 reaches nothing)
+/// - "allow:host1,host2,…"  → `Allow` with the comma-separated list
+///   added to `egress_allowlist`. Entries may be hostnames, literal
+///   IPv4 addresses, or IPv4 CIDRs. The list is also extended via
+///   `PI_SANDBOX_EGRESS_EXTRA` (semicolon-separated) for callers who
+///   prefer to keep one list short and the other long.
+///
+/// Defaults for the rest of `Allow`'s fields are wired to match the
+/// integration tests:
+///   tap_name="tap-pi0", guest_ip_cidr="172.16.0.2/30",
+///   guest_gateway="172.16.0.1", guest_dns=["1.1.1.1","8.8.8.8"].
+#[cfg(target_os = "linux")]
+fn parse_network_policy_env() -> pi_sandbox::microvm::NetworkPolicy {
+    use pi_sandbox::microvm::NetworkPolicy;
+    let raw = std::env::var("PI_SANDBOX_NETWORK").unwrap_or_default();
+    let raw = raw.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("deny") {
+        return NetworkPolicy::Deny;
+    }
+    let mut allowlist: Vec<String> = Vec::new();
+    if let Some(rest) = raw.strip_prefix("allow:") {
+        for entry in rest.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            allowlist.push(entry.to_string());
+        }
+    } else if !raw.eq_ignore_ascii_case("allow") {
+        eprintln!(
+            "PI_SANDBOX_NETWORK={raw:?} unrecognised; expected `deny`, `allow`, or `allow:<csv>`. Falling back to `deny`."
+        );
+        return NetworkPolicy::Deny;
+    }
+    if let Ok(extra) = std::env::var("PI_SANDBOX_EGRESS_EXTRA") {
+        for entry in extra.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            allowlist.push(entry.to_string());
+        }
+    }
+    NetworkPolicy::Allow {
+        tap_name: "tap-pi0".into(),
+        guest_ip_cidr: "172.16.0.2/30".into(),
+        guest_gateway: "172.16.0.1".into(),
+        guest_dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
+        guest_mac: None,
+        egress_allowlist: allowlist,
     }
 }
 

@@ -47,11 +47,25 @@ pub struct MicroVmProvider {
 
 impl MicroVmProvider {
     pub fn new(launcher: Arc<dyn MicroVmLauncher>) -> Self {
+        Self::with_network_policy(launcher, NetworkPolicy::Deny)
+    }
+
+    /// Construct a `MicroVmProvider` with an explicit network policy.
+    /// `NetworkPolicy::Deny` is safe-default (`new`); callers that
+    /// want host-proxied tools (`web_search`) or selective egress
+    /// pass `NetworkPolicy::Allow { ... }` here. Per
+    /// `crates/pi-sandbox/docs/NETWORKING.md` §"Vsock-proxied tools
+    /// and `NetworkPolicy`", the listener-bind for `web_search` is
+    /// gated on this exact value.
+    pub fn with_network_policy(
+        launcher: Arc<dyn MicroVmLauncher>,
+        network_policy: NetworkPolicy,
+    ) -> Self {
         Self {
             launcher,
             default_call_limits: CallLimits::default(),
             default_vm_ceiling: VmCeiling::default(),
-            default_network_policy: NetworkPolicy::Deny,
+            default_network_policy: network_policy,
             rootfs_version: RootfsVersion::current(),
         }
     }
