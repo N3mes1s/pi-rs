@@ -1,6 +1,15 @@
 [build]
 target = "x86_64-unknown-linux-musl"
 
+# Use the system `git` CLI to fetch crates instead of cargo's
+# bundled libgit2. Required for git-pinned deps (contextfsd is
+# fetched from a private/auth'd GitHub repo); libgit2 doesn't
+# pick up the user's credential helper so the fetch fails with
+# "could not read from remote repository". The CLI inherits
+# whatever auth method the user already has configured.
+[net]
+git-fetch-with-cli = true
+
 # Static relocation model + post-link `.eh_frame` strip.
 #
 # Because the binary is statically linked against musl AND we use

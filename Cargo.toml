@@ -102,6 +102,22 @@ pi-sdk = { path = "crates/pi-sdk", version = "0.1.0" }
 pi-sdk-canary = { path = "crates/pi-sdk-canary", version = "0.1.0" }
 pi-build = { path = "crates/pi-build", version = "0.1.0" }
 
+# Contextfs integration (RFD 0023 §3.5 / Commit G3 prep).
+#
+# **Pinned to commit `6c15a0ae784e72660e2536efc604f0db8ddba0c4`** of
+# https://github.com/N3mes1s/contextfs.git. We use a path dep here
+# while that commit isn't on the public remote yet; switch to
+# `{ git = ..., rev = "d4cdab5..." }` once contextfs pushes.
+#
+# The `pi-sandbox::contextfs::PINNED_REV` constant carries the
+# expected rev; the smoke test asserts the local checkout matches
+# (so a `git pull` in contextfs that moves HEAD to a different
+# commit fails the build, not silently drifts the API).
+#
+# Bump the rev (and re-run `contextfs_smoke.rs`) when picking up
+# a new contextfs feature; do NOT relax to "branch = main".
+contextfsd = { path = "../contextfs/crates/contextfsd", default-features = false, features = ["local"] }
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

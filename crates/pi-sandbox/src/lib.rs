@@ -7,6 +7,8 @@
 //! converts back into a standard `ToolResult`.
 
 pub mod cache;
+#[cfg(target_os = "linux")]
+pub mod contextfs;
 pub mod local;
 pub mod microvm;
 pub mod provider;

@@ -37,7 +37,15 @@ zstd = "0.13"
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = "0.7"
 
+# Contextfs daemon library — embedded in-process for the
+# Linux/Firecracker file-sharing path (RFD 0023 §3.5 / Commit G3
+# prep). Pinned to a specific git commit at the workspace root;
+# see Cargo.toml's `contextfsd = { git = …, rev = … }` entry.
+# Linux-only because the daemon binds FUSE mounts.
+contextfsd = { workspace = true }
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio-test.workspace = true
 wiremock.workspace = true
+toml = "0.8"
