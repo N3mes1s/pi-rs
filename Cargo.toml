@@ -116,7 +116,7 @@ pi-build = { path = "crates/pi-build", version = "0.1.0" }
 #
 # Bump the rev (and re-run `contextfs_smoke.rs`) when picking up
 # a new contextfs feature; do NOT relax to "branch = main".
-contextfsd = { path = "../contextfs/crates/contextfsd", default-features = false, features = ["local"] }
+contextfsd = { path = "../contextfs/crates/contextfsd", default-features = false, features = ["local", "remote-fs"] }
 
 [profile.release]
 lto = "fat"

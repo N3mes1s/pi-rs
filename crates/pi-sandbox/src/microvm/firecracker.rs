@@ -183,6 +183,11 @@ struct WarmVm {
     /// The firecracker process. Kept alive by holding this handle;
     /// `kill_on_drop(true)` ensures it dies if we drop it.
     _fc_proc: Child,
+    /// Per-VM `cfs-fs-server` child (RFD 0023 §3.5 / Commit G3).
+    /// `None` when contextfs isn't wired (binary missing, bind
+    /// failed, or future Deny-mount mode). `kill_on_drop(true)`
+    /// so the file server dies with the VM.
+    _cfs_fs_proc: Option<Child>,
     /// When this VM was booted.
     born_at: Instant,
     /// Number of tool calls executed through this VM.
@@ -540,6 +545,7 @@ impl MicroVmLauncher for FirecrackerLauncher {
             id: vm.id,
             vsock_path: vm.vsock_path,
             _fc_proc: tokio::sync::Mutex::new(vm._fc_proc),
+            _cfs_fs_proc: tokio::sync::Mutex::new(vm._cfs_fs_proc),
             born_at: vm.born_at,
             call_count: std::sync::atomic::AtomicU32::new(vm.call_count),
             ceiling: vm.ceiling,
@@ -561,6 +567,10 @@ pub struct FirecrackerVmHandle {
     id: String,
     vsock_path: PathBuf,
     _fc_proc: tokio::sync::Mutex<Child>,
+    /// See `WarmVm._cfs_fs_proc`. Mirrored on the leased handle so
+    /// release() can hand it back to the warm pool with the rest
+    /// of the VM's process tree.
+    _cfs_fs_proc: tokio::sync::Mutex<Option<Child>>,
     born_at: Instant,
     call_count: std::sync::atomic::AtomicU32,
     ceiling: VmCeiling,
@@ -697,11 +707,13 @@ impl VmHandle for FirecrackerVmHandle {
         // VM was leased; pushing unconditionally would let the pool grow
         // beyond `pool_size`.
         let fc_proc = self._fc_proc.into_inner();
+        let cfs_fs_proc = self._cfs_fs_proc.into_inner();
         let vm_id = self.id.clone();
         let warm = WarmVm {
             id: self.id,
             vsock_path: self.vsock_path,
             _fc_proc: fc_proc,
+            _cfs_fs_proc: cfs_fs_proc,
             born_at: self.born_at,
             call_count: self.call_count.load(std::sync::atomic::Ordering::Relaxed),
             ceiling: self.ceiling,
@@ -921,6 +933,36 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
         }
     }
 
+    // Contextfs `/work` mount (RFD 0023 §3.5 / Commit G3).
+    // Spawn cfs-fs-server + bridge vsock(2,5005) → its UDS so the
+    // guest's contextfsd remote-fs backend can mount host_cwd at
+    // /work. Best-effort: if the binary is missing or the bind
+    // fails, /work simply isn't available in the guest and bash
+    // calls that reference /work see ENOENT.
+    let cfs_fs_sock = run_dir.join("cfs-fs.sock");
+    let _cfs_fs_proc = match crate::microvm::contextfs_proxy::spawn_cfs_fs_server(
+        &spec.host_cwd,
+        &cfs_fs_sock,
+    )
+    .await
+    {
+        Ok(child) => Some(child),
+        Err(e) => {
+            warn!(err = %e, "failed to spawn cfs-fs-server; /work in guest will be unavailable");
+            None
+        }
+    };
+    if _cfs_fs_proc.is_some() {
+        // Give cfs-fs-server a moment to create its UDS before the
+        // bridge tries to dial it on first guest connect.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Err(e) =
+            crate::microvm::contextfs_proxy::spawn_cfs_vsock_bridge(&vsock_sock, &cfs_fs_sock)
+        {
+            warn!(err = %e, "failed to bind contextfs vsock bridge; /work in guest will be unavailable");
+        }
+    }
+
     // Wait for the guest vsock worker to be reachable.
     wait_for_vsock_ready(&vsock_sock, cid).await?;
 
@@ -928,6 +970,7 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
         id: vm_id,
         vsock_path: vsock_sock,
         _fc_proc: fc_proc,
+        _cfs_fs_proc,
         born_at: Instant::now(),
         call_count: 0,
         ceiling: spec.vm_ceiling,
@@ -1507,6 +1550,7 @@ mod tests {
                 id: "already-in-pool".to_string(),
                 vsock_path: PathBuf::from("/dev/null"),
                 _fc_proc: dummy_child(),
+                _cfs_fs_proc: None,
                 born_at: Instant::now(),
                 call_count: 0,
                 ceiling: VmCeiling::default(),
@@ -1522,6 +1566,7 @@ mod tests {
             id: "leased-vm".to_string(),
             vsock_path: PathBuf::from("/dev/null"),
             _fc_proc: tokio::sync::Mutex::new(dummy_child()),
+            _cfs_fs_proc: tokio::sync::Mutex::new(None),
             born_at: Instant::now(),
             call_count: std::sync::atomic::AtomicU32::new(0),
             ceiling: VmCeiling::default(),
@@ -1570,6 +1615,7 @@ mod tests {
                 id: "expired-in-pool".to_string(),
                 vsock_path: PathBuf::from("/dev/null"),
                 _fc_proc: dummy_child(),
+                _cfs_fs_proc: None,
                 born_at: Instant::now(),
                 call_count: DEFAULT_MAX_CALLS, // already at rotation cap
                 ceiling: VmCeiling::default(),
@@ -1585,6 +1631,7 @@ mod tests {
             id: "live-vm".to_string(),
             vsock_path: PathBuf::from("/dev/null"),
             _fc_proc: tokio::sync::Mutex::new(dummy_child()),
+            _cfs_fs_proc: tokio::sync::Mutex::new(None),
             born_at: Instant::now(),
             call_count: std::sync::atomic::AtomicU32::new(0),
             ceiling: VmCeiling::default(),
@@ -1671,6 +1718,7 @@ mod tests {
                 host_cwd: PathBuf::from("/tmp"),
                 rootfs_version: "0.1.0".to_string(),
                 network_policy: NetworkPolicy::Deny,
+                _cfs_fs_proc: None,
             });
             d
         }));
@@ -1684,12 +1732,13 @@ mod tests {
                 .kill_on_drop(true)
                 .spawn()
                 .expect("spawn sleep"),
+            _cfs_fs_proc: None,
             born_at: Instant::now(),
             call_count: 0,
             ceiling: VmCeiling::default(),
             host_cwd: PathBuf::from("/tmp"),
             rootfs_version: "0.1.0".to_string(),
-                network_policy: NetworkPolicy::Deny,
+            network_policy: NetworkPolicy::Deny,
         };
 
         let pool_size: usize = 1;

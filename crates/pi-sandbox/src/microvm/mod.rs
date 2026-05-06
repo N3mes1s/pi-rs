@@ -18,6 +18,9 @@ pub use firecracker::FirecrackerLauncher;
 #[cfg(target_os = "linux")]
 mod search_proxy;
 
+#[cfg(target_os = "linux")]
+pub(crate) mod contextfs_proxy;
+
 pub use launcher::{MicroVmLauncher, VmHandle};
 pub use provider::MicroVmProvider;
 pub use types::{
