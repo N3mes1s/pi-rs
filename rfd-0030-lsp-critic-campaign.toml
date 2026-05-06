@@ -1,0 +1,120 @@
+# RFD 0030 — `lsp` under microvm: rfd-critic iteration loop campaign.
+#
+# Drives the iteration pattern that landed RFD 0023 (35+ revisions
+# to READY): write draft → rfd-critic reviews → opus revises →
+# rfd-critic reviews v0.2 → … → READY verdict → polish pass.
+#
+# Reviewer: rfd-critic agent (gpt-5.4 thinking xhigh, definition
+# at .pi/agents/rfd-critic.md). Implementer: opus-4.7 1M-context.
+#
+# The loop terminates when the reviewer's last verdict line says
+# `Verdict: READY`. fix_loop_max sets the upper bound; if we
+# blow it without a READY, the campaign fails loudly so we don't
+# burn budget silently.
+#
+# Run:
+#   pi --orchestrate rfd-0030-lsp-critic-campaign.toml \
+#      --auto-approve auto-judge --route auto
+
+name = "rfd-0030-lsp-critic-loop"
+description = """
+Iterate RFD 0030 (`lsp` under microvm/remote sandbox providers)
+to a READY verdict from rfd-critic. The RFD picks Option B
+(vsock-proxy + path translation + workspace-pinned warm pool);
+the critic stress-tests that against pi-rs's existing primitives
+(LspEngine, warm-pool partitioning, per-VM seccomp, host_cwd
+canonicalisation) and against the RFD 0023 / 0026 / 0001 deps.
+
+Acceptance: rfd-critic emits `Verdict: READY` with no critical
+issues. Underspec / overengineered / missing notes are
+fold-in-able by the polish pass.
+"""
+
+target_branch = "rfd-0030-lsp-critic"
+
+[defaults]
+fix_loop_max = 30
+push_retry_max = 0
+reviewer = "rfd-critic"
+
+# ─────────────────────────────────────────────────────────────────
+# M1 — Iterate RFD 0030 to READY
+# ─────────────────────────────────────────────────────────────────
+[[milestones]]
+id = "iterate-to-ready"
+branch = "rfd-0030-lsp-iter"
+implementer = "halo-implementer"   # opus-4.7 1M
+reviewer    = "rfd-critic"          # gpt-5.4 xhigh
+fix_loop_max = 30
+
+assignment = """
+You are revising RFD 0030 — `lsp` under sandboxed providers.
+Path: `rfd/0030-lsp-under-microvm.md`.
+
+## Loop shape
+
+Each turn:
+
+1. Read `rfd/0030-lsp-under-microvm.md` end-to-end.
+2. Read the most recent rfd-critic verdict (it's the previous
+   review's output appended to the conversation; on the FIRST
+   turn there is no prior verdict, so just read the RFD as-is
+   and address obvious own-goals).
+3. Apply concrete deltas to the RFD that close every issue the
+   critic flagged as **Critical** AND every **Underspecified**
+   item that has a clear fix. **Overengineered** items: cut
+   them. **Missing**: add them. Don't engage with style nits
+   at the cost of substance.
+4. Bump the version line in §"Revision history" with a
+   one-line summary of what changed in this turn.
+5. Commit on `rfd-0030-lsp-iter` with message
+   `rfd: 0030 v0.N — <delta summary>`.
+6. Hand off to rfd-critic.
+
+## Anchor primitives the critic will hammer
+
+The critic has seen RFD 0023 land with READY verdicts at v0.31,
+v0.38, v0.41 (final v0.42 in tree). Expect it to:
+
+- Cross-check every cited file:line against the live tree
+  (citation rot is the #1 critic pet peeve).
+- Probe whether existing primitives already do the job — RFD
+  0001 (LSP write hook), RFD 0023 §"Tool dispatch boundary"
+  (ToolDispatch), RFD 0017 (monitor's similar streaming-mismatch
+  story; we just added RFD 0031 covering it — link to it).
+- Stress-test the path-translator threat-model claims against a
+  concrete adversarial example (e.g. symlinked `/work/escape →
+  /etc`, what does the LS see?).
+- Question whether vsock proxy is actually composable with RFD
+  0026 remote backends, given the host's `LspEngine` is local.
+- Demand a wire-shape example for at least one non-trivial op
+  (rename / completion / workspace-symbols).
+
+## Hard constraints
+
+- **Don't reinvent.** If the critic flags reinvention of an
+  existing primitive, cite the primitive and either delete the
+  reinventing section or explicitly justify why the new one is
+  needed.
+- **Don't grow scope.** "Out of scope / deferred" exists for a
+  reason — push features there instead of inflating v1.
+- **Don't soften without reason.** "Possibly", "maybe",
+  "could in theory" are weasel words that the critic flags.
+  Either commit to the design or move it to "Open questions".
+- **Verify all citations.** Open every file:line referenced
+  before submitting the next revision.
+
+## Termination
+
+The reviewer is rfd-critic; its verdict line is the final line
+of its output, formatted exactly:
+`Verdict: READY` or `Verdict: NEEDS_REVISION`.
+
+When `Verdict: READY` appears, this milestone is DONE. Push the
+branch and emit `TURN_COMPLETE`. Do NOT keep iterating after
+READY.
+
+If `fix_loop_max` (30) is exhausted without READY, fail loudly
+with a summary of the last critic verdict and stop. Don't keep
+burning budget on a stuck design.
+"""
