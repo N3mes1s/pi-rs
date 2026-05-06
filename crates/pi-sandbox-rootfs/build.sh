@@ -41,14 +41,45 @@ trap 'rm -rf "${WORK}"' EXIT
 echo "==> Building pi-sandbox-rootfs v${VERSION} into ${OUT_ZSTD}"
 echo "==> Working dir: ${WORK}"
 
-# 1. Cross-compile pi-sandbox-worker + the vsock probe (used by the
-# seccomp regression test) for static-musl.
-echo "==> Cross-compiling pi-sandbox-worker (release, x86_64-unknown-linux-musl)"
-cargo build --release --target x86_64-unknown-linux-musl --bin pi-sandbox-worker --bin pi-vsock-probe
-WORKER_BIN="$(pwd)/target/x86_64-unknown-linux-musl/release/pi-sandbox-worker"
-PROBE_BIN="$(pwd)/target/x86_64-unknown-linux-musl/release/pi-vsock-probe"
+# 1. Cross-compile pi-sandbox-worker + the vsock probe (seccomp test)
+#    + the contextfs vsock bridge for static-musl.
+echo "==> Cross-compiling pi-sandbox-worker + probes + cfs-vsock-bridge (release, x86_64-unknown-linux-musl)"
+cargo build --release --target x86_64-unknown-linux-musl \
+  --bin pi-sandbox-worker --bin pi-vsock-probe --bin pi-cfs-vsock-bridge
+TARGET_REL="$(pwd)/target/x86_64-unknown-linux-musl/release"
+WORKER_BIN="${TARGET_REL}/pi-sandbox-worker"
+PROBE_BIN="${TARGET_REL}/pi-vsock-probe"
+CFS_BRIDGE_BIN="${TARGET_REL}/pi-cfs-vsock-bridge"
 [[ -x "${WORKER_BIN}" ]] || { echo "ERROR: worker not built at ${WORKER_BIN}"; exit 2; }
 [[ -x "${PROBE_BIN}" ]] || { echo "ERROR: probe not built at ${PROBE_BIN}"; exit 2; }
+[[ -x "${CFS_BRIDGE_BIN}" ]] || { echo "ERROR: cfs-vsock-bridge not built at ${CFS_BRIDGE_BIN}"; exit 2; }
+
+# 1b. Locate or build the contextfsd binary. RFD 0023 §3.5: the guest
+#     runs contextfs's own daemon to mount /work via FUSE, talking to
+#     the host-side cfs-fs-server over vsock(2,5005). We do NOT
+#     reimplement contextfs in pi-rs.
+#
+#     Resolution order:
+#       1. PI_SANDBOX_CONTEXTFSD_BIN env var (explicit override)
+#       2. ../contextfs/target/x86_64-unknown-linux-musl/release/contextfsd
+#          (built via `cargo build --release --target x86_64-unknown-linux-musl
+#           --bin contextfsd` inside that workspace)
+#     Fail-fast if neither resolves.
+CONTEXTFSD_BIN="${PI_SANDBOX_CONTEXTFSD_BIN:-}"
+if [[ -z "${CONTEXTFSD_BIN}" ]]; then
+  CANDIDATE="$(pwd)/../contextfs/target/x86_64-unknown-linux-musl/release/contextfsd"
+  if [[ -x "${CANDIDATE}" ]]; then
+    CONTEXTFSD_BIN="${CANDIDATE}"
+  fi
+fi
+if [[ -z "${CONTEXTFSD_BIN}" ]] || [[ ! -x "${CONTEXTFSD_BIN}" ]]; then
+  echo "ERROR: contextfsd binary not found."
+  echo "       Build it with:"
+  echo "         (cd ../contextfs && cargo build --release --target x86_64-unknown-linux-musl --bin contextfsd)"
+  echo "       or set PI_SANDBOX_CONTEXTFSD_BIN to an existing static-musl binary."
+  exit 2
+fi
+echo "==> Using contextfsd: ${CONTEXTFSD_BIN}"
 
 # 2. Fetch alpine miniroot if missing.
 mkdir -p "${OUT_DIR}/cache"
@@ -63,9 +94,12 @@ mkdir -p "${ROOT}"
 echo "==> Extracting alpine miniroot"
 tar -xzf "${OUT_DIR}/cache/${ALPINE_MINI}" -C "${ROOT}"
 
-# 4. Drop the worker (and the vsock probe used by tests) in /usr/local/bin.
-install -m 0755 "${WORKER_BIN}" "${ROOT}/usr/local/bin/pi-sandbox-worker"
-install -m 0755 "${PROBE_BIN}" "${ROOT}/usr/local/bin/pi-vsock-probe"
+# 4. Drop the worker, vsock probe (tests), cfs-vsock-bridge, and
+#    contextfsd in /usr/local/bin.
+install -m 0755 "${WORKER_BIN}"     "${ROOT}/usr/local/bin/pi-sandbox-worker"
+install -m 0755 "${PROBE_BIN}"      "${ROOT}/usr/local/bin/pi-vsock-probe"
+install -m 0755 "${CFS_BRIDGE_BIN}" "${ROOT}/usr/local/bin/pi-cfs-vsock-bridge"
+install -m 0755 "${CONTEXTFSD_BIN}" "${ROOT}/usr/local/bin/contextfsd"
 
 # 4b. UID separation (RFD 0023 §6 "Bash-can't-bypass" Layer 1).
 #     pi-worker (UID 1000) runs the worker process; pi-tool (UID 1001)
@@ -270,6 +304,113 @@ chmod 0775 /opt 2>/dev/null
 # /tmp + /var/tmp world-writable with sticky bit (Linux convention).
 chmod 1777 /tmp 2>/dev/null
 chmod 1777 /var/tmp 2>/dev/null
+
+# RFD 0023 §3.5 (G3): contextfs `/work` mount.
+#
+# Topology (guest side):
+#   contextfsd  --reads/writes-->  /run/cfs.sock
+#                                       |
+#                                pi-cfs-vsock-bridge
+#                                       |
+#                                vsock(2, 5005)  ---> host pi-rs
+#                                                       -> cfs-fs-server (UDS)
+#                                                       -> host_cwd
+#
+# Skipped entirely if the cmdline carries `pi.contextfs=off`. The
+# host launcher omits the binaries when contextfs isn't wired up,
+# so a bridge bind / contextfsd dial would silently fail and the
+# warn line below is the only artifact.
+contextfs_mode=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.contextfs=//p')
+if [ "$contextfs_mode" != "off" ] && \
+   [ -x /usr/local/bin/pi-cfs-vsock-bridge ] && \
+   [ -x /usr/local/bin/contextfsd ]; then
+  # Ensure /dev/fuse exists (devtmpfs creates it on most kernels;
+  # belt-and-braces for kernels missing CONFIG_FUSE_FS=y where the
+  # module is loadable but no node was created).
+  if [ ! -c /dev/fuse ]; then
+    mknod /dev/fuse c 10 229 2>/dev/null
+    chmod 0666 /dev/fuse 2>/dev/null
+  fi
+
+  # Bridge listens on /run/cfs.sock, forwards to vsock(2,5005).
+  # Start it FIRST so contextfsd's first dial of /run/cfs.sock
+  # finds an accept()ing peer.
+  mkdir -p /run /var/log /etc/contextfs /var/cache/contextfs /var/lib/contextfs
+  /usr/local/bin/pi-cfs-vsock-bridge >/var/log/cfs-vsock-bridge.log 2>&1 &
+
+  # Wait briefly for the bridge to bind /run/cfs.sock.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -S /run/cfs.sock ] && break
+    sleep 0.1
+  done
+
+  # Tenant secret: 32 bytes, mode 0600. Generated fresh per VM
+  # boot — overlay tmpfs is ephemeral so this never persists.
+  if [ ! -f /etc/contextfs/tenant-secret ]; then
+    if [ -c /dev/urandom ]; then
+      head -c 32 /dev/urandom > /etc/contextfs/tenant-secret 2>/dev/null
+    else
+      printf 'pi-sandbox-tenant-secret-vm-default-padded-32b' > /etc/contextfs/tenant-secret
+    fi
+    chmod 0600 /etc/contextfs/tenant-secret
+  fi
+
+  # Default-permit Cedar policy. Real policy enforcement comes
+  # from the host-side broker (RFD 0023 §3.5 future commit); the
+  # guest daemon is just the FUSE bridge.
+  if [ ! -f /etc/contextfs/policy.cedar ]; then
+    printf 'permit (principal, action, resource);\n' > /etc/contextfs/policy.cedar
+  fi
+
+  # contextfsd config. Single mount: /work backed by remote-fs
+  # over /run/cfs.sock (which the bridge forwards to host vsock).
+  if [ ! -f /etc/contextfs/contextfsd.toml ]; then
+    cat > /etc/contextfs/contextfsd.toml <<CFG_EOF
+tenant_secret_path = "/etc/contextfs/tenant-secret"
+audit_log_path = "/var/log/contextfsd-audit.ndjson"
+
+[pdp]
+policy_path = "/etc/contextfs/policy.cedar"
+default_principal = "Agent::\"pi-sandbox\""
+
+[[mount]]
+name = "work"
+mountpoint = "/work"
+backend = "remote-fs"
+cache_dir = "/var/cache/contextfs/work"
+read_only = true
+
+[mount.remote_fs]
+target_uds = "/run/cfs.sock"
+CFG_EOF
+  fi
+  mkdir -p /var/cache/contextfs/work
+
+  # Start contextfsd in background. It probes caps over the
+  # bridge once at boot, then FUSE-mounts /work. We poll
+  # /proc/mounts up to ~3 s; if /work doesn't appear, log a warn
+  # and proceed — the worker still boots without /work.
+  /usr/local/bin/contextfsd --config /etc/contextfs/contextfsd.toml \
+    >/var/log/contextfsd.log 2>&1 &
+  CFSD_PID=$!
+
+  mounted=0
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if grep -q ' /work fuse' /proc/mounts 2>/dev/null || \
+       grep -q ' /work .*fuse' /proc/mounts 2>/dev/null; then
+      mounted=1
+      break
+    fi
+    # Bail early if contextfsd died.
+    if ! kill -0 "$CFSD_PID" 2>/dev/null; then
+      break
+    fi
+    sleep 0.2
+  done
+  if [ "$mounted" -ne 1 ]; then
+    echo "WARN: contextfs /work mount not visible in /proc/mounts; see /var/log/contextfsd.log"
+  fi
+fi
 
 exec /usr/local/bin/pi-sandbox-worker --vsock-port=5001 --work-dir=/tmp
 POST_EOF

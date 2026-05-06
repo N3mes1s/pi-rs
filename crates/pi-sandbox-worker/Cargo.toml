@@ -20,6 +20,14 @@ path = "src/main.rs"
 name = "pi-vsock-probe"
 path = "src/bin/pi-vsock-probe.rs"
 
+# Guest-side UDS↔vsock bridge for contextfs /work mount.
+# Listens on /run/cfs.sock, forwards each connection to
+# vsock(2, 5005) where pi-sandbox's host-side bridge accepts +
+# proxies into cfs-fs-server. Started by the rootfs init.
+[[bin]]
+name = "pi-cfs-vsock-bridge"
+path = "src/bin/pi-cfs-vsock-bridge.rs"
+
 [lib]
 name = "pi_sandbox_worker"
 path = "src/lib.rs"
