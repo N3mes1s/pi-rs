@@ -35,8 +35,13 @@ pub struct Cli {
     #[arg(long, action = ArgAction::SetTrue)]
     pub no_tools: bool,
 
-    /// Enable the RFD 0022 sandbox boundary. Currently supports:
-    ///   `local-process` — invokes tools through pi_sandbox::LocalProcessProvider.
+    /// Enable the RFD 0022 sandbox boundary. Supports:
+    ///   `local-process` — wraps tools with pi_sandbox::LocalProcessProvider.
+    ///   `microvm:firecracker` (Linux) — boots each tool call inside a
+    ///     Firecracker microVM. Requires firecracker on PATH, /dev/kvm
+    ///     openable RW, and PI_SANDBOX_KERNEL/PI_SANDBOX_ROOTFS env. Run
+    ///     `pi --sandbox doctor` to verify the host setup + contextfs
+    ///     runtime deps (cfs-fs-server, contextfs-broker).
     #[arg(long = "sandbox-provider", value_name = "KIND")]
     pub sandbox_provider: Option<String>,
 
