@@ -65,6 +65,7 @@ pub(crate) fn resolved_cfs_fs_server() -> Option<PathBuf> {
 pub(crate) async fn spawn_cfs_fs_server(
     host_cwd: &Path,
     sock_path: &Path,
+    read_only: bool,
 ) -> Result<Child, SandboxError> {
     let bin = resolved_cfs_fs_server().ok_or_else(|| {
         SandboxError::Provider(
@@ -77,14 +78,19 @@ pub(crate) async fn spawn_cfs_fs_server(
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::remove_file(sock_path);
-    let child = Command::new(&bin)
-        .arg("--root")
-        .arg(host_cwd)
-        .arg("--socket")
-        .arg(sock_path)
-        // Read-only for the v1 demo. Write support arrives once we
-        // wire the host's policy plane (cedar PDP) end-to-end.
-        .arg("--read-only")
+    let mut cmd = Command::new(&bin);
+    cmd.arg("--root").arg(host_cwd).arg("--socket").arg(sock_path);
+    // RW mode (PI_SANDBOX_CONTEXTFS_RW=1) drops --read-only so
+    // cfs-fs-server accepts writes; the broker (Cedar PDP) becomes
+    // the sole policy gate. Stacking cfs-fs-server --read-only on
+    // top of an RW broker creates a confused failure mode where
+    // the broker permits the write but cfs-fs-server returns
+    // EROFS — the agent sees "broker said no" but it's actually
+    // the data layer (per contextfs embedder-broker quickstart).
+    if read_only {
+        cmd.arg("--read-only");
+    }
+    let child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

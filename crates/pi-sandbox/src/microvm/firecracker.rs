@@ -188,6 +188,12 @@ struct WarmVm {
     /// failed, or future Deny-mount mode). `kill_on_drop(true)`
     /// so the file server dies with the VM.
     _cfs_fs_proc: Option<Child>,
+    /// Per-VM `contextfs-broker` child (RFD 0023 §3.5 / Commit
+    /// G3 step 3 — Cedar/RW phase). `None` when RW path isn't
+    /// requested (PI_SANDBOX_CONTEXTFS_RW not set) or the
+    /// broker binary is missing. `kill_on_drop(true)` so the
+    /// broker dies with the VM.
+    _broker_proc: Option<Child>,
     /// When this VM was booted.
     born_at: Instant,
     /// Number of tool calls executed through this VM.
@@ -546,6 +552,7 @@ impl MicroVmLauncher for FirecrackerLauncher {
             vsock_path: vm.vsock_path,
             _fc_proc: tokio::sync::Mutex::new(vm._fc_proc),
             _cfs_fs_proc: tokio::sync::Mutex::new(vm._cfs_fs_proc),
+            _broker_proc: tokio::sync::Mutex::new(vm._broker_proc),
             born_at: vm.born_at,
             call_count: std::sync::atomic::AtomicU32::new(vm.call_count),
             ceiling: vm.ceiling,
@@ -571,6 +578,8 @@ pub struct FirecrackerVmHandle {
     /// release() can hand it back to the warm pool with the rest
     /// of the VM's process tree.
     _cfs_fs_proc: tokio::sync::Mutex<Option<Child>>,
+    /// See `WarmVm._broker_proc`.
+    _broker_proc: tokio::sync::Mutex<Option<Child>>,
     born_at: Instant,
     call_count: std::sync::atomic::AtomicU32,
     ceiling: VmCeiling,
@@ -708,12 +717,14 @@ impl VmHandle for FirecrackerVmHandle {
         // beyond `pool_size`.
         let fc_proc = self._fc_proc.into_inner();
         let cfs_fs_proc = self._cfs_fs_proc.into_inner();
+        let broker_proc = self._broker_proc.into_inner();
         let vm_id = self.id.clone();
         let warm = WarmVm {
             id: self.id,
             vsock_path: self.vsock_path,
             _fc_proc: fc_proc,
             _cfs_fs_proc: cfs_fs_proc,
+            _broker_proc: broker_proc,
             born_at: self.born_at,
             call_count: self.call_count.load(std::sync::atomic::Ordering::Relaxed),
             ceiling: self.ceiling,
@@ -803,6 +814,38 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
     // in range [3, 2^32-1] (0=hypervisor, 1=reserved, 2=host).
     let cid = vm_id_to_cid(&vm_id);
 
+    // RW mode (PI_SANDBOX_CONTEXTFS_RW=1): the same 32-byte
+    // tenant secret seeds both the host-side broker (read from a
+    // file passed via --tenant-secret-path) and the in-guest
+    // contextfsd (read from /etc/contextfs/tenant-secret, written
+    // by the rootfs init from the kernel-cmdline-supplied hex
+    // string). Per contextfs's embedder-broker quickstart, the
+    // SAME raw bytes are required on both sides — RFD-0024
+    // AuditResync at startup fails closed on mismatch. Per-VM
+    // derivation per RFD-0023 §5 (HMAC over vm_id+master_epoch)
+    // layers on top.
+    let contextfs_rw_mode = std::env::var("PI_SANDBOX_CONTEXTFS_RW")
+        .ok()
+        .as_deref()
+        == Some("1");
+    let tenant_secret_hex: String = if contextfs_rw_mode {
+        let mut bytes = [0u8; 32];
+        // Best-effort entropy: per-VM nonce mixed with vm_id +
+        // process-time. Production replaces with getrandom; this
+        // is the v1 demo path.
+        let seed = uuid::Uuid::new_v4();
+        let seed_bytes = seed.as_bytes();
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = seed_bytes[i % seed_bytes.len()] ^ ((i as u8).wrapping_mul(0x9b));
+        }
+        bytes
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
+    } else {
+        String::new()
+    };
+
     // Write Firecracker config JSON. The legacy virtio-fs `fs` block
     // is no longer included — Firecracker silently dropped it
     // anyway (upstream issue #1180), and the guest now uses an
@@ -814,6 +857,8 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
         &vsock_sock,
         cid,
         spec,
+        contextfs_rw_mode,
+        if contextfs_rw_mode { Some(&tenant_secret_hex) } else { None },
     );
     let config_json = serde_json::to_string_pretty(&fc_config)
         .map_err(|e| SandboxError::Provider(e.to_string()))?;
@@ -939,10 +984,19 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
     // /work. Best-effort: if the binary is missing or the bind
     // fails, /work simply isn't available in the guest and bash
     // calls that reference /work see ENOENT.
+    //
+    // RW mode (PI_SANDBOX_CONTEXTFS_RW=1) drops cfs-fs-server's
+    // `--read-only` flag so the broker (Cedar PDP) is the sole
+    // policy gate. Default is RO.
+    let contextfs_rw_mode = std::env::var("PI_SANDBOX_CONTEXTFS_RW")
+        .ok()
+        .as_deref()
+        == Some("1");
     let cfs_fs_sock = run_dir.join("cfs-fs.sock");
     let _cfs_fs_proc = match crate::microvm::contextfs_proxy::spawn_cfs_fs_server(
         &spec.host_cwd,
         &cfs_fs_sock,
+        !contextfs_rw_mode,
     )
     .await
     {
@@ -963,6 +1017,84 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
         }
     }
 
+    // Optional: contextfs broker (Cedar policy plane) for RW
+    // /work (RFD 0023 §3.5 / Commit G3 step 3). Spawned only when
+    // PI_SANDBOX_CONTEXTFS_RW=1 — keeps the default RO path
+    // unchanged. The broker validates every Request::VerifyWrite
+    // the in-guest contextfsd issues; without it, the daemon's
+    // remote-PDP fallback runs in-process and writes still go
+    // through but with a degraded trust boundary.
+    //
+    // The host writes the Cedar policy + tenant secret into the
+    // run_dir; both broker (host-side) and contextfsd
+    // (guest-side, via the rootfs init) read them. The init also
+    // flips read_only=false on the mount when the
+    // pi.contextfs.rw=1 cmdline knob is set (added by
+    // build_kernel_cmdline below).
+    let broker_uds = run_dir.join("broker.sock");
+    let cedar_path = run_dir.join("policy.cedar");
+    let tenant_secret_path = run_dir.join("tenant-secret");
+    let _broker_proc = if contextfs_rw_mode && _cfs_fs_proc.is_some() {
+        // Write Cedar policy.
+        let policy = crate::microvm::broker_proxy::resolved_cedar_policy_text();
+        if let Err(e) = std::fs::write(&cedar_path, policy.as_bytes()) {
+            warn!(err = %e, path = %cedar_path.display(), "write cedar policy failed");
+        }
+        // Decode the same hex we wrote into the kernel cmdline so
+        // host broker + guest daemon read identical bytes (per
+        // contextfs embedder-broker quickstart: SAME raw secret on
+        // both sides; AuditResync fails closed on mismatch).
+        let secret_bytes: Vec<u8> = (0..tenant_secret_hex.len())
+            .step_by(2)
+            .filter_map(|i| {
+                u8::from_str_radix(&tenant_secret_hex[i..i + 2], 16).ok()
+            })
+            .collect();
+        if secret_bytes.len() != 32 {
+            warn!(
+                "tenant-secret hex decode produced {} bytes (expected 32); skipping broker spawn",
+                secret_bytes.len()
+            );
+        }
+        if let Err(e) = std::fs::write(&tenant_secret_path, &secret_bytes) {
+            warn!(err = %e, path = %tenant_secret_path.display(), "write tenant-secret failed");
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &tenant_secret_path,
+                    std::fs::Permissions::from_mode(0o600),
+                );
+            }
+        }
+
+        match crate::microvm::broker_proxy::spawn_contextfs_broker(
+            &broker_uds,
+            &cedar_path,
+            &tenant_secret_path,
+        )
+        .await
+        {
+            Ok(child) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if let Err(e) = crate::microvm::broker_proxy::spawn_broker_vsock_bridge(
+                    &vsock_sock,
+                    &broker_uds,
+                ) {
+                    warn!(err = %e, "failed to bind broker vsock bridge; verify_write will fall back in-process");
+                }
+                Some(child)
+            }
+            Err(e) => {
+                warn!(err = %e, "failed to spawn contextfs-broker; verify_write will fall back in-process");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Wait for the guest vsock worker to be reachable.
     wait_for_vsock_ready(&vsock_sock, cid).await?;
 
@@ -971,6 +1103,7 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
         vsock_path: vsock_sock,
         _fc_proc: fc_proc,
         _cfs_fs_proc,
+        _broker_proc,
         born_at: Instant::now(),
         call_count: 0,
         ceiling: spec.vm_ceiling,
@@ -1071,6 +1204,8 @@ fn build_fc_config(
     vsock_sock: &std::path::Path,
     cid: u32,
     spec: &VmSpec,
+    contextfs_rw: bool,
+    tenant_secret_hex: Option<&str>,
 ) -> serde_json::Value {
     // Build kernel cmdline. Append pi.net.* knobs when a network policy
     // requests Allow so the guest's init script can configure eth0
@@ -1097,6 +1232,20 @@ fn build_fc_config(
             " pi.net.ip={} pi.net.gw={} pi.net.dns={}",
             guest_ip_cidr, guest_gateway, dns_csv
         ));
+    }
+    // Contextfs RW mode (RFD 0023 §3.5 / Commit G3 step 3): the
+    // rootfs init reads `pi.contextfs.rw=1` to flip the mount
+    // from RO to RW + add the [broker] block to contextfsd.toml,
+    // and reads `pi.contextfs.tenant_secret_hex=<64-hex>` to
+    // populate /etc/contextfs/tenant-secret with the SAME bytes
+    // the host-side broker is using. Without these, the init
+    // falls back to the v1 RO path (current behaviour).
+    if contextfs_rw {
+        if let Some(hex) = tenant_secret_hex {
+            boot_args.push_str(&format!(
+                " pi.contextfs.rw=1 pi.contextfs.tenant_secret_hex={hex}"
+            ));
+        }
     }
 
     let mut config = serde_json::json!({
@@ -1551,6 +1700,7 @@ mod tests {
                 vsock_path: PathBuf::from("/dev/null"),
                 _fc_proc: dummy_child(),
                 _cfs_fs_proc: None,
+                _broker_proc: None,
                 born_at: Instant::now(),
                 call_count: 0,
                 ceiling: VmCeiling::default(),
@@ -1567,6 +1717,7 @@ mod tests {
             vsock_path: PathBuf::from("/dev/null"),
             _fc_proc: tokio::sync::Mutex::new(dummy_child()),
             _cfs_fs_proc: tokio::sync::Mutex::new(None),
+            _broker_proc: tokio::sync::Mutex::new(None),
             born_at: Instant::now(),
             call_count: std::sync::atomic::AtomicU32::new(0),
             ceiling: VmCeiling::default(),
@@ -1616,6 +1767,7 @@ mod tests {
                 vsock_path: PathBuf::from("/dev/null"),
                 _fc_proc: dummy_child(),
                 _cfs_fs_proc: None,
+                _broker_proc: None,
                 born_at: Instant::now(),
                 call_count: DEFAULT_MAX_CALLS, // already at rotation cap
                 ceiling: VmCeiling::default(),
@@ -1632,6 +1784,7 @@ mod tests {
             vsock_path: PathBuf::from("/dev/null"),
             _fc_proc: tokio::sync::Mutex::new(dummy_child()),
             _cfs_fs_proc: tokio::sync::Mutex::new(None),
+            _broker_proc: tokio::sync::Mutex::new(None),
             born_at: Instant::now(),
             call_count: std::sync::atomic::AtomicU32::new(0),
             ceiling: VmCeiling::default(),
@@ -1719,6 +1872,7 @@ mod tests {
                 rootfs_version: "0.1.0".to_string(),
                 network_policy: NetworkPolicy::Deny,
                 _cfs_fs_proc: None,
+                _broker_proc: None,
             });
             d
         }));
@@ -1733,6 +1887,7 @@ mod tests {
                 .spawn()
                 .expect("spawn sleep"),
             _cfs_fs_proc: None,
+            _broker_proc: None,
             born_at: Instant::now(),
             call_count: 0,
             ceiling: VmCeiling::default(),

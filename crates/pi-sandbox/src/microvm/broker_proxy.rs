@@ -200,20 +200,70 @@ fn nix_uid_self() -> u32 {
     unsafe { libc::getuid() }
 }
 
-/// Default Cedar policy for the embedder demo. Permits Agent::"pi-sandbox"
-/// every action; deny everything else. Real deployments override
-/// via `PI_SANDBOX_CEDAR_POLICY` env / a config knob.
+/// Default Cedar policy for the embedder demo.
+///
+/// Per contextfs's `docs/embedder-broker-quickstart.md`, prefer
+/// explicit per-action permits over a single permit-all clause.
+/// Two reasons (verbatim from contextfs):
+///   (a) every audit allow-row shows which permit fired;
+///       principle-of-least-privilege visible in pi-rs's tree.
+///   (b) future contextfs releases that add new actions get
+///       NoMatchingPermit instead of silently forwarding.
 ///
 /// The principal entity id matches the
-/// `default_principal = "Agent::\"pi-sandbox\""` line the rootfs
-/// init writes into contextfsd.toml.
-pub const DEFAULT_CEDAR_POLICY: &str = r#"// pi-rs sandbox demo policy — permits Agent::"pi-sandbox"
-// every action on every resource. Override via the
-// PI_SANDBOX_CEDAR_POLICY env var (path to a Cedar file) or
-// the host launcher's RuntimeConfig.cedar_policy_path.
+/// `default_principal = "Agent::\"pi-sandbox\""` line the
+/// rootfs init writes into contextfsd.toml.
+///
+/// Override via `PI_SANDBOX_CEDAR_POLICY` env (path to a Cedar
+/// file) or a host-launcher RuntimeConfig knob (future).
+pub const DEFAULT_CEDAR_POLICY: &str = r#"// pi-rs sandbox demo policy — explicit per-action permits for
+// Agent::"pi-sandbox". Anything not listed below NoMatchingPermit's
+// (default-deny on contextfs's side). When contextfs adds new
+// Action variants, this policy will fail closed for them until we
+// extend the list — that is the design intent.
 permit (
   principal == Agent::"pi-sandbox",
-  action,
+  action == Action::"read",
+  resource
+);
+permit (
+  principal == Agent::"pi-sandbox",
+  action == Action::"list",
+  resource
+);
+permit (
+  principal == Agent::"pi-sandbox",
+  action == Action::"stat",
+  resource
+);
+permit (
+  principal == Agent::"pi-sandbox",
+  action == Action::"xattr.read",
+  resource
+);
+permit (
+  principal == Agent::"pi-sandbox",
+  action == Action::"write",
+  resource
+);
+permit (
+  principal == Agent::"pi-sandbox",
+  action == Action::"create",
+  resource
+);
+permit (
+  principal == Agent::"pi-sandbox",
+  action == Action::"delete",
+  resource
+);
+permit (
+  principal == Agent::"pi-sandbox",
+  action == Action::"rename",
+  resource
+);
+permit (
+  principal == Agent::"pi-sandbox",
+  action == Action::"commit",
   resource
 );
 "#;

@@ -45,14 +45,17 @@ echo "==> Working dir: ${WORK}"
 #    + the contextfs vsock bridge for static-musl.
 echo "==> Cross-compiling pi-sandbox-worker + probes + cfs-vsock-bridge (release, x86_64-unknown-linux-musl)"
 cargo build --release --target x86_64-unknown-linux-musl \
-  --bin pi-sandbox-worker --bin pi-vsock-probe --bin pi-cfs-vsock-bridge
+  --bin pi-sandbox-worker --bin pi-vsock-probe \
+  --bin pi-cfs-vsock-bridge --bin pi-cfs-broker-vsock-bridge
 TARGET_REL="$(pwd)/target/x86_64-unknown-linux-musl/release"
 WORKER_BIN="${TARGET_REL}/pi-sandbox-worker"
 PROBE_BIN="${TARGET_REL}/pi-vsock-probe"
 CFS_BRIDGE_BIN="${TARGET_REL}/pi-cfs-vsock-bridge"
+CFS_BROKER_BRIDGE_BIN="${TARGET_REL}/pi-cfs-broker-vsock-bridge"
 [[ -x "${WORKER_BIN}" ]] || { echo "ERROR: worker not built at ${WORKER_BIN}"; exit 2; }
 [[ -x "${PROBE_BIN}" ]] || { echo "ERROR: probe not built at ${PROBE_BIN}"; exit 2; }
 [[ -x "${CFS_BRIDGE_BIN}" ]] || { echo "ERROR: cfs-vsock-bridge not built at ${CFS_BRIDGE_BIN}"; exit 2; }
+[[ -x "${CFS_BROKER_BRIDGE_BIN}" ]] || { echo "ERROR: cfs-broker-vsock-bridge not built at ${CFS_BROKER_BRIDGE_BIN}"; exit 2; }
 
 # 1b. Locate or build the contextfsd binary. RFD 0023 §3.5: the guest
 #     runs contextfs's own daemon to mount /work via FUSE, talking to
@@ -96,10 +99,11 @@ tar -xzf "${OUT_DIR}/cache/${ALPINE_MINI}" -C "${ROOT}"
 
 # 4. Drop the worker, vsock probe (tests), cfs-vsock-bridge, and
 #    contextfsd in /usr/local/bin.
-install -m 0755 "${WORKER_BIN}"     "${ROOT}/usr/local/bin/pi-sandbox-worker"
-install -m 0755 "${PROBE_BIN}"      "${ROOT}/usr/local/bin/pi-vsock-probe"
-install -m 0755 "${CFS_BRIDGE_BIN}" "${ROOT}/usr/local/bin/pi-cfs-vsock-bridge"
-install -m 0755 "${CONTEXTFSD_BIN}" "${ROOT}/usr/local/bin/contextfsd"
+install -m 0755 "${WORKER_BIN}"            "${ROOT}/usr/local/bin/pi-sandbox-worker"
+install -m 0755 "${PROBE_BIN}"             "${ROOT}/usr/local/bin/pi-vsock-probe"
+install -m 0755 "${CFS_BRIDGE_BIN}"        "${ROOT}/usr/local/bin/pi-cfs-vsock-bridge"
+install -m 0755 "${CFS_BROKER_BRIDGE_BIN}" "${ROOT}/usr/local/bin/pi-cfs-broker-vsock-bridge"
+install -m 0755 "${CONTEXTFSD_BIN}"        "${ROOT}/usr/local/bin/contextfsd"
 
 # 4b. UID separation (RFD 0023 §6 "Bash-can't-bypass" Layer 1).
 #     pi-worker (UID 1000) runs the worker process; pi-tool (UID 1001)
@@ -344,27 +348,70 @@ if [ "$contextfs_mode" != "off" ] && \
     sleep 0.1
   done
 
-  # Tenant secret: 32 bytes, mode 0600. Generated fresh per VM
-  # boot — overlay tmpfs is ephemeral so this never persists.
-  if [ ! -f /etc/contextfs/tenant-secret ]; then
+  # RW mode (RFD 0023 §3.5 / Commit G3 step 3): the host launcher
+  # sets pi.contextfs.rw=1 + pi.contextfs.tenant_secret_hex=<64hex>
+  # on the kernel cmdline when PI_SANDBOX_CONTEXTFS_RW=1. The
+  # tenant_secret_hex is decoded into /etc/contextfs/tenant-secret
+  # so the daemon's audit/decision-id derivation matches the
+  # host-side broker's (per contextfs embedder-broker quickstart:
+  # SAME raw bytes on both sides).
+  contextfs_rw=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.contextfs\.rw=//p')
+  contextfs_secret_hex=$(tr ' ' '\n' < /proc/cmdline \
+    | sed -n 's/^pi\.contextfs\.tenant_secret_hex=//p')
+
+  # Tenant secret: prefer the cmdline-supplied hex (RW mode);
+  # fall back to a fresh 32-byte random for RO. Mode 0600 either
+  # way (the daemon's TenantSecret::from_path enforces this).
+  if [ -n "$contextfs_secret_hex" ] && [ ${#contextfs_secret_hex} -eq 64 ]; then
+    # Decode 64-hex into 32 raw bytes. busybox awk doesn't have
+    # strtonum (gawk extension), so use sed to inject \x escapes
+    # then printf — busybox printf does honour \xNN.
+    escaped=$(printf '%s' "$contextfs_secret_hex" | sed 's/\(..\)/\\x\1/g')
+    # shellcheck disable=SC2059  # intentional: $escaped is a printf format string of \xNN escapes
+    printf "$escaped" > /etc/contextfs/tenant-secret 2>/dev/null
+  elif [ ! -f /etc/contextfs/tenant-secret ]; then
     if [ -c /dev/urandom ]; then
       head -c 32 /dev/urandom > /etc/contextfs/tenant-secret 2>/dev/null
     else
       printf 'pi-sandbox-tenant-secret-vm-default-padded-32b' > /etc/contextfs/tenant-secret
     fi
-    chmod 0600 /etc/contextfs/tenant-secret
   fi
+  chmod 0600 /etc/contextfs/tenant-secret
 
-  # Default-permit Cedar policy. Real policy enforcement comes
-  # from the host-side broker (RFD 0023 §3.5 future commit); the
-  # guest daemon is just the FUSE bridge.
+  # Cedar policy. RO mode: default-permit (broker isn't running;
+  # daemon's in-process PDP fallback is the gate). RW mode: the
+  # host writes /etc/contextfs/policy.cedar via the broker's
+  # --policy flag, but pi-rs's host writes a copy into the
+  # /work-overlay-side run_dir, which the guest CAN'T see — so
+  # the in-guest config still uses the default-permit shape, and
+  # the broker is the authoritative gate.
   if [ ! -f /etc/contextfs/policy.cedar ]; then
     printf 'permit (principal, action, resource);\n' > /etc/contextfs/policy.cedar
   fi
 
-  # contextfsd config. Single mount: /work backed by remote-fs
-  # over /run/cfs.sock (which the bridge forwards to host vsock).
+  # contextfsd config. RW mode adds [broker].socket_path pointing
+  # at the broker's UDS (which the broker bridge forwards to
+  # vsock(2,5006)) and flips read_only=false on the mount.
   if [ ! -f /etc/contextfs/contextfsd.toml ]; then
+    if [ "$contextfs_rw" = "1" ]; then
+      MOUNT_RO="false"
+      BROKER_BLOCK='[broker]
+socket_path = "/run/contextfs/broker.sock"
+'
+      # Start the broker bridge (UDS /run/contextfs/broker.sock
+      # ↔ vsock(2,5006)) BEFORE contextfsd's broker dial.
+      if [ -x /usr/local/bin/pi-cfs-broker-vsock-bridge ]; then
+        /usr/local/bin/pi-cfs-broker-vsock-bridge \
+          >/var/log/cfs-broker-vsock-bridge.log 2>&1 &
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+          [ -S /run/contextfs/broker.sock ] && break
+          sleep 0.1
+        done
+      fi
+    else
+      MOUNT_RO="true"
+      BROKER_BLOCK=""
+    fi
     cat > /etc/contextfs/contextfsd.toml <<CFG_EOF
 tenant_secret_path = "/etc/contextfs/tenant-secret"
 audit_log_path = "/var/log/contextfsd-audit.ndjson"
@@ -373,12 +420,13 @@ audit_log_path = "/var/log/contextfsd-audit.ndjson"
 policy_path = "/etc/contextfs/policy.cedar"
 default_principal = "Agent::\"pi-sandbox\""
 
+${BROKER_BLOCK}
 [[mount]]
 name = "work"
 mountpoint = "/work"
 backend = "remote-fs"
 cache_dir = "/var/cache/contextfs/work"
-read_only = true
+read_only = ${MOUNT_RO}
 
 [mount.remote_fs]
 target_uds = "/run/cfs.sock"
