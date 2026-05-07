@@ -581,7 +581,6 @@ pub fn install_sandbox_from_flag(
         #[cfg(target_os = "linux")]
         "microvm:firecracker" => {
             use pi_sandbox::microvm::firecracker::{FirecrackerConfig, FirecrackerLauncher};
-            use pi_sandbox::microvm::NetworkPolicy;
             // FirecrackerConfig defaults: pool_size=2, run_dir under /tmp.
             // Kernel + rootfs paths come from env vars; absent ones surface
             // as `acquire()` failures at first tool call rather than a
