@@ -414,61 +414,14 @@ if [ "$contextfs_mode" != "off" ] && \
   chmod 0600 /etc/contextfs/tenant-secret
 
   # Cedar policy.
-  # MUST be byte-identical to the matching profile constant in
-  # broker_proxy.rs (DEFAULT_CEDAR_POLICY / TESTS_ONLY_CEDAR_POLICY)
-  # — contextfsd hashes the policy file + the broker's, refuses
-  # ops if they differ ("remote Cedar policy_hash skew" warn →
-  # write fails). RO mode reuses the same shape since the daemon's
-  # in-process PDP fallback only consults the local file.
-  cedar_profile=$(tr ' ' '\n' < /proc/cmdline \
-    | sed -n 's/^pi\.contextfs\.cedar_profile=//p')
-  case "$cedar_profile" in
-    tests_only)
-      cat > /etc/contextfs/policy.cedar <<'CEDAR_EOF'
-// pi-rs sandbox `tests_only` profile — read everywhere, write
-// only test files. Anything not matched NoMatchingPermit's
-// (default-deny in contextfs).
-permit (principal, action == Action::"read",       resource);
-permit (principal, action == Action::"list",       resource);
-permit (principal, action == Action::"stat",       resource);
-permit (principal, action == Action::"xattr.read", resource);
-
-permit (principal, action == Action::"write", resource)
-when {
-  resource.path like "*/tests/*"
-  || resource.path like "*/tests"
-  || resource.path like "*_test.rs"
-  || resource.path like "*_tests.rs"
-};
-permit (principal, action == Action::"create", resource)
-when {
-  resource.path like "*/tests/*"
-  || resource.path like "*/tests"
-  || resource.path like "*_test.rs"
-  || resource.path like "*_tests.rs"
-};
-permit (principal, action == Action::"delete", resource)
-when {
-  resource.path like "*/tests/*"
-  || resource.path like "*_test.rs"
-  || resource.path like "*_tests.rs"
-};
-permit (principal, action == Action::"rename", resource)
-when {
-  resource.path like "*/tests/*"
-  || resource.path like "*_test.rs"
-  || resource.path like "*_tests.rs"
-};
-permit (principal, action == Action::"commit", resource)
-when {
-  resource.path like "*/tests/*"
-  || resource.path like "*_test.rs"
-  || resource.path like "*_tests.rs"
-};
-CEDAR_EOF
-      ;;
-    *)
-      cat > /etc/contextfs/policy.cedar <<'CEDAR_EOF'
+  # MUST be byte-identical to broker_proxy.rs::DEFAULT_CEDAR_POLICY
+  # in RW mode — contextfsd hashes the policy file and refuses
+  # ops if its hash differs from the broker's
+  # (`remote Cedar policy_hash skew` warn → write fails).
+  # RO mode reuses the same shape since the daemon's in-process
+  # PDP fallback only consults the local file.
+  if [ ! -f /etc/contextfs/policy.cedar ]; then
+    cat > /etc/contextfs/policy.cedar <<'CEDAR_EOF'
 // pi-rs sandbox demo policy — explicit per-action permits for
 // Agent::"pi-sandbox". Anything not listed below NoMatchingPermit's
 // (default-deny on contextfs's side). When contextfs adds new
@@ -520,8 +473,7 @@ permit (
   resource
 );
 CEDAR_EOF
-      ;;
-  esac
+  fi
 
   # contextfsd config. RW mode adds [broker].socket_path pointing
   # at the broker's UDS (which the broker bridge forwards to
