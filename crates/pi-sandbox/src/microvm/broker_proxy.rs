@@ -200,6 +200,62 @@ fn nix_uid_self() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// "tests-only" Cedar profile — the agent can read every path
+/// in `/work` but can only write/create/delete inside `tests/`
+/// directories or to files matching `*_test.rs` / `*_tests.rs`.
+///
+/// Built for the dogfood pattern "let the agent write tests
+/// against an existing source tree without being able to
+/// accidentally modify the implementation". Cedar `like`
+/// patterns operate on `resource.path` (NFC-normalised,
+/// always `/`-prefixed; see contextfs
+/// `docs/ops/local-mount-hardening.md` §"Path matching").
+///
+/// MUST stay byte-identical to the rootfs init's heredoc copy
+/// of this same text — contextfsd hashes its policy file +
+/// the broker's, refuses ops if they differ.
+pub const TESTS_ONLY_CEDAR_POLICY: &str = r#"// pi-rs sandbox `tests_only` profile — read everywhere, write
+// only test files. Anything not matched NoMatchingPermit's
+// (default-deny in contextfs).
+permit (principal, action == Action::"read",       resource);
+permit (principal, action == Action::"list",       resource);
+permit (principal, action == Action::"stat",       resource);
+permit (principal, action == Action::"xattr.read", resource);
+
+permit (principal, action == Action::"write", resource)
+when {
+  resource.path like "*/tests/*"
+  || resource.path like "*/tests"
+  || resource.path like "*_test.rs"
+  || resource.path like "*_tests.rs"
+};
+permit (principal, action == Action::"create", resource)
+when {
+  resource.path like "*/tests/*"
+  || resource.path like "*/tests"
+  || resource.path like "*_test.rs"
+  || resource.path like "*_tests.rs"
+};
+permit (principal, action == Action::"delete", resource)
+when {
+  resource.path like "*/tests/*"
+  || resource.path like "*_test.rs"
+  || resource.path like "*_tests.rs"
+};
+permit (principal, action == Action::"rename", resource)
+when {
+  resource.path like "*/tests/*"
+  || resource.path like "*_test.rs"
+  || resource.path like "*_tests.rs"
+};
+permit (principal, action == Action::"commit", resource)
+when {
+  resource.path like "*/tests/*"
+  || resource.path like "*_test.rs"
+  || resource.path like "*_tests.rs"
+};
+"#;
+
 /// Default Cedar policy for the embedder demo.
 ///
 /// Per contextfs's `docs/embedder-broker-quickstart.md`, prefer
@@ -268,18 +324,59 @@ permit (
 );
 "#;
 
+/// Built-in Cedar profile name. Both the host broker + the
+/// in-guest daemon need byte-identical policy text; the
+/// profile name flows on the kernel cmdline so the rootfs
+/// init can pick the matching pre-baked heredoc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CedarProfile {
+    /// Permits all actions. The default for the demo.
+    Default,
+    /// Read everywhere; write only test files.
+    TestsOnly,
+}
+
+impl CedarProfile {
+    /// Stable cmdline token: `default` | `tests_only`.
+    pub(crate) fn cmdline_token(self) -> &'static str {
+        match self {
+            CedarProfile::Default => "default",
+            CedarProfile::TestsOnly => "tests_only",
+        }
+    }
+
+    pub(crate) fn policy_text(self) -> &'static str {
+        match self {
+            CedarProfile::Default => DEFAULT_CEDAR_POLICY,
+            CedarProfile::TestsOnly => TESTS_ONLY_CEDAR_POLICY,
+        }
+    }
+}
+
+/// Resolve the Cedar profile from `PI_SANDBOX_CEDAR_PROFILE`
+/// (`default` | `tests_only`). Unset / unrecognised → Default.
+pub(crate) fn resolved_cedar_profile() -> CedarProfile {
+    match std::env::var("PI_SANDBOX_CEDAR_PROFILE")
+        .ok()
+        .as_deref()
+    {
+        Some("tests_only") | Some("tests-only") => CedarProfile::TestsOnly,
+        _ => CedarProfile::Default,
+    }
+}
+
 /// Resolve the Cedar policy text the host writes into the per-VM
 /// run dir. If `PI_SANDBOX_CEDAR_POLICY` points at a readable
-/// file, use its contents; otherwise fall back to
-/// `DEFAULT_CEDAR_POLICY`. Caller writes this to
-/// `<run_dir>/policy.cedar` and passes the path to both the
-/// broker (host-side) and the daemon's `[pdp].policy_path` (in
-/// guest, via the rootfs init's TOML write).
+/// file, use its contents (custom-policy escape hatch — only
+/// works when the operator also drops the same file into the
+/// guest's `/etc/contextfs/policy.cedar`; the rootfs init's
+/// pre-baked profiles are the safer path). Otherwise pick the
+/// built-in profile per `PI_SANDBOX_CEDAR_PROFILE`.
 pub(crate) fn resolved_cedar_policy_text() -> String {
     if let Ok(path) = std::env::var("PI_SANDBOX_CEDAR_POLICY") {
         if let Ok(text) = std::fs::read_to_string(&path) {
             return text;
         }
     }
-    DEFAULT_CEDAR_POLICY.to_string()
+    resolved_cedar_profile().policy_text().to_string()
 }

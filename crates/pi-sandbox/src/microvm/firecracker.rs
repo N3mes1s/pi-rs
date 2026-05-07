@@ -1238,6 +1238,13 @@ fn build_fc_config(
                 " pi.contextfs.rw=1 pi.contextfs.tenant_secret_hex={hex}"
             ));
         }
+        // Cedar profile selector. Defaults to `default`; the
+        // rootfs init reads the same token to pick the matching
+        // pre-baked policy heredoc so broker + daemon write
+        // byte-identical policy.cedar files.
+        let profile = crate::microvm::broker_proxy::resolved_cedar_profile()
+            .cmdline_token();
+        boot_args.push_str(&format!(" pi.contextfs.cedar_profile={profile}"));
     }
 
     let mut config = serde_json::json!({
