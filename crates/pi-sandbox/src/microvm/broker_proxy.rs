@@ -222,47 +222,47 @@ pub const DEFAULT_CEDAR_POLICY: &str = r#"// pi-rs sandbox demo policy — expli
 // Action variants, this policy will fail closed for them until we
 // extend the list — that is the design intent.
 permit (
-  principal == Agent::"pi-sandbox",
+  principal,
   action == Action::"read",
   resource
 );
 permit (
-  principal == Agent::"pi-sandbox",
+  principal,
   action == Action::"list",
   resource
 );
 permit (
-  principal == Agent::"pi-sandbox",
+  principal,
   action == Action::"stat",
   resource
 );
 permit (
-  principal == Agent::"pi-sandbox",
+  principal,
   action == Action::"xattr.read",
   resource
 );
 permit (
-  principal == Agent::"pi-sandbox",
+  principal,
   action == Action::"write",
   resource
 );
 permit (
-  principal == Agent::"pi-sandbox",
+  principal,
   action == Action::"create",
   resource
 );
 permit (
-  principal == Agent::"pi-sandbox",
+  principal,
   action == Action::"delete",
   resource
 );
 permit (
-  principal == Agent::"pi-sandbox",
+  principal,
   action == Action::"rename",
   resource
 );
 permit (
-  principal == Agent::"pi-sandbox",
+  principal,
   action == Action::"commit",
   resource
 );

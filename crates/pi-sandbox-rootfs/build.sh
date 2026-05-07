@@ -363,12 +363,15 @@ if [ "$contextfs_mode" != "off" ] && \
   # fall back to a fresh 32-byte random for RO. Mode 0600 either
   # way (the daemon's TenantSecret::from_path enforces this).
   if [ -n "$contextfs_secret_hex" ] && [ ${#contextfs_secret_hex} -eq 64 ]; then
-    # Decode 64-hex into 32 raw bytes. busybox awk doesn't have
-    # strtonum (gawk extension), so use sed to inject \x escapes
-    # then printf — busybox printf does honour \xNN.
-    escaped=$(printf '%s' "$contextfs_secret_hex" | sed 's/\(..\)/\\x\1/g')
-    # shellcheck disable=SC2059  # intentional: $escaped is a printf format string of \xNN escapes
-    printf "$escaped" > /etc/contextfs/tenant-secret 2>/dev/null
+    # Write the hex string verbatim (with newline). The host
+    # broker's load_tenant_secret reads this file as TEXT and
+    # hex-decodes the first non-blank line; the daemon's
+    # TenantSecret::from_path reads RAW bytes (≥32). 64 ASCII
+    # hex chars satisfy both — same file works either way.
+    # See firecracker.rs comment block on why this is OK for
+    # the v1 demo (AuditResync would mismatch otherwise; not
+    # triggered by our path).
+    printf '%s\n' "$contextfs_secret_hex" > /etc/contextfs/tenant-secret
   elif [ ! -f /etc/contextfs/tenant-secret ]; then
     if [ -c /dev/urandom ]; then
       head -c 32 /dev/urandom > /etc/contextfs/tenant-secret 2>/dev/null
@@ -378,15 +381,66 @@ if [ "$contextfs_mode" != "off" ] && \
   fi
   chmod 0600 /etc/contextfs/tenant-secret
 
-  # Cedar policy. RO mode: default-permit (broker isn't running;
-  # daemon's in-process PDP fallback is the gate). RW mode: the
-  # host writes /etc/contextfs/policy.cedar via the broker's
-  # --policy flag, but pi-rs's host writes a copy into the
-  # /work-overlay-side run_dir, which the guest CAN'T see — so
-  # the in-guest config still uses the default-permit shape, and
-  # the broker is the authoritative gate.
+  # Cedar policy.
+  # MUST be byte-identical to broker_proxy.rs::DEFAULT_CEDAR_POLICY
+  # in RW mode — contextfsd hashes the policy file and refuses
+  # ops if its hash differs from the broker's
+  # (`remote Cedar policy_hash skew` warn → write fails).
+  # RO mode reuses the same shape since the daemon's in-process
+  # PDP fallback only consults the local file.
   if [ ! -f /etc/contextfs/policy.cedar ]; then
-    printf 'permit (principal, action, resource);\n' > /etc/contextfs/policy.cedar
+    cat > /etc/contextfs/policy.cedar <<'CEDAR_EOF'
+// pi-rs sandbox demo policy — explicit per-action permits for
+// Agent::"pi-sandbox". Anything not listed below NoMatchingPermit's
+// (default-deny on contextfs's side). When contextfs adds new
+// Action variants, this policy will fail closed for them until we
+// extend the list — that is the design intent.
+permit (
+  principal,
+  action == Action::"read",
+  resource
+);
+permit (
+  principal,
+  action == Action::"list",
+  resource
+);
+permit (
+  principal,
+  action == Action::"stat",
+  resource
+);
+permit (
+  principal,
+  action == Action::"xattr.read",
+  resource
+);
+permit (
+  principal,
+  action == Action::"write",
+  resource
+);
+permit (
+  principal,
+  action == Action::"create",
+  resource
+);
+permit (
+  principal,
+  action == Action::"delete",
+  resource
+);
+permit (
+  principal,
+  action == Action::"rename",
+  resource
+);
+permit (
+  principal,
+  action == Action::"commit",
+  resource
+);
+CEDAR_EOF
   fi
 
   # contextfsd config. RW mode adds [broker].socket_path pointing

@@ -126,15 +126,20 @@ async fn firecracker_contextfs_work_mount_write_then_read_back() {
         return;
     }
 
-    // Stage host_cwd with mode 0755 so non-mounting UIDs in the
-    // guest can traverse it via the FUSE mount (allow_other +
-    // default_permissions still enforces file mode bits).
+    // Stage host_cwd with mode 0777 so the bash tool subprocess
+    // (UID 1001 / pi-tool) can write through the FUSE mount.
+    // contextfs preserves host UIDs across the wire, so files
+    // appear in the guest owned by the host user (UID 1000 in
+    // dev). default_permissions on the mount enforces mode bits;
+    // 1001 is "other", so the directory needs `o+w` for the
+    // create. Cedar remains the authoritative policy gate;
+    // mode-bits are belt-and-braces.
     let host_cwd = tempfile::tempdir().expect("host_cwd tempdir");
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(
             host_cwd.path(),
-            std::fs::Permissions::from_mode(0o755),
+            std::fs::Permissions::from_mode(0o777),
         );
     }
 
