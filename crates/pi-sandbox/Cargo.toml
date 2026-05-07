@@ -36,6 +36,7 @@ zstd = "0.13"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-vsock = "0.7"
+libc = "0.2"
 
 # Contextfs daemon library — embedded in-process for the
 # Linux/Firecracker file-sharing path (RFD 0023 §3.5 / Commit G3

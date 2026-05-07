@@ -21,6 +21,9 @@ mod search_proxy;
 #[cfg(target_os = "linux")]
 pub(crate) mod contextfs_proxy;
 
+#[cfg(target_os = "linux")]
+pub(crate) mod broker_proxy;
+
 pub use launcher::{MicroVmLauncher, VmHandle};
 pub use provider::MicroVmProvider;
 pub use types::{

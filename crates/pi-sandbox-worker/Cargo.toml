@@ -28,6 +28,16 @@ path = "src/bin/pi-vsock-probe.rs"
 name = "pi-cfs-vsock-bridge"
 path = "src/bin/pi-cfs-vsock-bridge.rs"
 
+# Guest-side UDS↔vsock bridge for the contextfs broker (Cedar
+# verify_write gate). Listens on /run/contextfs/broker.sock,
+# forwards each connection to vsock(2, 5006) where pi-sandbox's
+# host-side bridge accepts + proxies into contextfs-broker.
+# Twin of pi-cfs-vsock-bridge for the broker (write-policy)
+# channel. Started by the rootfs init.
+[[bin]]
+name = "pi-cfs-broker-vsock-bridge"
+path = "src/bin/pi-cfs-broker-vsock-bridge.rs"
+
 [lib]
 name = "pi_sandbox_worker"
 path = "src/lib.rs"
