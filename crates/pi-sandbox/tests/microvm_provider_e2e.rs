@@ -76,6 +76,50 @@ async fn microvm_provider_dispatches_through_guest() {
         exec.stdout
     );
 
+    // 4) host_cwd → /work mount through the provider. This is the
+    //    end-to-end agent path: the agent's bash tool dispatches to
+    //    SandboxProvider::execute_tool, the provider acquires a VM
+    //    rooted at ctx.cwd, contextfs's remote-fs backend serves
+    //    that directory at /work in the guest. We probe both sides:
+    //    host writes, guest reads.
+    //
+    //    Skip cleanly when cfs-fs-server isn't resolvable so the
+    //    smoke remains green on minimal CI hosts that test
+    //    microvm-without-contextfs.
+    let cfs_avail = std::env::var("PI_SANDBOX_CFS_FS_SERVER_BIN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists())
+        .or_else(|| which::which("cfs-fs-server").ok())
+        .is_some();
+    if cfs_avail {
+        let sentinel = "pi-provider-e2e.txt";
+        let payload = "agent-saw-it: 0xc0ffee";
+        std::fs::write(work.path().join(sentinel), payload)
+            .expect("seed sentinel into ctx.cwd");
+        let exec = provider
+            .execute_tool(
+                &ctx,
+                "bash",
+                &json!({ "command": format!("cat /work/{sentinel}") }),
+            )
+            .await
+            .expect("execute_tool /work cat");
+        eprintln!("/work read: {:?}", exec.stdout.trim_end());
+        assert_eq!(exec.exit_status, 0, "/work read failed: {:?}", exec.stdout);
+        assert!(
+            exec.stdout.contains(payload),
+            "expected sentinel {payload:?} in /work output, got: {:?}",
+            exec.stdout
+        );
+    } else {
+        eprintln!(
+            "SKIP: /work probe (cfs-fs-server not on PATH; \
+             set PI_SANDBOX_CFS_FS_SERVER_BIN to enable)"
+        );
+    }
+
     // 4) post-test cleanup proof: hold no leaked launcher refs, then ensure
     //    no firecracker process from this test survives once the provider
     //    drops. The provider's drop -> launcher's drop -> warm-pool VMs
