@@ -1238,6 +1238,8 @@ fn build_fc_config(
                 " pi.contextfs.rw=1 pi.contextfs.tenant_secret_hex={hex}"
             ));
         }
+        let profile = crate::microvm::broker_proxy::resolved_cedar_profile().cmdline_token();
+        boot_args.push_str(&format!(" pi.contextfs.cedar_profile={profile}"));
     }
 
     let mut config = serde_json::json!({

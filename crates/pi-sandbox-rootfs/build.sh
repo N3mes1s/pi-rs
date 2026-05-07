@@ -421,7 +421,85 @@ if [ "$contextfs_mode" != "off" ] && \
   # RO mode reuses the same shape since the daemon's in-process
   # PDP fallback only consults the local file.
   if [ ! -f /etc/contextfs/policy.cedar ]; then
-    cat > /etc/contextfs/policy.cedar <<'CEDAR_EOF'
+    cedar_profile=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.contextfs\.cedar_profile=//p')
+    case "$cedar_profile" in
+    tests_only)
+      cat > /etc/contextfs/policy.cedar <<'CEDAR_EOF'
+// pi-rs sandbox tests_only policy — read everywhere, write only inside
+// tests/ directories or *_test.rs / *_tests.rs files.
+// Agent::"pi-sandbox" principal. Unconditional read permits; conditional
+// write/create/delete/rename/commit permits scoped to tests paths.
+permit (
+  principal,
+  action == Action::"read",
+  resource
+);
+permit (
+  principal,
+  action == Action::"list",
+  resource
+);
+permit (
+  principal,
+  action == Action::"stat",
+  resource
+);
+permit (
+  principal,
+  action == Action::"xattr.read",
+  resource
+);
+permit (
+  principal,
+  action == Action::"write",
+  resource
+) when {
+  resource.path like "*/tests/*" ||
+  resource.path like "*/tests" ||
+  resource.path like "*_test.rs" ||
+  resource.path like "*_tests.rs"
+};
+permit (
+  principal,
+  action == Action::"create",
+  resource
+) when {
+  resource.path like "*/tests/*" ||
+  resource.path like "*/tests" ||
+  resource.path like "*_test.rs" ||
+  resource.path like "*_tests.rs"
+};
+permit (
+  principal,
+  action == Action::"delete",
+  resource
+) when {
+  resource.path like "*/tests/*" ||
+  resource.path like "*_test.rs" ||
+  resource.path like "*_tests.rs"
+};
+permit (
+  principal,
+  action == Action::"rename",
+  resource
+) when {
+  resource.path like "*/tests/*" ||
+  resource.path like "*_test.rs" ||
+  resource.path like "*_tests.rs"
+};
+permit (
+  principal,
+  action == Action::"commit",
+  resource
+) when {
+  resource.path like "*/tests/*" ||
+  resource.path like "*_test.rs" ||
+  resource.path like "*_tests.rs"
+};
+CEDAR_EOF
+      ;;
+    *)
+      cat > /etc/contextfs/policy.cedar <<'CEDAR_EOF'
 // pi-rs sandbox demo policy — explicit per-action permits for
 // Agent::"pi-sandbox". Anything not listed below NoMatchingPermit's
 // (default-deny on contextfs's side). When contextfs adds new
@@ -473,6 +551,8 @@ permit (
   resource
 );
 CEDAR_EOF
+      ;;
+    esac
   fi
 
   # contextfsd config. RW mode adds [broker].socket_path pointing

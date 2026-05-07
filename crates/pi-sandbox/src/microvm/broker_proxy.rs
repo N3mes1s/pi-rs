@@ -200,6 +200,145 @@ fn nix_uid_self() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// Cedar policy for the `tests_only` profile.
+///
+/// Permits read/list/stat/xattr.read unconditionally everywhere.
+/// Permits write/create/delete/rename/commit only when the resource path
+/// matches a `tests/` directory or a `*_test.rs` / `*_tests.rs` file.
+///
+/// This is the "give the agent a source tree to write tests against without
+/// letting it touch the impl" pattern (RFD 0023 §"Profile selector").
+///
+/// **MUST stay byte-identical to the `tests_only` branch heredoc in
+/// `crates/pi-sandbox-rootfs/build.sh`**. Both contextfsd (guest) and the
+/// contextfs-broker (host) hash this text; if they differ even by a single
+/// byte, contextfsd will refuse all write ops with a
+/// `remote Cedar policy_hash skew` warning.
+pub const TESTS_ONLY_CEDAR_POLICY: &str = r#"// pi-rs sandbox tests_only policy — read everywhere, write only inside
+// tests/ directories or *_test.rs / *_tests.rs files.
+// Agent::"pi-sandbox" principal. Unconditional read permits; conditional
+// write/create/delete/rename/commit permits scoped to tests paths.
+permit (
+  principal,
+  action == Action::"read",
+  resource
+);
+permit (
+  principal,
+  action == Action::"list",
+  resource
+);
+permit (
+  principal,
+  action == Action::"stat",
+  resource
+);
+permit (
+  principal,
+  action == Action::"xattr.read",
+  resource
+);
+permit (
+  principal,
+  action == Action::"write",
+  resource
+) when {
+  resource.path like "*/tests/*" ||
+  resource.path like "*/tests" ||
+  resource.path like "*_test.rs" ||
+  resource.path like "*_tests.rs"
+};
+permit (
+  principal,
+  action == Action::"create",
+  resource
+) when {
+  resource.path like "*/tests/*" ||
+  resource.path like "*/tests" ||
+  resource.path like "*_test.rs" ||
+  resource.path like "*_tests.rs"
+};
+permit (
+  principal,
+  action == Action::"delete",
+  resource
+) when {
+  resource.path like "*/tests/*" ||
+  resource.path like "*_test.rs" ||
+  resource.path like "*_tests.rs"
+};
+permit (
+  principal,
+  action == Action::"rename",
+  resource
+) when {
+  resource.path like "*/tests/*" ||
+  resource.path like "*_test.rs" ||
+  resource.path like "*_tests.rs"
+};
+permit (
+  principal,
+  action == Action::"commit",
+  resource
+) when {
+  resource.path like "*/tests/*" ||
+  resource.path like "*_test.rs" ||
+  resource.path like "*_tests.rs"
+};
+"#;
+
+/// Cedar profile selector for pi-rs sandbox VMs.
+///
+/// Both the host-side `contextfs-broker` and the in-guest `contextfsd`
+/// daemon must hash byte-identical Cedar policy text. Profiles are
+/// pre-baked constants so the exact text is available on both sides;
+/// the selected profile's name is shipped on the kernel cmdline
+/// (`pi.contextfs.cedar_profile=<token>`) and both sides pick the
+/// matching text independently.
+///
+/// Select via `PI_SANDBOX_CEDAR_PROFILE` env var:
+///   `tests_only` / `tests-only` → `CedarProfile::TestsOnly`
+///   anything else (or unset)    → `CedarProfile::Default`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CedarProfile {
+    /// Full read+write everywhere (the default open sandbox policy).
+    Default,
+    /// Read everywhere; write only inside `tests/` directories or
+    /// `*_test.rs` / `*_tests.rs` files.
+    TestsOnly,
+}
+
+impl CedarProfile {
+    /// The token written to the kernel cmdline (no spaces, ASCII).
+    pub(crate) fn cmdline_token(self) -> &'static str {
+        match self {
+            CedarProfile::Default => "default",
+            CedarProfile::TestsOnly => "tests_only",
+        }
+    }
+
+    /// The pre-baked Cedar policy text for this profile.
+    pub(crate) fn policy_text(self) -> &'static str {
+        match self {
+            CedarProfile::Default => DEFAULT_CEDAR_POLICY,
+            CedarProfile::TestsOnly => TESTS_ONLY_CEDAR_POLICY,
+        }
+    }
+}
+
+/// Read `PI_SANDBOX_CEDAR_PROFILE` and map to the matching [`CedarProfile`].
+/// Accepts both `"tests_only"` and `"tests-only"` as the same variant.
+/// Any other value (including unset) maps to [`CedarProfile::Default`].
+pub(crate) fn resolved_cedar_profile() -> CedarProfile {
+    match std::env::var("PI_SANDBOX_CEDAR_PROFILE")
+        .ok()
+        .as_deref()
+    {
+        Some("tests_only") | Some("tests-only") => CedarProfile::TestsOnly,
+        _ => CedarProfile::Default,
+    }
+}
+
 /// Default Cedar policy for the embedder demo.
 ///
 /// Per contextfs's `docs/embedder-broker-quickstart.md`, prefer
@@ -281,5 +420,5 @@ pub(crate) fn resolved_cedar_policy_text() -> String {
             return text;
         }
     }
-    DEFAULT_CEDAR_POLICY.to_string()
+    resolved_cedar_profile().policy_text().to_string()
 }
