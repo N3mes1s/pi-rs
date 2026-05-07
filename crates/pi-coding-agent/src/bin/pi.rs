@@ -1,7 +1,38 @@
 use clap::Parser;
 use pi_coding_agent::{cli::Cli, cmd, modes, startup};
 
+/// Install a panic hook that won't double-fault on a broken
+/// stderr pipe. The default Rust panic handler writes to
+/// stderr, and if stderr is a closed pipe (common when this
+/// binary runs as a `pi --orchestrate` subagent and the
+/// parent's stderr-reader thread has gone away), the write
+/// fails with EPIPE, libstd's stdio path itself panics with
+/// "failed printing to stderr: Broken pipe", and the
+/// double-panic in a tokio worker triggers SIGABRT —
+/// crashing the whole subagent. This hook catches the io
+/// error explicitly and silently drops it on a broken pipe,
+/// so a panic at most exits cleanly with status code != 0
+/// instead of dumping core.
+fn install_panic_hook() {
+    use std::io::Write;
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let mut stderr = std::io::stderr().lock();
+        // Best-effort message; ignore EPIPE so a broken
+        // parent pipe doesn't escalate into a process abort.
+        let _ = writeln!(stderr, "{info}");
+        // Optionally still call the previous hook for any
+        // additional diagnostics (e.g. backtrace), but wrap
+        // it with catch_unwind so a panic INSIDE the hook
+        // (e.g. from libstd's stdio writer) doesn't bring
+        // the process down.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prev(info)));
+    }));
+}
+
 fn main() -> anyhow::Result<()> {
+    install_panic_hook();
+
     // Argv pre-sniff for fast-path subcommands. Building clap's command tree
     // for our 30+ flags is non-trivial; for these flags we don't need any
     // values or interactions, so a manual match shaves the parse cost.

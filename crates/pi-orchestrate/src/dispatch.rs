@@ -277,6 +277,17 @@ impl Dispatch for RealDispatch {
                 Some(tf)
             };
 
+        // Redirect the subagent's stderr to a tempfile rather than
+        // a pipe. With a pipe, a stderr write inside the subagent can
+        // race the parent's pipe-drain machinery and produce EPIPE,
+        // which libstd's stdio path then panics on inside a tokio
+        // worker — taking down the whole subagent process with
+        // SIGABRT. A tempfile sink eliminates the EPIPE entirely
+        // while preserving stderr capture for diagnostic reporting.
+        let stderr_sink = tempfile::NamedTempFile::new()?;
+        let stderr_path = stderr_sink.path().to_path_buf();
+        let stderr_handle = stderr_sink.reopen()?;
+
         let mut cmd = Command::new(&self.pi_binary);
         cmd.arg("-p")
             .arg("--auto-approve")
@@ -290,7 +301,7 @@ impl Dispatch for RealDispatch {
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::from(stderr_handle))
             .env("PI_NO_SYNC", "1")
             .env("PI_ORCHESTRATE_ROLE", role.label());
 
@@ -325,20 +336,26 @@ impl Dispatch for RealDispatch {
             use std::io::Write;
             stdin.write_all(assignment.as_bytes())?;
         }
+        // wait_with_output drains stdout (the only piped stream;
+        // stderr is going to the tempfile). On exit we re-read the
+        // tempfile to recover stderr for diagnostics.
         let output = child.wait_with_output()?;
         // system_prompt_tempfile is still alive here; it drops at the
         // end of this scope, which is after wait_with_output returns.
         drop(system_prompt_tempfile);
         let exit_code = output.status.code().unwrap_or(-1);
+        let captured_stderr = if output.status.success() {
+            String::new()
+        } else {
+            std::fs::read_to_string(&stderr_path).unwrap_or_default()
+        };
+        // stderr_sink drops here, removing the tempfile.
+        drop(stderr_sink);
         Ok(DispatchOutcome {
             agent: agent_name.to_string(),
             success: output.status.success(),
             model_output: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: if output.status.success() {
-                String::new()
-            } else {
-                String::from_utf8_lossy(&output.stderr).into_owned()
-            },
+            stderr: captured_stderr,
             exit_code,
             duration_ms: started.elapsed().as_millis() as u64,
         })
