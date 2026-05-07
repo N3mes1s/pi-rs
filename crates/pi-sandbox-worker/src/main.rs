@@ -48,25 +48,7 @@ async fn main() -> anyhow::Result<()> {
     //   Pure Rust deny-list filter blocking socket(AF_VSOCK|...),
     //   mount/pivot_root/bpf/etc. Closes the bash → vsock(2,5003)
     //   policy-bypass route the seccomp commit added.
-    // RW-mount-demo escape hatch: when the host launcher passes
-    // `pi.bash_drop_priv=0` on the kernel cmdline, run bash as
-    // root in the guest. Trade-off: loses the RFD 0023 §6 Layer 1
-    // "bash can't bypass" UID separation. Required today for the
-    // contextfs RW /work demo because contextfsd's FUSE bridge
-    // stamps inode 1 with `0755 root:root` regardless of the
-    // host directory's mode (Caps::owner_passthrough is not
-    // exposed for the remote-fs backend yet — flagged upstream).
-    // Default remains drop-priv; only set to 0 in the dedicated
-    // RW integration test.
-    let drop_priv = read_cmdline_kv("pi.bash_drop_priv").as_deref() != Some("0");
-    if drop_priv {
-        std::env::set_var("PI_SANDBOX_BASH_DROP_PRIV", "1");
-    } else {
-        eprintln!(
-            "WARN: pi.bash_drop_priv=0 on kernel cmdline — bash runs as root \
-             in guest (RFD 0023 §6 Layer 1 disabled). Demo / RW-mount path only."
-        );
-    }
+    std::env::set_var("PI_SANDBOX_BASH_DROP_PRIV", "1");
     std::env::set_var("PI_SANDBOX_BASH_SECCOMP", "1");
 
     pi_sandbox_worker::listener::serve(cli.vsock_port, cli.work_dir).await
@@ -81,17 +63,6 @@ fn main() {
          cloud-hypervisor."
     );
     std::process::exit(2);
-}
-
-/// Read a `key=value` token from `/proc/cmdline`. Returns `None`
-/// when the key is absent or the cmdline isn't readable.
-#[cfg(target_os = "linux")]
-fn read_cmdline_kv(key: &str) -> Option<String> {
-    let cmdline = std::fs::read_to_string("/proc/cmdline").ok()?;
-    let needle = format!("{key}=");
-    cmdline
-        .split_whitespace()
-        .find_map(|tok| tok.strip_prefix(&needle).map(str::to_string))
 }
 
 fn init_tracing(level: &str) {

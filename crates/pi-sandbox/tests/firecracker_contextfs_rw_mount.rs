@@ -176,7 +176,7 @@ async fn firecracker_contextfs_work_mount_write_then_read_back() {
             &ctx,
             &limits,
             "bash",
-            &json!({ "command": "echo '== /proc/mounts (work) ==';                 grep ' /work ' /proc/mounts || echo NO_WORK_MOUNT;                 echo '== /etc/contextfs/contextfsd.toml ==';                 cat /etc/contextfs/contextfsd.toml 2>/dev/null;                 echo '== contextfsd.log ==';                 tail -40 /var/log/contextfsd.log 2>/dev/null;                 echo '== cfs-broker-vsock-bridge.log ==';                 tail -10 /var/log/cfs-broker-vsock-bridge.log 2>/dev/null;                 echo '== /run/contextfs ==';                 ls -la /run/contextfs/ 2>&1" }),
+            &json!({ "command": "grep ' /work ' /proc/mounts || echo NO_WORK_MOUNT" }),
         )
         .await
         .expect("read early diag");

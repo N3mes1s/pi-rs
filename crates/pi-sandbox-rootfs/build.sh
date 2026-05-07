@@ -105,6 +105,38 @@ install -m 0755 "${CFS_BRIDGE_BIN}"        "${ROOT}/usr/local/bin/pi-cfs-vsock-b
 install -m 0755 "${CFS_BROKER_BRIDGE_BIN}" "${ROOT}/usr/local/bin/pi-cfs-broker-vsock-bridge"
 install -m 0755 "${CONTEXTFSD_BIN}"        "${ROOT}/usr/local/bin/contextfsd"
 
+# 4a. Bundle Alpine's fuse3 (fusermount3 + libfuse3.so.3).
+#     contextfs commit 0815009 added MountOption::AutoUnmount
+#     unconditionally; fuser 0.17.0's pure-Rust path routes
+#     AutoUnmount through `fusermount3` to set up the FUSE mount
+#     (SCM_RIGHTS handoff of /dev/fuse). Without the binary the
+#     mount fails ENOENT. Pull the APK from Alpine's repo,
+#     extract, install. Cached after first download.
+ALPINE_FUSE3="fuse3-3.16.2-r0.apk"
+ALPINE_FUSE3_URL="https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/main/${ARCH}/${ALPINE_FUSE3}"
+if [[ ! -f "${OUT_DIR}/cache/${ALPINE_FUSE3}" ]]; then
+  echo "==> Downloading ${ALPINE_FUSE3_URL}"
+  curl --fail --location -o "${OUT_DIR}/cache/${ALPINE_FUSE3}" "${ALPINE_FUSE3_URL}"
+fi
+FUSE3_STAGE="${WORK}/fuse3-stage"
+mkdir -p "${FUSE3_STAGE}"
+tar -xzf "${OUT_DIR}/cache/${ALPINE_FUSE3}" -C "${FUSE3_STAGE}" 2>/dev/null || true
+# Stage layout: usr/bin/fusermount3 + usr/lib/libfuse3.so.3.x.y plus its
+# .so.3 symlink. Mirror into the rootfs.
+if [[ -x "${FUSE3_STAGE}/usr/bin/fusermount3" ]]; then
+  install -m 0755 "${FUSE3_STAGE}/usr/bin/fusermount3" "${ROOT}/usr/bin/fusermount3"
+  # libfuse3 lives at usr/lib/libfuse3.so.3.16.2 with a .so.3 symlink.
+  for lib in "${FUSE3_STAGE}/usr/lib/"libfuse3.so.*; do
+    if [[ -f "${lib}" || -L "${lib}" ]]; then
+      cp -a "${lib}" "${ROOT}/usr/lib/"
+    fi
+  done
+  echo "==> bundled fuse3 (fusermount3 + libfuse3) from ${ALPINE_FUSE3}"
+else
+  echo "ERROR: fuse3 APK extraction failed; fusermount3 missing in ${FUSE3_STAGE}"
+  exit 2
+fi
+
 # 4b. UID separation (RFD 0023 §6 "Bash-can't-bypass" Layer 1).
 #     pi-worker (UID 1000) runs the worker process; pi-tool (UID 1001)
 #     runs every tool subprocess (bash, future tools). Bash can't read
@@ -481,6 +513,14 @@ mountpoint = "/work"
 backend = "remote-fs"
 cache_dir = "/var/cache/contextfs/work"
 read_only = ${MOUNT_RO}
+# Embedder mode: stamp every FUSE reply with the caller's
+# uid/gid so non-mounting UIDs (pi-tool / 1001 — the §6 Layer
+# 1 bash drop-priv) see owner perms on /work. Trust assumption
+# is the single-uid sandbox row of contextfs's threat-model
+# (the microVM IS the security boundary; in-VM UID separation
+# is belt-and-braces). Wired upstream in contextfs commit
+# 0815009.
+caller_uid_passthrough = true
 
 [mount.remote_fs]
 target_uds = "/run/cfs.sock"

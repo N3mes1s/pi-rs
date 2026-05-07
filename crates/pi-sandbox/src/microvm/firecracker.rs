@@ -1041,17 +1041,12 @@ async fn cold_boot(config: &FirecrackerConfig, spec: &VmSpec) -> Result<WarmVm, 
             warn!(err = %e, path = %cedar_path.display(), "write cedar policy failed");
         }
         // Write the SAME hex string the kernel cmdline carries.
-        // contextfs-broker's `load_tenant_secret` reads the file
-        // as text + hex-decodes the first non-blank line into
-        // [u8; 32] (verified against the binary's source). The
-        // in-guest contextfsd's `TenantSecret::from_path` reads
-        // raw bytes and requires len ≥ 32 — 64 ASCII hex chars
-        // satisfy that. Same file → both start. (Note: the two
-        // sides therefore HMAC over different byte sequences —
-        // daemon hashes the 64 ASCII chars, broker hashes the 32
-        // decoded bytes — so RFD-0020 decision-id determinism
-        // would mismatch. v1 demo doesn't trigger AuditResync,
-        // so this is non-blocking; flagged upstream.)
+        // Both contextfs-broker's `load_tenant_secret` and (since
+        // contextfs commit 0815009) contextfsd's
+        // `TenantSecret::from_path` detect 64-hex-chars + decode
+        // to identical [u8; 32]. RFD-0020 decision-id
+        // determinism + RFD-0024 AuditResync both work the moment
+        // broker_high_watermark > 0.
         let secret_payload = format!("{tenant_secret_hex}\n");
         if let Err(e) = std::fs::write(&tenant_secret_path, secret_payload.as_bytes()) {
             warn!(err = %e, path = %tenant_secret_path.display(), "write tenant-secret failed");
@@ -1243,21 +1238,6 @@ fn build_fc_config(
                 " pi.contextfs.rw=1 pi.contextfs.tenant_secret_hex={hex}"
             ));
         }
-    }
-    // Demo escape hatch for the RW /work integration test:
-    // contextfsd's FUSE bridge stamps inode 1 with `0755 root:root`
-    // (Caps::owner_passthrough not yet wired for remote-fs in
-    // contextfs main), so the bash subprocess at UID 1001 can't
-    // write through the mount. Setting PI_SANDBOX_BASH_DROP_PRIV_OFF=1
-    // in the test environment opts the worker into running bash
-    // as root in the guest. Trade-off: loses RFD 0023 §6 Layer 1
-    // for that VM. Default remains drop-priv.
-    if std::env::var("PI_SANDBOX_BASH_DROP_PRIV_OFF")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        boot_args.push_str(" pi.bash_drop_priv=0");
     }
 
     let mut config = serde_json::json!({
