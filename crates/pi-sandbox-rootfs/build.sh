@@ -521,6 +521,14 @@ read_only = ${MOUNT_RO}
 # is belt-and-braces). Wired upstream in contextfs commit
 # 0815009.
 caller_uid_passthrough = true
+# Force SessionACL::All. The contextfs default ("auto") would
+# also pick All here because contextfsd runs as root in the
+# guest, but pinning explicitly is grep-friendly future-proofing
+# in case the daemon ever runs non-root by accident — we'd
+# rather see fusermount3 reject the mount than silently
+# downgrade to Owner-only and break the bash-tool reads.
+# Wired upstream in contextfs commit 8c3b094.
+fuse_acl = "all"
 
 [mount.remote_fs]
 target_uds = "/run/cfs.sock"

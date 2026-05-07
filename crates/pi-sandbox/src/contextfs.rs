@@ -25,4 +25,4 @@
 /// `tests/contextfs_smoke.rs` asserts the contextfs working
 /// tree's `HEAD` equals this string.
 pub const EXPECTED_CONTEXTFS_REV: &str =
-    "0815009673f37b26bdaea73612099dfd28cc23ef";
+    "8c3b094f5db31e4bc5e9d4804961f8169736d650";
