@@ -560,9 +560,13 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
 ///   `/dev/kvm` openable RW, and a Firecracker-compatible kernel + rootfs at
 ///   the paths declared in `pi_sandbox::microvm::FirecrackerConfig` (or via
 ///   `PI_SANDBOX_KERNEL` / `PI_SANDBOX_ROOTFS` env vars).
-///   v1 caveat: no `/work` mount yet — only tools that operate within the
-///   guest rootfs (e.g. `bash 'uname -a'`) succeed end-to-end. Reads/writes
-///   to host paths return errors until contextfs `/work` lands (Commit G3).
+///
+///   `host_cwd` is mounted at `/work` inside the guest via contextfs's
+///   remote-fs backend (RO by default; set `PI_SANDBOX_CONTEXTFS_RW=1`
+///   to enable broker-mediated RW). RW mode additionally requires
+///   `contextfs-broker` on PATH (`PI_SANDBOX_CONTEXTFS_BROKER_BIN` env
+///   override) and `cfs-fs-server` (`PI_SANDBOX_CFS_FS_SERVER_BIN`).
+///   `pi sandbox doctor` reports availability of each.
 pub fn install_sandbox_from_flag(
     cfg: &mut RuntimeConfig,
     kind: &str,

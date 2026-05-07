@@ -99,6 +99,65 @@ pub async fn run_sandbox_doctor() -> anyhow::Result<i32> {
             println!("  → {r}");
         }
     }
+
+    // Contextfs runtime deps (host_cwd → /work mount). These are
+    // optional in the sense that microvm boots without them; the
+    // mount inside the guest just won't be there. Surface availability
+    // so an operator running `pi sandbox doctor` before
+    // `--sandbox-provider=microvm:firecracker` knows whether the agent
+    // will see host_cwd at /work or not.
+    println!();
+    println!("Contextfs (host_cwd → /work mount):");
+    for (label, env, name) in [
+        (
+            "cfs-fs-server",
+            "PI_SANDBOX_CFS_FS_SERVER_BIN",
+            "cfs-fs-server",
+        ),
+        (
+            "contextfs-broker (RW only)",
+            "PI_SANDBOX_CONTEXTFS_BROKER_BIN",
+            "contextfs-broker",
+        ),
+    ] {
+        let resolved = std::env::var(env)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.exists())
+            .or_else(|| which::which(name).ok());
+        match resolved {
+            Some(p) => println!("  ✓ {label} — {}", p.display()),
+            None => println!(
+                "  ✗ {label} — missing (set {env} or put `{name}` on PATH)"
+            ),
+        }
+    }
+    if std::env::var("PI_SANDBOX_CONTEXTFS_RW").ok().as_deref() == Some("1") {
+        println!("  RW mode: PI_SANDBOX_CONTEXTFS_RW=1 (broker-gated writes)");
+    } else {
+        println!("  RW mode: off (set PI_SANDBOX_CONTEXTFS_RW=1 to enable)");
+    }
+
+    // Rootfs + kernel artifacts. The launcher resolves these via env
+    // vars at acquire-time; surface their resolution upfront.
+    println!();
+    println!("Rootfs / kernel artifacts:");
+    for (label, env) in [
+        ("kernel (vmlinux)", "PI_SANDBOX_KERNEL"),
+        ("rootfs (.img)", "PI_SANDBOX_ROOTFS"),
+    ] {
+        match std::env::var(env).ok().filter(|s| !s.is_empty()) {
+            Some(p) if std::path::Path::new(&p).exists() => {
+                println!("  ✓ {label} — {p}")
+            }
+            Some(p) => println!("  ✗ {label} — {env}={p} not found on disk"),
+            None => println!(
+                "  ✗ {label} — {env} not set (build with `bash crates/pi-sandbox-rootfs/build.sh`)"
+            ),
+        }
+    }
+
     println!();
     println!("Network policy (`NetworkPolicy::Allow`) is opt-in; the four advisory");
     println!("checks above (pasta, nft, unprivileged userns, TAP-in-userns) only");
