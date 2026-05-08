@@ -240,7 +240,7 @@ mount -t tmpfs -o size=64m,mode=1777   tmpfs /tmp  2>/dev/null
 mount -t tmpfs -o size=16m,mode=0700   tmpfs /root 2>/dev/null
 mount -t tmpfs -o size=8m,mode=0755    tmpfs /run  2>/dev/null
 mount -t tmpfs -o size=16m,mode=0755   tmpfs /var  2>/dev/null
-expected_proto=1
+expected_proto=2
 cmdline_proto=\$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.proto_version=//p')
 if [ -n "\$cmdline_proto" ] && [ "\$cmdline_proto" != "\$expected_proto" ]; then
   echo "FATAL: proto_version mismatch (expected \$expected_proto, kernel cmdline says \$cmdline_proto)"
@@ -273,7 +273,7 @@ mount -t tmpfs -o size=64m,mode=1777   tmpfs /tmp  2>/dev/null
 mount -t tmpfs -o size=16m,mode=0700   tmpfs /root 2>/dev/null
 mount -t tmpfs -o size=8m,mode=0755    tmpfs /run  2>/dev/null
 mount -t tmpfs -o size=16m,mode=0755   tmpfs /var  2>/dev/null
-expected_proto=1
+expected_proto=2
 cmdline_proto=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.proto_version=//p')
 if [ -n "$cmdline_proto" ] && [ "$cmdline_proto" != "$expected_proto" ]; then
   echo "FATAL: proto_version mismatch (expected $expected_proto, kernel cmdline says $cmdline_proto)"
@@ -318,7 +318,7 @@ if [ -n "$net_ip" ] && [ -n "$net_gw" ]; then
   fi
 fi
 
-expected_proto=1
+expected_proto=2
 cmdline_proto=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^pi\.proto_version=//p')
 if [ -n "$cmdline_proto" ] && [ "$cmdline_proto" != "$expected_proto" ]; then
   echo "FATAL: proto_version mismatch (expected $expected_proto, kernel cmdline says $cmdline_proto)"

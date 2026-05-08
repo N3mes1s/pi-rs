@@ -28,19 +28,30 @@
 //!    the outer worker guard timeout to that value + 1000 ms. The overall
 //!    worst-case latency is `ceil(timeout_ms / 1000) + 1` seconds.
 
-use pi_sandbox_protocol::{ToolRequest, ToolResponse};
+use pi_sandbox_protocol::{FileWrite, ToolRequest, ToolResponse};
 use pi_search_proto::{
     self as search_proto, FramingError, WebSearchRequest, WebSearchResponse, CURRENT_PROTO_VERSION,
     DEFAULT_MAX_LINE_BYTES, HOST_CID, VSOCK_SEARCH_PORT,
 };
 use pi_tools_core::{ToolContext, ToolRegistry};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 use tokio::io::BufReader;
 use tracing::warn;
 
 static REGISTRY: OnceLock<ToolRegistry> = OnceLock::new();
+
+/// Set to true when the worker is running in one-shot stdin/stdout mode
+/// (--transport stdin, for the E2B remote sandbox path). Disables the
+/// vsock-based web_search proxy which is incompatible with the remote path.
+static IS_STDIN_TRANSPORT: AtomicBool = AtomicBool::new(false);
+
+/// Called once from main() before the first dispatch (when --transport stdin).
+pub fn set_stdin_transport(v: bool) {
+    IS_STDIN_TRANSPORT.store(v, Ordering::Relaxed);
+}
 
 fn registry() -> &'static ToolRegistry {
     REGISTRY.get_or_init(ToolRegistry::with_unsafe_extras)
@@ -212,6 +223,7 @@ async fn proxy_web_search(req: ToolRequest) -> ToolResponse {
             exit_status: 1,
             guest_duration_ms: started.elapsed().as_millis() as u32,
             is_error: true,
+            file_writes: vec![],
         };
     };
     let provider = req
@@ -240,6 +252,7 @@ async fn proxy_web_search(req: ToolRequest) -> ToolResponse {
             exit_status: 0,
             guest_duration_ms: started.elapsed().as_millis() as u32,
             is_error: false,
+            file_writes: vec![],
         },
         Ok(resp) => {
             let err = resp.error.unwrap_or_default();
@@ -255,6 +268,7 @@ async fn proxy_web_search(req: ToolRequest) -> ToolResponse {
                 exit_status: 1,
                 guest_duration_ms: started.elapsed().as_millis() as u32,
                 is_error: true,
+                file_writes: vec![],
             }
         }
         Err(e) => {
@@ -267,6 +281,7 @@ async fn proxy_web_search(req: ToolRequest) -> ToolResponse {
                 exit_status: 1,
                 guest_duration_ms: started.elapsed().as_millis() as u32,
                 is_error: true,
+                file_writes: vec![],
             }
         }
     }
@@ -383,13 +398,29 @@ pub async fn dispatch_request(req: ToolRequest, work_dir: &Path) -> ToolResponse
     // `pre_call_hygiene` doc-comment for what's NOT cleaned and why.
     pre_call_hygiene().await;
 
-    // `web_search` is special: not a guest-side tool. The handler
-    // proxies the call out to the host over vsock(HOST_CID,
-    // VSOCK_SEARCH_PORT) so the upstream API key never enters the
-    // guest. See RFD 0023 §"web_search via vsock proxy".
+    // `web_search` is special: not a guest-side tool. In vsock mode it
+    // proxies the call out to the host (RFD 0023 §"web_search via vsock proxy").
+    // In stdin/stdout mode (E2B remote sandbox) vsock is not available, so
+    // return a clean "not available" error instead of a cryptic connection failure.
     if req.tool_name == "web_search" {
+        if IS_STDIN_TRANSPORT.load(Ordering::Relaxed) {
+            let msg = "web_search is not available in remote sandbox mode".to_string();
+            return ToolResponse {
+                call_id,
+                stdout: msg.clone(),
+                stderr: msg,
+                exit_status: 1,
+                guest_duration_ms: 0,
+                is_error: true,
+                file_writes: vec![],
+            };
+        }
         return proxy_web_search(req).await;
     }
+
+    // Remember tool name and path input for file_writes flushback (write/edit).
+    let tool_name = req.tool_name.clone();
+    let path_input = req.tool_input.get("path").and_then(|v| v.as_str()).map(str::to_string);
 
     // Look up the tool by name.
     let Some(tool) = registry().get(&req.tool_name) else {
@@ -401,6 +432,7 @@ pub async fn dispatch_request(req: ToolRequest, work_dir: &Path) -> ToolResponse
             exit_status: 1,
             guest_duration_ms: 0,
             is_error: true,
+            file_writes: vec![],
         };
     };
 
@@ -415,6 +447,7 @@ pub async fn dispatch_request(req: ToolRequest, work_dir: &Path) -> ToolResponse
             exit_status: 1,
             guest_duration_ms: 0,
             is_error: true,
+            file_writes: vec![],
         };
     }
 
@@ -445,13 +478,47 @@ pub async fn dispatch_request(req: ToolRequest, work_dir: &Path) -> ToolResponse
                 .and_then(|v| v.as_i64())
                 .map(|n| n as i32)
                 .unwrap_or(if result.is_error { 1 } else { 0 });
-            ToolResponse {
-                call_id,
-                stdout: result.model_output,
-                stderr: String::new(),
-                exit_status,
-                guest_duration_ms: 0, // listener overrides
-                is_error: result.is_error,
+
+            // For write/edit tools in stdin-transport mode, populate file_writes
+            // so the host can flush the mutation back to the local directory.
+            // Per RFD 0026: max 32 KiB per file; bash always returns empty vec.
+            // collect_file_writes returns Err(msg) when the file exceeds the cap,
+            // which we convert to an is_error ToolResponse here (the enforcement
+            // point per RFD 0026 §"Size cap and fallback").
+            if IS_STDIN_TRANSPORT.load(Ordering::Relaxed)
+                && !result.is_error
+                && matches!(tool_name.as_str(), "write" | "edit")
+            {
+                match collect_file_writes(path_input.as_deref(), work_dir) {
+                    Ok(file_writes) => ToolResponse {
+                        call_id,
+                        stdout: result.model_output,
+                        stderr: String::new(),
+                        exit_status,
+                        guest_duration_ms: 0, // listener overrides
+                        is_error: result.is_error,
+                        file_writes,
+                    },
+                    Err(too_large_msg) => ToolResponse {
+                        call_id,
+                        stdout: too_large_msg.clone(),
+                        stderr: too_large_msg,
+                        exit_status: 1,
+                        guest_duration_ms: 0,
+                        is_error: true,
+                        file_writes: vec![],
+                    },
+                }
+            } else {
+                ToolResponse {
+                    call_id,
+                    stdout: result.model_output,
+                    stderr: String::new(),
+                    exit_status,
+                    guest_duration_ms: 0, // listener overrides
+                    is_error: result.is_error,
+                    file_writes: vec![],
+                }
             }
         }
         Ok(Err(e)) => {
@@ -463,6 +530,7 @@ pub async fn dispatch_request(req: ToolRequest, work_dir: &Path) -> ToolResponse
                 exit_status: 1,
                 guest_duration_ms: 0,
                 is_error: true,
+                file_writes: vec![],
             }
         }
         Err(_) => {
@@ -474,7 +542,104 @@ pub async fn dispatch_request(req: ToolRequest, work_dir: &Path) -> ToolResponse
                 exit_status: 124, // standard timeout exit code
                 guest_duration_ms: 0,
                 is_error: true,
+                file_writes: vec![],
             }
         }
     }
+}
+
+// --------------------------------------------------------------------------
+// file_writes helpers (RFD 0026 proto v2)
+// --------------------------------------------------------------------------
+
+/// Per-file size cap for inline flushback (32 KiB unencoded, ~43 KiB base64).
+const FILE_WRITE_MAX_BYTES: u64 = 32 * 1024;
+
+/// Collect file_writes for a write/edit tool call.
+///
+/// Returns `Ok(vec)` with the inline base64 payload for the output path, or
+/// `Ok(vec![])` when the file doesn't exist / can't be read (silent skip).
+/// Returns `Err(message)` when the file exceeds the 32 KiB size cap so the
+/// caller can convert that into an `is_error = true` ToolResponse per RFD 0026
+/// §"Size cap and fallback". No sentinel `FileWrite` is ever returned in the
+/// `Ok` case.
+fn collect_file_writes(
+    path_input: Option<&str>,
+    work_dir: &Path,
+) -> Result<Vec<FileWrite>, String> {
+    use base64::Engine as _;
+    use pi_sandbox_protocol::FileWrite;
+
+    let Some(path_str) = path_input else {
+        return Ok(vec![]);
+    };
+
+    // Resolve path the same way validate_paths does: relative to work_dir.
+    let expanded = shellexpand::tilde(path_str).into_owned();
+    let raw = if std::path::Path::new(&expanded).is_absolute() {
+        PathBuf::from(expanded)
+    } else {
+        work_dir.join(expanded)
+    };
+
+    // Normalize `..` and `.` components (without filesystem access) so that
+    // the relative path serialized into `file_writes.path` is clean and passes
+    // the host-side `validate_flushback_path` check.  A path like
+    // `src/../foo.rs` must be serialized as `foo.rs`, not `src/../foo.rs`,
+    // otherwise the host rejects it with "contains '..' component" and
+    // poisons the session for a valid write/edit call.
+    let mut parts: Vec<std::path::Component<'_>> = Vec::new();
+    for component in raw.components() {
+        use std::path::Component;
+        match component {
+            Component::ParentDir => {
+                parts.pop();
+            }
+            Component::CurDir => {}
+            other => parts.push(other),
+        }
+    }
+    let resolved: PathBuf = parts.iter().collect();
+
+    // Read the file — if it doesn't exist or can't be read, return empty (not an error).
+    let bytes = match std::fs::read(&resolved) {
+        Ok(b) => b,
+        Err(_) => return Ok(vec![]),
+    };
+
+    // Enforce 32 KiB size cap (per RFD 0026 §"Size cap and fallback").
+    // Return Err so the call site can emit is_error=true rather than a
+    // fake FileWrite sentinel that the host would misinterpret.
+    if bytes.len() as u64 > FILE_WRITE_MAX_BYTES {
+        return Err(format!(
+            "remote sync error: file too large for inline flushback ({} bytes); \
+             use bash to split or compress first",
+            bytes.len()
+        ));
+    }
+
+    // Compute the relative path (strip work_dir prefix).
+    let rel = resolved.strip_prefix(work_dir).unwrap_or(&resolved);
+
+    // Read Unix permissions (default 0o644 if unavailable).
+    let mode = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(&resolved)
+                .map(|m| m.permissions().mode())
+                .unwrap_or(0o644)
+        }
+        #[cfg(not(unix))]
+        {
+            0o644
+        }
+    };
+
+    let contents_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(vec![FileWrite {
+        path: rel.to_string_lossy().to_string(),
+        contents_b64,
+        mode,
+    }])
 }

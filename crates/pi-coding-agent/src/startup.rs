@@ -612,9 +612,27 @@ pub fn install_sandbox_from_flag(
         "microvm:firecracker" => anyhow::bail!(
             "microvm:firecracker is Linux-only; not available on this platform"
         ),
+        "e2b" => {
+            // Construct E2bProvider: key resolution checks E2B_API_KEY env
+            // first, then cfg.auth_storage.get("e2b") (RFD 0026 §"Auth").
+            // Worker binary resolution and network activity are deferred to
+            // the first execute_tool() call (lazy session open per RFD 0026).
+            let provider = pi_sandbox::E2bProvider::from_auth(&cfg.auth_storage)
+                .map_err(|e| anyhow::anyhow!("E2B sandbox provider: {e}"))?;
+            cfg.sandbox_provider =
+                Some(std::sync::Arc::new(provider) as std::sync::Arc<dyn pi_sandbox::SandboxProvider>);
+            // Append the remote-sandbox note to the system prompt so the agent
+            // understands the flushback model (RFD 0026 §"File-mutation flushback").
+            let note = "\nNote: working in a remote E2B sandbox. File mutations made via \
+                        the `write` and `edit` tools are synced back to your local directory. \
+                        Shell (`bash`) changes to files are NOT automatically synced — use \
+                        `write` or `edit` to persist changes that need to be reflected locally.";
+            cfg.system_prompt.push_str(note);
+            Ok(())
+        }
         other => anyhow::bail!(
             "unknown sandbox provider '{}' — expected one of: \
-             local-process, microvm:firecracker",
+             local-process, microvm:firecracker, e2b",
             other
         ),
     }

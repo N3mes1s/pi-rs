@@ -4,6 +4,10 @@ use crate::startup::Startup;
 
 /// JSON event stream mode: emit one event per line, JSON encoded.
 pub async fn run(startup: Startup) -> anyhow::Result<()> {
+    // Clone the sandbox_provider Arc early so we can call cleanup() at exit
+    // even after `startup` is partially consumed. (RFD 0026 §"Session lifecycle")
+    let sandbox_provider = startup.runtime_config.sandbox_provider.clone();
+
     let (session, mut rx) = build_session(&startup)?;
 
     // If a prompt template was specified, resolve it and use it as the sole
@@ -70,6 +74,14 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
         &session_id,
     )
     .await;
+
+    // Cleanup remote sandbox (e.g. E2B) at mode exit. Best-effort: errors are
+    // logged as warnings and do not fail the mode. (RFD 0026 §"Session lifecycle")
+    if let Some(sp) = sandbox_provider {
+        if let Err(e) = sp.cleanup().await {
+            tracing::warn!(err = %e, "sandbox cleanup failed at json-mode exit");
+        }
+    }
 
     Ok(())
 }

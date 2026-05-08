@@ -3,9 +3,13 @@
 
 use rusqlite::Connection;
 
-pub const CURRENT_VERSION: i64 = 1;
+pub const CURRENT_VERSION: i64 = 2;
 
 pub fn ensure(conn: &Connection) -> rusqlite::Result<()> {
+    // Step 1: run the baseline DDL (creates tables if they don't exist).
+    // `INSERT OR IGNORE INTO schema_version VALUES (1)` runs on every call;
+    // after migration the table holds rows {1, 2}. Use `SELECT MAX(version)`
+    // so the gate is stable regardless of how many rows are present.
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS schema_version (
@@ -96,5 +100,31 @@ pub fn ensure(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_sandbox_ts        ON sandbox_actions(timestamp_ms);
         "#,
     )?;
+
+    // Step 2: apply incremental migrations by version.
+    // Use MAX(version) so the result is stable even when the bootstrap
+    // INSERT OR IGNORE re-inserts row 1 on each call.
+    let version: i64 = conn
+        .query_row(
+            "SELECT MAX(version) FROM schema_version",
+            [],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .unwrap_or(None)
+        .unwrap_or(0);
+
+    if version < 2 {
+        // SQLite ALTER TABLE ADD COLUMN is not idempotent; the `version < 2`
+        // gate ensures this block runs exactly once per database.
+        // Adds cost_usd and round_trip_ms to sandbox_actions (RFD 0026).
+        conn.execute_batch(
+            r#"
+            ALTER TABLE sandbox_actions ADD COLUMN cost_usd      REAL;
+            ALTER TABLE sandbox_actions ADD COLUMN round_trip_ms INTEGER;
+            INSERT OR REPLACE INTO schema_version VALUES (2);
+            "#,
+        )?;
+    }
+
     Ok(())
 }

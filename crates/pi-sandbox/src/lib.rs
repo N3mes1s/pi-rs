@@ -12,6 +12,7 @@ pub mod contextfs;
 pub mod local;
 pub mod microvm;
 pub mod provider;
+pub mod remote;
 
 pub use cache::RootfsCache;
 pub use local::LocalProcessProvider;
@@ -20,3 +21,4 @@ pub use microvm::{
     RootfsVersion, VmCeiling, VmExecution, VmHandle, VmSpec,
 };
 pub use provider::{SandboxError, SandboxExecution, SandboxProvider};
+pub use remote::e2b::E2bProvider;

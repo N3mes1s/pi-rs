@@ -118,6 +118,8 @@ impl SandboxProvider for LocalProcessProvider {
             stdout: result.model_output,
             stderr: String::new(),
             exit_status: if result.is_error { 1 } else { 0 },
+            round_trip_ms: None,
+            cost_usd: None,
         })
     }
 }

@@ -28,6 +28,7 @@ fn sample_response() -> ToolResponse {
         exit_status: 0,
         guest_duration_ms: 42,
         is_error: false,
+        file_writes: vec![],
     }
 }
 
@@ -283,6 +284,7 @@ async fn read_response_with_max_rejects_oversized_response_frame() {
         exit_status: 0,
         guest_duration_ms: 1,
         is_error: false,
+        file_writes: vec![],
     };
     let mut line = serde_json::to_vec(&resp).expect("serialise");
     line.push(b'\n');
@@ -322,6 +324,7 @@ async fn read_response_with_max_separates_frame_cap_from_stdout_cap() {
         exit_status: 0,
         guest_duration_ms: 1,
         is_error: false,
+        file_writes: vec![],
     };
     let mut line = serde_json::to_vec(&resp).expect("serialise");
     line.push(b'\n');
@@ -357,6 +360,7 @@ async fn read_response_with_max_rejects_stdout_exceeding_negotiated_cap() {
         exit_status: 0,
         guest_duration_ms: 1,
         is_error: false,
+        file_writes: vec![],
     };
     let mut line = serde_json::to_vec(&resp).expect("serialise");
     line.push(b'\n');

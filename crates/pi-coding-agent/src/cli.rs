@@ -42,6 +42,9 @@ pub struct Cli {
     ///     openable RW, and PI_SANDBOX_KERNEL/PI_SANDBOX_ROOTFS env. Run
     ///     `pi --sandbox doctor` to verify the host setup + contextfs
     ///     runtime deps (cfs-fs-server, contextfs-broker).
+    ///   `e2b` — routes tool calls through an E2B remote sandbox (RFD 0026).
+    ///     Requires E2B_API_KEY env var and PI_SANDBOX_WORKER_BIN pointing
+    ///     to a statically-linked pi-sandbox-worker binary.
     #[arg(long = "sandbox-provider", value_name = "KIND")]
     pub sandbox_provider: Option<String>,
 

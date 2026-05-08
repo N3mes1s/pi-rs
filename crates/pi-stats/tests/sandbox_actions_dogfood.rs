@@ -53,6 +53,8 @@ fn action(
             duration_ms,
             exit_status,
             is_error: exit_status != 0,
+            cost_usd: None,
+            round_trip_ms: None,
         },
     }
 }

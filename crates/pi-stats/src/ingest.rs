@@ -144,6 +144,8 @@ fn ingest_one(conn: &Connection, path: &Path) -> anyhow::Result<u64> {
                 duration_ms,
                 exit_status,
                 is_error,
+                cost_usd,
+                round_trip_ms,
             } => {
                 if let Some(meta) = &session_meta {
                     let n = insert_sandbox_action(
@@ -157,6 +159,8 @@ fn ingest_one(conn: &Connection, path: &Path) -> anyhow::Result<u64> {
                         *duration_ms,
                         *exit_status,
                         *is_error,
+                        *cost_usd,
+                        *round_trip_ms,
                     )?;
                     inserted += n;
                 }
@@ -266,12 +270,15 @@ fn insert_sandbox_action(
     duration_ms: u64,
     exit_status: i32,
     is_error: bool,
+    cost_usd: Option<f64>,
+    round_trip_ms: Option<u32>,
 ) -> rusqlite::Result<u64> {
     let n = conn.execute(
         "INSERT OR IGNORE INTO sandbox_actions (
             session_file, entry_id, folder, timestamp_ms,
-            provider, tool_name, duration_ms, exit_status, is_error
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            provider, tool_name, duration_ms, exit_status, is_error,
+            cost_usd, round_trip_ms
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             session_file,
             entry_id,
@@ -282,6 +289,8 @@ fn insert_sandbox_action(
             duration_ms as i64,
             exit_status,
             if is_error { 1i64 } else { 0i64 },
+            cost_usd,
+            round_trip_ms.map(|v| v as i64),
         ],
     )?;
     Ok(n as u64)

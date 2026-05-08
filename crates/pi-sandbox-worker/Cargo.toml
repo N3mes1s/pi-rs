@@ -53,6 +53,7 @@ pi-tools-core.workspace = true
 pi-search-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+base64.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

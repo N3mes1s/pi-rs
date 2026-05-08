@@ -111,6 +111,7 @@ impl AuthStorage {
         ("ollama", "OLLAMA_API_KEY"),
         ("kimi", "MOONSHOT_API_KEY"),
         ("minimax", "MINIMAX_API_KEY"),
+        ("e2b", "E2B_API_KEY"),
     ];
 
     /// Per RFD 0027 §4.5 #8 (Hardening H5): opt-in env scanning.

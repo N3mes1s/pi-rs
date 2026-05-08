@@ -8,6 +8,10 @@ use crate::startup::Startup;
 /// Bidirectional RPC mode. Reads JSONL commands from stdin, writes JSONL
 /// events to stdout. One message per line.
 pub async fn run(startup: Startup) -> anyhow::Result<()> {
+    // Clone the sandbox_provider Arc early so we can call cleanup() at exit
+    // even after `startup` is partially consumed. (RFD 0026 §"Session lifecycle")
+    let sandbox_provider = startup.runtime_config.sandbox_provider.clone();
+
     let (session, mut rx) = build_session(&startup)?;
 
     let stdout = std::io::stdout();
@@ -67,12 +71,26 @@ pub async fn run(startup: Startup) -> anyhow::Result<()> {
     }
     printer.abort();
 
+    // Abort any in-flight prompt task before cleaning up the sandbox.
+    // Per RFD 0026 §"Concurrent prompt draining before cleanup": abort sets
+    // the aborted flag at the next loop boundary; cleanup races the last
+    // in-flight tool call (acceptable; E2B timeout backstop handles the rest).
+    session.abort().await;
+
     let _ = crate::native::trajectory::finalize_for_runtime(
         &startup.runtime_config,
         &startup.settings,
         session.id(),
     )
     .await;
+
+    // Cleanup remote sandbox (e.g. E2B) at mode exit. Best-effort: errors are
+    // logged as warnings and do not fail the mode. (RFD 0026 §"Session lifecycle")
+    if let Some(sp) = sandbox_provider {
+        if let Err(e) = sp.cleanup().await {
+            tracing::warn!(err = %e, "sandbox cleanup failed at rpc-mode exit");
+        }
+    }
 
     Ok(())
 }

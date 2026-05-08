@@ -64,6 +64,8 @@ impl SandboxProvider for AuditSandbox {
             stdout: format!("[AUDIT] would run: {tool_name}"),
             stderr: String::new(),
             exit_status: 0,
+            round_trip_ms: None,
+            cost_usd: None,
         })
     }
 }

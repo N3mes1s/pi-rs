@@ -25,9 +25,13 @@ pi-search-proto.workspace = true
 # instead; the build.sh script in crates/pi-sandbox-rootfs has the
 # same constant on its `VERSION=` line and must be bumped in lockstep.
 pi-sandbox-protocol.workspace = true
+pi-ai.workspace = true
 dirs.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
+base64.workspace = true
+ignore.workspace = true
 futures.workspace = true
+percent-encoding.workspace = true
 sha2.workspace = true
 hex.workspace = true
 uuid.workspace = true

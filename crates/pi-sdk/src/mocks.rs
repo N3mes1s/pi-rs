@@ -288,6 +288,8 @@ impl SandboxProvider for MockSandboxProvider {
             stdout: self.response_stdout.lock().unwrap().clone(),
             stderr: self.response_stderr.lock().unwrap().clone(),
             exit_status: *self.response_exit.lock().unwrap(),
+            round_trip_ms: None,
+            cost_usd: None,
         })
     }
 }

@@ -10,6 +10,18 @@
 
 use clap::Parser;
 
+/// Transport mode for the worker.
+///
+/// `Vsock` (default): listen for incoming connections on the given vsock port.
+/// `Stdin`: one-shot mode for remote sandbox transports (E2B, RFD 0026).
+///   Reads one ToolRequest from stdin, writes one ToolResponse to stdout, exits.
+#[derive(clap::ValueEnum, Clone, Debug, Default)]
+enum Transport {
+    #[default]
+    Vsock,
+    Stdin,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "pi-sandbox-worker", version)]
 struct Cli {
@@ -24,6 +36,10 @@ struct Cli {
     /// Optional log level (off, error, warn, info, debug, trace).
     #[arg(long = "log-level", default_value = "info")]
     log_level: String,
+    /// Transport mode: vsock (default, microVM path) or stdin (one-shot,
+    /// for E2B remote sandbox — RFD 0026).
+    #[arg(long = "transport", default_value = "vsock")]
+    transport: Transport,
 }
 
 #[cfg(target_os = "linux")]
@@ -51,7 +67,14 @@ async fn main() -> anyhow::Result<()> {
     std::env::set_var("PI_SANDBOX_BASH_DROP_PRIV", "1");
     std::env::set_var("PI_SANDBOX_BASH_SECCOMP", "1");
 
-    pi_sandbox_worker::listener::serve(cli.vsock_port, cli.work_dir).await
+    match cli.transport {
+        Transport::Vsock => {
+            pi_sandbox_worker::listener::serve(cli.vsock_port, cli.work_dir).await
+        }
+        Transport::Stdin => {
+            pi_sandbox_worker::listener::serve_stdio(cli.work_dir).await
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]

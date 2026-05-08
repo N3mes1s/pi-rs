@@ -7,7 +7,7 @@ use pi_ai::{
     OpenAiCompatProvider, OpenAiProvider, Provider, ProviderConfig, ProviderKind, Role,
     ThinkingLevel, ToolCall, ToolResult, Usage,
 };
-use pi_sandbox::SandboxProvider;
+use pi_sandbox::{SandboxExecution, SandboxProvider};
 use pi_tools::{ToolContext, ToolRegistry};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1685,7 +1685,7 @@ impl AgentSession {
                     // errors for tools like `lsp` and `monitor`
                     // that can't run in microvm-shaped sandboxes.
                     let started = std::time::Instant::now();
-                    let res = if sandbox.honors_tool_dispatch() {
+                    let sandbox_res = if sandbox.honors_tool_dispatch() {
                         match tool.dispatch() {
                             pi_tools::ToolDispatch::Unavailable { reason } => {
                                 Err(format!(
@@ -1707,9 +1707,9 @@ impl AgentSession {
                     let duration_ms = started.elapsed().as_millis() as u64;
                     // Telemetry row goes BEFORE the ToolResult so analyses
                     // that join action↔result by ordinal still line up.
-                    let (exit_status, is_error) = match &res {
-                        Ok(r) => (if r.is_error { 1 } else { 0 }, r.is_error),
-                        Err(_) => (1, true),
+                    let (exit_status, is_error, cost_usd, round_trip_ms) = match &sandbox_res {
+                        Ok((r, exec)) => (exec.exit_status, r.is_error, exec.cost_usd, exec.round_trip_ms),
+                        Err(_) => (1, true, None, None),
                     };
                     let _ = self.cfg.session_manager.append(
                         &self.id,
@@ -1719,9 +1719,12 @@ impl AgentSession {
                             duration_ms,
                             exit_status,
                             is_error,
+                            cost_usd,
+                            round_trip_ms,
                         },
                     );
-                    res
+                    // Unwrap ToolResult from the tuple for the rest of the call path.
+                    sandbox_res.map(|(tool_result, _exec)| tool_result)
                 } else {
                     // Per Hardening §4.5 #1 (RFD 0027): wrap
                     // `tool.invoke()` in `AssertUnwindSafe(...).catch_unwind()`
@@ -1811,20 +1814,26 @@ impl AgentSession {
 
     /// Dispatch one tool decision through the configured sandbox provider
     /// and reshape its `(stdout, stderr, exit_status)` output into a
-    /// standard `ToolResult`. Telemetry emission happens in the caller.
+    /// standard `ToolResult`. Returns the `SandboxExecution` alongside so
+    /// the call site can thread `cost_usd` / `round_trip_ms` into
+    /// `SandboxAction` telemetry (RFD 0026). Telemetry emission happens
+    /// in the caller.
     async fn invoke_via_sandbox(
         &self,
         provider: &dyn SandboxProvider,
         ctx: &ToolContext,
         call: &ToolCall,
-    ) -> Result<ToolResult, String> {
+    ) -> Result<(ToolResult, SandboxExecution), String> {
         match provider.execute_tool(ctx, &call.name, &call.input).await {
-            Ok(exec) => Ok(ToolResult {
-                tool_use_id: call.id.clone(),
-                model_output: exec.stdout,
-                display: None,
-                is_error: exec.exit_status != 0,
-            }),
+            Ok(exec) => {
+                let result = ToolResult {
+                    tool_use_id: call.id.clone(),
+                    model_output: exec.stdout.clone(),
+                    display: None,
+                    is_error: exec.exit_status != 0,
+                };
+                Ok((result, exec))
+            }
             Err(e) => Err(e.to_string()),
         }
     }

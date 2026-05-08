@@ -126,6 +126,8 @@ impl SandboxProvider for MicroVmProvider {
             stdout: model_output,
             stderr: String::new(), // raw stderr not surfaced separately; v0.41 fixes this
             exit_status: if is_error { 1 } else { 0 },
+            round_trip_ms: None,
+            cost_usd: None,
         })
     }
 }

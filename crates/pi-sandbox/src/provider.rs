@@ -19,6 +19,14 @@ pub struct SandboxExecution {
     pub stderr: String,
     /// 0 on success, non-zero on failure.
     pub exit_status: i32,
+    /// Remote-only: E2B API call round-trip latency (ms).
+    /// `None` for local-process and microVM providers.
+    #[serde(default)]
+    pub round_trip_ms: Option<u32>,
+    /// Remote-only: estimated per-call cost in USD
+    /// (compute_rate × elapsed). `None` for local providers.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
 }
 
 /// Error types produced by a `SandboxProvider`.
@@ -42,6 +50,10 @@ pub enum SandboxError {
     RootfsMismatch { expected: String, found: String },
     #[error("tool '{tool}' unavailable in sandbox: {reason}")]
     ToolUnavailable { tool: String, reason: &'static str },
+    #[error("remote sandbox rate limited; retry after {retry_after_secs}s")]
+    RateLimited { retry_after_secs: u32 },
+    #[error("remote sandbox billing exceeded or account suspended: {0}")]
+    BillingError(String),
 }
 
 /// An isolation boundary for tool execution.

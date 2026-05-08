@@ -95,6 +95,12 @@ pub enum SessionEntryKind {
         exit_status: i32,
         #[serde(default)]
         is_error: bool,
+        /// Remote-only: estimated per-call cost in USD. `None` for local providers.
+        #[serde(default)]
+        cost_usd: Option<f64>,
+        /// Remote-only: API call round-trip latency in ms. `None` for local providers.
+        #[serde(default)]
+        round_trip_ms: Option<u32>,
     },
     /// Per RFD 0027 §4.5 #10 (Hardening H6): synthetic-user message
     /// injected mid-stream by a `StreamInterceptor`'s `AbortAndInject`

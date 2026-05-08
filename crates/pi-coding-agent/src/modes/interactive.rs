@@ -1311,6 +1311,10 @@ fn render_hotkeys_body(km: &crate::keymap::Keymap) -> String {
 // ─── main TUI loop ─────────────────────────────────────────────────────────
 
 async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
+    // Clone the sandbox_provider Arc early so we can call cleanup() at exit.
+    // (RFD 0026 §"Session lifecycle and cleanup")
+    let sandbox_provider = startup.runtime_config.sandbox_provider.clone();
+
     // Use the pre-built slash registry from startup (includes extension commands).
     let slash = std::mem::replace(&mut startup.slash_registry, SlashRegistry::new());
 
@@ -1595,6 +1599,22 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
     // Print resume hint AFTER the RawGuard drops (terminal restored).
     let session_id = session.id().to_string();
     drop(_guard);
+
+    // Abort any in-flight prompt task before cleaning up the sandbox.
+    // Per RFD 0026 §"Concurrent prompt draining before cleanup": abort sets
+    // the aborted flag at the next loop boundary; cleanup may race the last
+    // in-flight tool call (acceptable; E2B timeout backstop handles the rest).
+    session.abort().await;
+
+    // Cleanup remote sandbox (e.g. E2B) before trajectory finalize so that
+    // any sandbox-leak warning appears before the user's resume hint.
+    // Best-effort: errors are logged as warnings and do not fail the mode.
+    // (RFD 0026 §"Session lifecycle and cleanup")
+    if let Some(ref sp) = sandbox_provider {
+        if let Err(e) = sp.cleanup().await {
+            tracing::warn!(err = %e, "sandbox cleanup failed at interactive-mode exit");
+        }
+    }
 
     // Trajectory finalize before the resume hint so the user sees the
     // hint last (most useful when they're scrolling back).
@@ -2478,6 +2498,10 @@ fn reqwest_client() -> reqwest::Client {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn run_line_based(mut startup: Startup) -> anyhow::Result<()> {
+    // Clone the sandbox_provider Arc early so we can call cleanup() at exit.
+    // (RFD 0026 §"Session lifecycle and cleanup")
+    let sandbox_provider = startup.runtime_config.sandbox_provider.clone();
+
     // Use the pre-built slash registry from startup (includes extension commands).
     let slash = std::mem::replace(&mut startup.slash_registry, SlashRegistry::new());
 
@@ -2642,6 +2666,19 @@ async fn run_line_based(mut startup: Startup) -> anyhow::Result<()> {
         let _ = session.prompt(trimmed.to_string()).await;
         handle = tokio::spawn(async move {});
     }
+
+    // Abort any in-flight prompt task before cleaning up the sandbox.
+    // Per RFD 0026 §"Concurrent prompt draining before cleanup".
+    session.abort().await;
+
+    // Cleanup remote sandbox (e.g. E2B) at mode exit. Best-effort: errors are
+    // logged as warnings and do not fail the mode. (RFD 0026 §"Session lifecycle")
+    if let Some(sp) = sandbox_provider {
+        if let Err(e) = sp.cleanup().await {
+            tracing::warn!(err = %e, "sandbox cleanup failed at line-based interactive-mode exit");
+        }
+    }
+
     Ok(())
 }
 

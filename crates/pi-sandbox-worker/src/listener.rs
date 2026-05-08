@@ -17,7 +17,7 @@
 //! bash children have been killed by the OS before the worker
 //! drops their futures.
 
-use crate::dispatch::dispatch_request;
+use crate::dispatch::{dispatch_request, set_stdin_transport};
 use anyhow::Context;
 use pi_sandbox_protocol::framing;
 use std::path::PathBuf;
@@ -32,6 +32,44 @@ use tracing::{error, info, warn};
 /// Maximum time to wait for active connections to drain after receiving a
 /// shutdown signal before we give up and exit anyway.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// One-shot stdin/stdout worker for the E2B remote sandbox transport (RFD 0026).
+///
+/// Reads exactly one `ToolRequest` from stdin, dispatches the tool, writes
+/// one `ToolResponse` to stdout, then returns. Called when `--transport stdin`
+/// is passed on the command line.
+///
+/// No READY handshake. No persistent connection. E2B preserves `/work` across
+/// command invocations in the same sandbox ID, so the one-shot model shares
+/// persistent `/work` state correctly between tool calls.
+pub async fn serve_stdio(work_dir: PathBuf) -> anyhow::Result<()> {
+    // Mark dispatch as stdin-transport mode: disables the vsock-based
+    // web_search proxy (incompatible with E2B transport) and enables
+    // file_writes population for write/edit tool responses.
+    set_stdin_transport(true);
+
+    let stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+    let mut reader = BufReader::new(stdin);
+
+    let req = framing::read_request(&mut reader)
+        .await
+        .map_err(|e| anyhow::anyhow!("serve_stdio: read_request failed: {e}"))?;
+
+    let started = Instant::now();
+    let response = dispatch_request(req, &work_dir).await;
+    let elapsed = started.elapsed().as_millis() as u32;
+    let response = pi_sandbox_protocol::ToolResponse {
+        guest_duration_ms: elapsed,
+        ..response
+    };
+
+    framing::write_response(&mut stdout, &response)
+        .await
+        .map_err(|e| anyhow::anyhow!("serve_stdio: write_response failed: {e}"))?;
+
+    Ok(())
+}
 
 /// Start the vsock listener loop. Runs until SIGTERM/SIGINT or accept error,
 /// then drains active connection tasks before returning.

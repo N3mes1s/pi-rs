@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 /// Current wire-protocol version. Increment on any breaking change
 /// (field rename, semantics change). Optional-field additions do
 /// NOT bump this.
-pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
+///
+/// v2 (RFD 0026): added `file_writes` to `ToolResponse` and `FileWrite` struct.
+pub const CURRENT_PROTOCOL_VERSION: u32 = 2;
 
 /// Default vsock port the guest worker listens on. Host connects
 /// to this port to send ToolRequest lines.
@@ -61,6 +63,23 @@ pub struct ToolResponse {
     /// exit_status because some tools (e.g. read on a missing
     /// file) report errors without spawning a process.
     pub is_error: bool,
+    /// File mutations produced by this tool call (RFD 0026 proto v2).
+    /// v1: only `write` and `edit` tools populate this field.
+    /// `bash` always emits an empty vec.
+    /// The local microVM path always emits an empty vec.
+    #[serde(default)]
+    pub file_writes: Vec<FileWrite>,
+}
+
+/// A single file mutation from the guest worker (RFD 0026 proto v2).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FileWrite {
+    /// Path relative to `/work` (the guest's working directory).
+    pub path: String,
+    /// File contents, base64-encoded.
+    pub contents_b64: String,
+    /// Unix permission bits (e.g. 0o644).
+    pub mode: u32,
 }
 
 /// Framing helpers: read one ToolRequest from an AsyncRead, write

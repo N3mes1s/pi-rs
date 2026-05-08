@@ -128,6 +128,8 @@ impl SandboxProvider for CountingSandbox {
             stdout: format!("sandboxed:{tool_name}"),
             stderr: String::new(),
             exit_status: self.exit_status,
+            round_trip_ms: None,
+            cost_usd: None,
         })
     }
 }

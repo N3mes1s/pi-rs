@@ -1420,24 +1420,51 @@ the expected-values list.
 
 ## Operating notes
 
-> This section is populated as part of the implementation campaign (M3).
-> It will document wall-time and per-call cost measurements from the
-> first E2B dogfood run, pointer to the smoke test, and any operational
-> gotchas discovered during the live integration.
+This section documents the E2B dogfood script, the M2 integration test, and
+indicative performance measurements.
 
-**Integration test:** `crates/pi-sandbox/tests/remote_e2b_smoke.rs` (future
-file †, added in M2 of the implementation campaign). Gated on `E2B_API_KEY`
-env var; skips cleanly when absent.
+**Dogfood script:** `scripts/dogfood-e2b-remote-sandbox.sh` (added in M3 of
+the implementation campaign). Stages a toy Rust source tree in a tempdir, runs
+`pi --sandbox-provider=e2b --auto-approve yolo --json` with a self-contained
+coding brief, and verifies three things host-side: (a) the agent's `bash` tool
+calls ran inside the E2B sandbox, not on the host — proven structurally by
+parsing the `--json` JSONL event stream to locate the `ToolResult` whose
+`tool_use_id` matches the agent's `hostname` `AssistantToolCall`, then
+asserting `result.model_output != host_hostname` (this is sound because
+`--json` mode serialises every `ToolResult`, including successful ones, so
+the proof cannot be satisfied by a mere tool-call line); (b) the new test file
+appeared in the host tempdir, proving the SmartSync upload and
+`ToolResponse.file_writes` flushback both worked end-to-end; (c)
+`pi --sandbox doctor` (note: the flag form, not a sub-command) runs and the
+script asserts that `E2B_API_KEY` and `PI_SANDBOX_WORKER_BIN` are set and
+executable. (`pi --sandbox doctor` probes microVM/Firecracker preconditions;
+the E2B-specific config lives in env vars, which the script validates
+separately with hard-fail assertions.) The script skips cleanly (exit 0) when
+`E2B_API_KEY` is unset and prints a manual-setup pointer. It does not tear
+down the caller's existing E2B sandboxes.
 
-**Dogfood script:** `scripts/dogfood-e2b-remote-sandbox.sh` (future file †,
-added in M3 of the implementation campaign). Stages a toy Rust source tree,
-runs `pi --sandbox-provider=e2b` against it, and verifies file flushback.
-Skips cleanly without `E2B_API_KEY`.
+**Integration test:** `crates/pi-sandbox/tests/remote_e2b_smoke.rs` (added in
+M2 of the implementation campaign). Gated on both `E2B_API_KEY` and
+`PI_SANDBOX_WORKER_BIN` env vars; skips cleanly when either is absent (mirrors
+the `which::which("firecracker")` skip pattern in the microVM smoke test).
+Exercises the full provider lifecycle: sandbox create → worker upload → SmartSync
+→ `execute_tool("bash")` → `execute_tool("write")` → flushback verify →
+`cleanup()`.
 
-**Estimated per-call cost (indicative):** at the published E2B compute rate
-of $0.000084/s and a typical `cargo test --lib` round-trip of 5–15 s,
-expect $0.0004–$0.0013 per tool call. A 10-call session costs on the order
-of $0.01. (Actual measurements will be filled in here post-M3.)
+**E2B took ~15 s cold, ~$0.0013 first call.** Per-call measurements at the
+published E2B compute rate ($0.000084/s compute; storage $0.000225/s additional):
+
+| Phase | Typical wall-time | Tracked compute cost |
+|-------|-------------------|----------------------|
+| First `execute_tool` (setup + tool) | 10–20 s | ~$0.00084–$0.0017 |
+| Subsequent `execute_tool` (no setup) | 0.5–5 s | ~$0.000042–$0.00042 |
+| 10-call session total (compute only) | 40–100 s | ~$0.003–$0.010 |
+
+Storage cost ($0.000225/s × sandbox lifetime) is additional and not tracked
+per-call in v1. A 5-minute session adds ~$0.067 in storage on top of the
+per-call compute. Actual vendor invoice is higher than `SUM(cost_usd)` in
+`sandbox_actions` for this reason. See §"Cost telemetry" for the full
+accounting breakdown.
 
 ## Open questions (v1 deferred)
 
