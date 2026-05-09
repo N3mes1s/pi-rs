@@ -7,3 +7,4 @@
 //! gating is done via API-key presence at session open.
 
 pub mod e2b;
+pub mod sprites;

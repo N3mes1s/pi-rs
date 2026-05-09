@@ -22,3 +22,4 @@ pub use microvm::{
 };
 pub use provider::{SandboxError, SandboxExecution, SandboxProvider};
 pub use remote::e2b::E2bProvider;
+pub use remote::sprites::SpritesProvider;

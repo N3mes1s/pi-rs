@@ -45,6 +45,13 @@ pub struct Cli {
     ///   `e2b` — routes tool calls through an E2B remote sandbox (RFD 0026).
     ///     Requires E2B_API_KEY env var and PI_SANDBOX_WORKER_BIN pointing
     ///     to a statically-linked pi-sandbox-worker binary.
+    ///   `sprites` — routes tool calls through a Sprites remote sandbox
+    ///     provisioned via wromm (RFD 0026 v2). Requires SPRITES_TOKEN env
+    ///     var, the `wromm` binary on PATH (or PI_WROMM_BIN), and
+    ///     PI_SANDBOX_WORKER_BIN. Unlike E2B, Sprites runs Ubuntu 24.04
+    ///     with NoNewPrivs=0 + sudo + FUSE — the contextfs RW /work mount
+    ///     follow-up commit lights up bidirectional real-time host↔sandbox
+    ///     filesystem ops.
     #[arg(long = "sandbox-provider", value_name = "KIND")]
     pub sandbox_provider: Option<String>,
 

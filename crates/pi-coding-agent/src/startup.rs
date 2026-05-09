@@ -630,9 +630,29 @@ pub fn install_sandbox_from_flag(
             cfg.system_prompt.push_str(note);
             Ok(())
         }
+        "sprites" => {
+            // Construct SpritesProvider: lifecycle is driven by `wromm`
+            // (provisioning, file copy, exec, destroy) — RFD 0026 v2.
+            // Token resolution: SPRITES_TOKEN env → auth_storage.get("sprites").
+            // Network activity is deferred to the first execute_tool() call.
+            let provider = pi_sandbox::SpritesProvider::from_auth(&cfg.auth_storage)
+                .map_err(|e| anyhow::anyhow!("Sprites sandbox provider: {e}"))?;
+            cfg.sandbox_provider =
+                Some(std::sync::Arc::new(provider) as std::sync::Arc<dyn pi_sandbox::SandboxProvider>);
+            // v1 of the Sprites path uses wromm's default project sync at
+            // session-open; the contextfs RW /work mount lands in the
+            // follow-up commit. Note the agent so it knows /work is the
+            // synced project dir (writes via bash CAN survive the session
+            // here, unlike E2B v1).
+            let note = "\nNote: working in a remote Sprites sandbox provisioned via wromm. \
+                        Your project directory is synced to the sandbox at session start; \
+                        file changes (via any tool, including bash) are local to the sandbox.";
+            cfg.system_prompt.push_str(note);
+            Ok(())
+        }
         other => anyhow::bail!(
             "unknown sandbox provider '{}' — expected one of: \
-             local-process, microvm:firecracker, e2b",
+             local-process, microvm:firecracker, e2b, sprites",
             other
         ),
     }
