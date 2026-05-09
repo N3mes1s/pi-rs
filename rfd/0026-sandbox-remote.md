@@ -1943,27 +1943,55 @@ transport.
       spec: only `secure` exists in `NewSandbox`, no `privileged` /
       `capabilities` / `securityOpt` field.
 
-7. **Strategic decision point (2026-05-09).** Given finding #6, four
-      paths forward, in order of decreasing scope:
+7. **Strategic decision point (2026-05-09) — RESOLVED: pivot to Sprites.**
+      The maintainer chose vendor-pivot. Sprites probe (2026-05-09)
+      confirms the platform unblocks every constraint that killed the
+      E2B path:
 
-      1. **SmartSync v2** — stay on E2B base template, make the
-         upload+flushback path continuously bidirectional via a
-         small inotify daemon inside the sandbox + host-side
-         poller over envd. Lossier than contextfs but works on
-         every E2B sandbox out of the box.
-      2. **Vendor pivot** — Modal / RunPod / Daytona may allow
-         privileged FUSE. Defer the E2B contextfs path until E2B
-         adds capability flags. Real engineering: stand up a new
-         provider against an unknown API. RFD 0026's "future
-         vendors" section becomes the reference path.
-      3. **FUSE-less contextfs** — worker's read/write/edit/find/list
-         tools target `cfs-fs-server` directly over agora; agent's
-         `bash` either loses /work fs access or sees a local copy
-         that is stale w.r.t. host. Major UX regression.
-      4. **Wait for E2B** — file an issue requesting a capability-
-         configurable template variant; ship contextfs-on-microVM
-         v1 only for now, document the gap, revisit when the
-         vendor side moves.
+      | Capability                 | E2B base    | Sprites |
+      |----------------------------|-------------|---------|
+      | `NoNewPrivs`               | `1`         | **`0`** |
+      | `Seccomp` filter installed | yes (1)     | **none** |
+      | `open("/dev/fuse")` as user | EACCES      | **OK**  |
+      | `sudo` from default user   | blocked     | **works** |
+      | `mount(2)` from userland   | EPERM       | unconfirmed but consistent with caps above |
+
+      `/dev/fuse` is mode `c-w--wx-wT` — world-writable; `Python`
+      successfully `open()`ed it from the unprivileged `sprite` user.
+      `fusermount3` is not preinstalled but Sprites runs Ubuntu 24.04
+      with full `apt`, so `apt-get install -y fuse3` at session-open
+      is one extra command.
+
+      **v2 implementation target is now Sprites, not E2B.** RFD 0026
+      v1 (the E2B SmartSync path, commit 6a0a7e8) stays as the
+      "restricted-environment" fallback for the rare case when Sprites
+      isn't reachable. The contextfs RW /work feature ships only on
+      Sprites.
+
+      Additional simplification: **`wromm run --attach-uds
+      <host_uds>:<sandbox_path>` already implements the host↔sandbox
+      UDS bridge** — no agora / cfs-mesh wiring is needed for v1.
+      `pi-sandbox/src/remote/sprites.rs` will spawn the host-side
+      cfs-fs-server, pass its UDS to the sprite via attach-uds, then
+      run `contextfsd` inside the sprite pointed at the bridged UDS.
+      Phase A's "swap vsock for agora" work folds away — wromm's
+      attach-uds IS the transport.
+
+      Updated work plan:
+      - **A** (was: factor host-side spawn helpers): now trivial —
+        the existing microVM `spawn_cfs_fs_server` + `spawn_contextfs_broker`
+        helpers are reused unchanged; the new `sprites.rs` provider
+        calls them directly.
+      - **B** (sandbox bootstrap): unchanged in spirit but smaller
+        binary footprint — only `contextfsd` musl-static needs
+        uploading (~13 MB). `cfs-mesh` + `agora` are not used; wromm
+        handles the UDS bridge.
+      - **C** (orchestration cutover): `SpritesProvider` impls
+        `SandboxProvider`, drives Sprites HTTP API directly (cribbed
+        from `wromm/src/providers/sprites.rs`) OR shells out to
+        `wromm run --provider=sprites --attach-uds=…` if simpler.
+      - **D** (productionise): same dogfood + 100 MB integration
+        test gates as before, on Sprites.
 
 ### Acceptance criteria
 
