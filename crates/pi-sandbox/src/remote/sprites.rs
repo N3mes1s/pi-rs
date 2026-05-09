@@ -522,6 +522,17 @@ impl SpritesProvider {
             )));
         }
 
+        // 4. SmartSync the project tree into the sprite at /home/sprite/work.
+        //    `wromm up` provisions the sandbox but does not sync arbitrary
+        //    project files — only the wromm.json spec lands automatically.
+        //    We mirror the E2B SmartSync model: walk the host cwd, filter
+        //    out node_modules / target / large binaries, `wromm cp` each
+        //    file into the sprite at /home/sprite/work/<rel-path>.
+        if let Err(e) = self.smart_sync_to_sprite(&sprite_id, cwd).await {
+            self.try_destroy_sprite(&sprite_id).await;
+            return Err(e);
+        }
+
         // ── contextfs host-side daemons (PI_SPRITES_CONTEXTFS=1) ────────
         // Linux-only: contextfs uses Linux-specific FUSE + UDS infra.
         //
@@ -632,6 +643,132 @@ impl SpritesProvider {
         }
 
         Ok(sprite_id)
+    }
+
+    /// Walk the host cwd, filter out excluded paths (node_modules, target,
+    /// large binaries) per .gitignore, and `wromm cp` each file into the
+    /// sprite at `/home/sprite/work/<rel-path>`. Same SmartSync semantics
+    /// as the E2B path.
+    ///
+    /// Sequential per-file cp keeps things simple at the wromm shell-out
+    /// boundary; if upload throughput becomes a problem, batch files into
+    /// a tar that we cp once and unpack inside the sprite.
+    async fn smart_sync_to_sprite(
+        &self,
+        sprite_id: &str,
+        cwd: &std::path::Path,
+    ) -> Result<(), SandboxError> {
+        let files = collect_sprites_upload_files(cwd);
+        if files.is_empty() {
+            // Still create /home/sprite/work so downstream exec calls have
+            // a valid --work-dir even on an empty project.
+            let mkdir = self
+                .run_in_sprite(
+                    sprite_id,
+                    cwd,
+                    "mkdir -p /home/sprite/work".into(),
+                    15,
+                    None,
+                )
+                .await?;
+            if mkdir.exit_code != 0 {
+                return Err(SandboxError::Provider(format!(
+                    "mkdir /home/sprite/work in sprite failed: {}",
+                    mkdir.stderr
+                )));
+            }
+            return Ok(());
+        }
+
+        // Pre-create the directory tree inside the sprite in one shot so
+        // wromm cp can land at known absolute paths.
+        let mut dirs: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        dirs.insert("/home/sprite/work".to_string());
+        for path in &files {
+            if let Ok(rel) = path.strip_prefix(cwd) {
+                if let Some(parent) = rel.parent() {
+                    let posix: String = parent
+                        .components()
+                        .filter_map(|c| match c {
+                            std::path::Component::Normal(n) => {
+                                n.to_str().map(|s| s.to_owned())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    if !posix.is_empty() {
+                        dirs.insert(format!("/home/sprite/work/{posix}"));
+                    }
+                }
+            }
+        }
+        let mkdir_args = dirs
+            .iter()
+            .map(|d| format!("'{d}'"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mkdir = self
+            .run_in_sprite(
+                sprite_id,
+                cwd,
+                format!("mkdir -p {mkdir_args}"),
+                30,
+                None,
+            )
+            .await?;
+        if mkdir.exit_code != 0 {
+            return Err(SandboxError::Provider(format!(
+                "mkdir project tree in sprite failed: {}",
+                mkdir.stderr
+            )));
+        }
+
+        // wromm cp each file. Sequential — wromm doesn't currently expose
+        // a bulk-cp / tar-stream mode. For typical project sizes (a few
+        // hundred files at <100 KB each) this is fine; for huge projects
+        // we'd batch via tar.
+        for path in files {
+            let rel = path.strip_prefix(cwd).unwrap_or(&path);
+            let posix_rel: String = rel
+                .components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(n) => {
+                        n.to_str().map(|s| s.to_owned())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            let remote_path = format!("/home/sprite/work/{posix_rel}");
+            let src = path.to_string_lossy().to_string();
+            let cp_status = self
+                .wromm_cmd()
+                .current_dir(cwd)
+                .arg("cp")
+                .arg(format!("--id={sprite_id}"))
+                .arg("--overwrite")
+                .arg(&src)
+                .arg(format!("sandbox:{remote_path}"))
+                .stdout(Stdio::null())
+                .status()
+                .await
+                .map_err(|e| {
+                    SandboxError::Provider(format!(
+                        "spawn `wromm cp {}`: {e}",
+                        rel.display()
+                    ))
+                })?;
+            if !cp_status.success() {
+                return Err(SandboxError::Provider(format!(
+                    "wromm cp {} failed (exit {})",
+                    rel.display(),
+                    cp_status.code().unwrap_or(-1)
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Run a shell command inside the sprite via `wromm exec`. Returns the
@@ -761,8 +898,12 @@ impl SpritesProvider {
         // The worker reads ToolRequest on stdin, writes ToolResponse to
         // stdout. We pipe the JSON through `wromm exec`'s stdin and read
         // the result back from its captured stdout.
+        // Worker runs in /home/sprite/work where smart_sync_to_sprite
+        // synced the project tree. (When PI_SPRITES_CONTEXTFS=1 ships its
+        // FUSE /work mount, that path will move to /work; for v1 we keep
+        // the wromm-only project-sync path.)
         let cmd = format!(
-            "{WORKER_REMOTE_PATH} --transport stdin --work-dir /home/sprite \
+            "{WORKER_REMOTE_PATH} --transport stdin --work-dir /home/sprite/work \
              --log-level warn"
         );
         let exec = self
@@ -786,6 +927,16 @@ impl SpritesProvider {
                     snip = exec.stdout.chars().take(400).collect::<String>(),
                 ))
             })?;
+
+        // Flushback: apply file_writes to the host cwd. Mirrors the E2B
+        // path. With contextfs RW /work this becomes a no-op (writes are
+        // already live on host) but for the wromm-only sync path it's
+        // essential — without it, write/edit tool changes never reach the
+        // operator's filesystem.
+        if !parsed.file_writes.is_empty() {
+            apply_file_writes_to_host(&parsed.file_writes, cwd).await?;
+        }
+
         Ok(SandboxExecution {
             stdout: parsed.stdout,
             stderr: parsed.stderr,
@@ -1010,6 +1161,20 @@ struct WorkerToolResponse {
     stderr: String,
     exit_status: i32,
     is_error: bool,
+    /// File mutations (proto v2, RFD 0026). Empty if the worker
+    /// produced a v1 response.
+    #[serde(default)]
+    file_writes: Vec<WorkerFileWrite>,
+}
+
+/// One file mutation reported by the worker. Path is relative to the
+/// session cwd (the worker rejects absolute paths and `..`).
+#[derive(Deserialize)]
+struct WorkerFileWrite {
+    path: String,
+    contents_b64: String,
+    #[allow(dead_code)]
+    mode: u32,
 }
 
 struct ExecResult {
@@ -1029,4 +1194,184 @@ fn rand_u64() -> u64 {
     // Mix in addr-of-stack for a touch of entropy.
     let stack: u64 = &now as *const _ as usize as u64;
     now.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(stack)
+}
+
+/// Apply worker-supplied file writes to the host cwd (flushback).
+///
+/// Worker paths are relative to the session cwd. We validate before
+/// touching the host filesystem:
+///   - reject absolute paths
+///   - reject any `..` component
+///   - assert the joined path lexically lives inside cwd
+///   - reject any pre-existing symlink in the parent chain (would let
+///     a malicious payload escape the cwd via `link → /etc`)
+///
+/// Atomic write via temp file + rename, matching the E2B implementation.
+async fn apply_file_writes_to_host(
+    file_writes: &[WorkerFileWrite],
+    cwd: &std::path::Path,
+) -> Result<(), SandboxError> {
+    use base64::Engine as _;
+    for fw in file_writes {
+        let host_path = validate_flushback_path_sprites(cwd, &fw.path)?;
+        check_no_symlinks_in_parent_chain_sprites(cwd, &host_path)?;
+        if let Some(parent) = host_path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                SandboxError::Provider(format!(
+                    "flushback create_dir_all '{}': {e}",
+                    fw.path
+                ))
+            })?;
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&fw.contents_b64)
+            .map_err(|e| {
+                SandboxError::Provider(format!(
+                    "flushback base64 decode '{}': {e}",
+                    fw.path
+                ))
+            })?;
+        let tmp_path = {
+            let mut t = host_path.clone();
+            let stem = t
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_string();
+            t.set_file_name(format!(".{stem}.__sprites_tmp__"));
+            t
+        };
+        tokio::fs::write(&tmp_path, &bytes).await.map_err(|e| {
+            SandboxError::Provider(format!(
+                "flushback write '{}': {e}",
+                fw.path
+            ))
+        })?;
+        tokio::fs::rename(&tmp_path, &host_path).await.map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            SandboxError::Provider(format!(
+                "flushback rename '{}': {e}",
+                fw.path
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_flushback_path_sprites(
+    cwd: &std::path::Path,
+    raw: &str,
+) -> Result<std::path::PathBuf, SandboxError> {
+    use std::path::Component;
+    let p = std::path::Path::new(raw);
+    for component in p.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(SandboxError::Provider(format!(
+                    "flushback path '{raw}' is absolute; only relative paths are permitted"
+                )));
+            }
+            Component::ParentDir => {
+                return Err(SandboxError::Provider(format!(
+                    "flushback path '{raw}' contains '..'"
+                )));
+            }
+            _ => {}
+        }
+    }
+    let joined = cwd.join(p);
+    if !joined.starts_with(cwd) {
+        return Err(SandboxError::Provider(format!(
+            "flushback path '{raw}' resolves outside cwd"
+        )));
+    }
+    Ok(joined)
+}
+
+fn check_no_symlinks_in_parent_chain_sprites(
+    cwd: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<(), SandboxError> {
+    let mut p = target.to_path_buf();
+    while p != *cwd {
+        match std::fs::symlink_metadata(&p) {
+            Ok(md) if md.file_type().is_symlink() => {
+                return Err(SandboxError::Provider(format!(
+                    "flushback parent chain contains symlink at '{}'",
+                    p.display()
+                )));
+            }
+            _ => {}
+        }
+        match p.parent() {
+            Some(parent) => p = parent.to_path_buf(),
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+/// Walk the host cwd and return the list of files to upload to the sprite.
+/// Mirrors `e2b::collect_upload_files`'s exclusions + safety properties:
+/// honors `.gitignore`, skips symlinks, drops generated dirs (node_modules,
+/// target, .venv, …), drops files > 100 MB.
+fn collect_sprites_upload_files(cwd: &std::path::Path) -> Vec<std::path::PathBuf> {
+    use ignore::WalkBuilder;
+    const EXCLUDED_DIR_NAMES: &[&str] = &[
+        "node_modules",
+        "target",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        "__pycache__",
+        ".next",
+        ".nuxt",
+        ".cache",
+        ".gradle",
+        ".terraform",
+        "vendor",
+        "bower_components",
+    ];
+    const EXCLUDED_EXTS: &[&str] = &["pyc", "class", "o", "so", "dylib"];
+    const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+    let mut walker = WalkBuilder::new(cwd);
+    walker
+        .follow_links(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .standard_filters(true);
+    let mut out = Vec::new();
+    for entry in walker.build().flatten() {
+        let path = entry.path();
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        // Skip hard exclusion dirs.
+        if path
+            .components()
+            .any(|c| match c {
+                std::path::Component::Normal(n) => {
+                    n.to_str().is_some_and(|s| EXCLUDED_DIR_NAMES.contains(&s))
+                }
+                _ => false,
+            })
+        {
+            continue;
+        }
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if EXCLUDED_EXTS.contains(&ext) {
+                continue;
+            }
+        }
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.len() > MAX_FILE_BYTES {
+                continue;
+            }
+        }
+        out.push(path.to_path_buf());
+    }
+    out
 }
