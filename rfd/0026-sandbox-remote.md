@@ -1760,3 +1760,154 @@ accounting breakdown.
 - **E2B** — https://e2b.dev/docs.
 - **Sprites** — (deferred; URL TBD).
 - **Daytona** — https://daytona.io/docs.
+
+---
+
+## v2 — contextfs-backed `/work` for remote sandboxes (proposed)
+
+- **Status:** Proposal (v2-draft, 2026-05-09)
+- **Triggered by:** v1 dogfood post-mortem. The E2B provider in commit
+  6a0a7e8 works end-to-end but `/work` is `SmartSync` upload at session
+  open + per-tool inline flushback (`ToolResponse.file_writes`). That
+  model breaks at the seams the moment the agent does anything subtle:
+  - **One-way drift.** `bash` mutations are *not* synced (RFD 0026 §
+    "File-mutation flushback"). Anything that creates/edits files via
+    shell pipes, `cargo`, `sed -i`, etc. silently desyncs from host.
+  - **32 KiB ceiling.** `write`/`edit` over the inline cap fails closed
+    via `poison_session`; the session is dead until the user restarts.
+  - **No partial reads / streaming.** Whole-file upload is the only
+    operation; multi-MB binaries balloon session-open time.
+  - **No host-side change visibility.** A teammate editing a file in
+    the user's editor while a tool call runs is invisible to the agent
+    until the next session.
+
+  Local microVM (RFD 0023) already solved this with **contextfs RW
+  mount**: a host-resident project directory exposed over a UDS, FUSE-
+  mounted at `/work` inside the guest, mediated by the contextfs broker
+  (Cedar `verify_write` policy gate). Remote sandboxes need the same
+  guarantee.
+
+### Architecture
+
+The microVM stack is reused with one substitution — the host↔guest
+transport.
+
+```
+┌── HOST (operator's laptop, pi-rs process) ──────────────────────┐
+│                                                                  │
+│  cfs-fs-server  ──UDS──▶  /run/cfs-host/fs.sock                  │
+│  contextfs-broker  ──UDS──▶  /run/cfs-host/broker.sock           │
+│                                                                  │
+│  cfs-mesh AgoraBridge  ──┐                                       │
+│   --room=<sess-uuid>     │                                       │
+│   --target-uds=...       │                                       │
+│                          ▼                                       │
+└─────────────────────────agora room (relay) ─────────────────────┘
+                          ▲
+┌─ E2B SANDBOX ────────────│───────────────────────────────────────┐
+│                          │                                        │
+│  cfs-mesh AgoraListen ───┘                                       │
+│   --room=<sess-uuid>                                             │
+│   --uds=/run/cfs/fs.sock  +  /run/cfs/broker.sock                │
+│                                                                  │
+│  contextfsd (FUSE mount)                                         │
+│   --backend=remote-fs                                            │
+│   --remote-fs-uds=/run/cfs/fs.sock                               │
+│   --broker-uds=/run/cfs/broker.sock                              │
+│   --mountpoint=/work                                             │
+│                                                                  │
+│  pi-sandbox-worker     ──▶  reads/writes /work                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Why agora as the transport (not raw TCP)
+
+- **E2B's edge is HTTPS-only.** The per-port subdomain
+  `{port}-{sandboxID}.e2b.app` TLS-terminates at the edge and forwards
+  HTTP. Plain Noise-IK over TCP (cfs-mesh's `Listen`/`Bridge` mode)
+  doesn't traverse the edge.
+- **vsock obviously doesn't apply.** No shared kernel.
+- **agora handles NAT.** Both host and sandbox dial *outbound* to the
+  agora broker. No public IP on the operator's laptop required, no
+  port forwarding, no ngrok-style tunnel. cfs-mesh already ships
+  `AgoraBridge` and `AgoraListen` subcommands that wrap the room
+  transport as a UDS-equivalent bytestream (ref:
+  `contextfs/crates/contextfs-mesh/src/main.rs::AgoraBridge`).
+- **Encryption + auth are still Noise-IK.** agora is the relay; the
+  end-to-end ciphertext is agora-room-key-encrypted on the wire AND
+  Noise-IK-encrypted inside that envelope. Compromising the agora
+  relay reveals neither the file contents nor the broker policy.
+
+### Work plan (campaign-sized)
+
+#### Phase A — host-side reuse (mechanical)
+- A1. Generalise `crates/pi-sandbox/src/microvm/{broker_proxy,contextfs_proxy}.rs`
+      to factor out the spawn helpers (`spawn_cfs_fs_server`,
+      `spawn_contextfs_broker`) into a transport-agnostic submodule the
+      remote provider can also call.
+- A2. Add `spawn_cfs_mesh_agora_bridge(room, target_uds, key)` next to
+      the vsock bridge spawners. Same `Child` ownership rules
+      (`kill_on_drop`, per-pi-process `Drop`).
+
+#### Phase B — sandbox bootstrap
+- B1. Build musl-static binaries for `contextfsd`, `cfs-mesh`, `agora`,
+      and a small `pi-cfs-init` script that orchestrates them inside
+      the sandbox.
+- B2. Vendor the bins into `pi-sandbox/assets/remote-bootstrap/` and
+      ship them via a single `tar.zst` (~15 MB combined). Upload to
+      `/home/user/pi-cfs/` via envd files API at session open.
+- B3. Confirm E2B's base template carries `fuse3` (`fusermount3`) and
+      `/dev/fuse`. If not, document a vendor template variant or fall
+      back to the `userfuse` mode `contextfsd` already supports.
+
+#### Phase C — orchestration + cutover
+- C1. Add an `E2bWorkMount` enum: `SmartSync` (current) | `Contextfs`.
+      Default off until the path is dogfooded.
+- C2. New `e2b_contextfs.rs` module: provision agora room + key,
+      spawn host-side stack, upload bootstrap tar, run init inside
+      sandbox via envd `Start`, wait for `/work` mount marker.
+- C3. Drop SmartSync upload + `apply_file_writes` flushback when
+      `Contextfs` is active. Worker just reads/writes `/work` directly.
+- C4. Dogfood under the existing `scripts/dogfood-e2b-remote-sandbox.sh`
+      with the new mode enabled. Add a separate verification: edit
+      a file from host *during* the agent's run and confirm the agent
+      sees the change on the next read.
+
+#### Phase D — productionisation
+- D1. Remove the `SmartSync` branch (or keep behind
+      `--e2b-mount-mode=smart-sync` as a fallback for restricted-
+      network environments where outbound to agora is blocked).
+- D2. Mirror the same scaffolding in the Sprites and Daytona providers
+      whenever those land — agora transport works there identically
+      because the constraint is "outbound network", not vendor-
+      specific.
+
+### Risks / open questions
+
+1. **agora throughput.** agora is built for chat-sized messages
+      (`max_chunk_bytes` default 1024). FUSE op latency through a
+      multi-hop relay (host → agora → sandbox) is the make-or-break
+      number; need a real benchmark before declaring this v2.
+2. **Static `contextfsd` portability.** Real-world FUSE behavior varies
+      between Alpine, Debian, and Ubuntu kernels. We've validated the
+      microVM Alpine guest only; E2B's base template is Ubuntu-derived.
+3. **Bootstrap tar size.** ~15 MB upload at session open per the bin
+      sizes. Tolerable but pushes E2B's "instant" cold-start narrative.
+4. **agora broker dependency.** Single point of failure for fs ops.
+      Need a health-check + graceful-degrade story before turning the
+      Contextfs mode on by default.
+5. **Concurrent FUSE writes vs Cedar broker.** Already handled in
+      microVM path (broker queues per-write evaluations); confirm
+      end-to-end latency holds when broker is reached over agora.
+
+### Acceptance criteria
+
+- `scripts/dogfood-e2b-remote-sandbox.sh --mount-mode=contextfs` passes
+  all three v1 verifications + a new "host-side edit during tool call
+  is visible" check.
+- `cargo test -p pi-sandbox` includes an integration test gated on
+  `E2B_API_KEY` that mounts /work via contextfs, writes 100 MB across
+  10 files, and reads them back inside the sandbox without
+  desyncing.
+- A single commit `--e2b-mount-mode=contextfs` flips the default once
+  ≥ 1 hour of clean dogfood lands without flushback poison.
