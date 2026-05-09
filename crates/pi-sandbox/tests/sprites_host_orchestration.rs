@@ -293,11 +293,17 @@ exit 0
             .await
             .expect("_test_open_host_side_only failed");
 
-        // Give processes a moment to boot.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        // Confirm at least one mock-cfs-fs-server is running.
-        let running_before = count_processes_named("mock-cfs-fs-server");
+        // Wait up to 3s for the mock-cfs-fs-server child to be observable
+        // via /proc — fork+exec on a busy host can take more than 200ms.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut running_before = 0;
+        loop {
+            running_before = count_processes_named("mock-cfs-fs-server");
+            if running_before > 0 || std::time::Instant::now() > deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         assert!(
             running_before > 0,
             "expected ≥1 mock-cfs-fs-server process before drop"
@@ -333,8 +339,16 @@ exit 0
             let entry = entry.ok()?;
             let pid_str = entry.file_name();
             pid_str.to_str()?.parse::<u32>().ok()?; // must be numeric
-            let comm_path = entry.path().join("comm");
-            let comm = std::fs::read_to_string(comm_path).ok()?;
+            // /proc/PID/comm is truncated to 15 chars (TASK_COMM_LEN-1),
+            // which is shorter than several of our mock names. Check
+            // /proc/PID/cmdline first (the full argv[0]); fall back to comm
+            // for names that fit.
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            let cmdline_str = String::from_utf8_lossy(&cmdline);
+            if cmdline_str.contains(name) {
+                return Some(());
+            }
+            let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
             if comm.trim().contains(name) { Some(()) } else { None }
         })
         .count()
