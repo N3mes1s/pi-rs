@@ -134,17 +134,27 @@ impl Tool for BashTool {
                             // build.sh §"4b. UID separation".
                             const PI_TOOL_UID: libc::uid_t = 1001;
                             const PI_TOOL_GID: libc::gid_t = 1001;
-                            // setgroups(0, NULL) clears supplementary
-                            // groups so we don't carry root's group
-                            // membership.
-                            if libc::setgroups(0, std::ptr::null()) != 0 {
-                                return Err(std::io::Error::last_os_error());
-                            }
-                            if libc::setgid(PI_TOOL_GID) != 0 {
-                                return Err(std::io::Error::last_os_error());
-                            }
-                            if libc::setuid(PI_TOOL_UID) != 0 {
-                                return Err(std::io::Error::last_os_error());
+                            // Skip the drop when we're already non-root —
+                            // remote sandboxes (E2B / Sprites / Daytona) run
+                            // the worker as `user` (uid != 0), so setgid /
+                            // setuid would EPERM and bash would fail
+                            // unconditionally with "Operation not permitted".
+                            // The drop's purpose (block bash from doing
+                            // privileged things) is satisfied by the worker
+                            // already running unprivileged in those cases.
+                            if libc::getuid() == 0 {
+                                // setgroups(0, NULL) clears supplementary
+                                // groups so we don't carry root's group
+                                // membership.
+                                if libc::setgroups(0, std::ptr::null()) != 0 {
+                                    return Err(std::io::Error::last_os_error());
+                                }
+                                if libc::setgid(PI_TOOL_GID) != 0 {
+                                    return Err(std::io::Error::last_os_error());
+                                }
+                                if libc::setuid(PI_TOOL_UID) != 0 {
+                                    return Err(std::io::Error::last_os_error());
+                                }
                             }
                         }
                         if install_seccomp {
