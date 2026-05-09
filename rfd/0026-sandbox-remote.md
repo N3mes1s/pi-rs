@@ -1930,6 +1930,41 @@ transport.
         (custom templates have a slight cold-start tax on E2B).
       - Document the template's Dockerfile + the rebuild cadence.
 
+      **User-namespace bypass is also closed (probed 2026-05-09).**
+      `unshare -U -r` does grant `uid=0` inside a new user namespace,
+      but: (a) `NoNewPrivs:1` propagates so setuid binaries are still
+      neutralised, (b) `/dev/fuse` appears as `nobody:nogroup` from
+      inside the userns and `open(2)` returns EACCES, (c) `mount(2)`
+      for even a plain `tmpfs` returns "permission denied" — likely
+      the seccomp filter (`Seccomp: 2 / filters: 1`) blocks mount
+      syscalls outright. Custom E2B templates inherit the same
+      Firecracker container runtime config; there is no template-
+      level knob that lifts it. Confirmed read of the E2B OpenAPI
+      spec: only `secure` exists in `NewSandbox`, no `privileged` /
+      `capabilities` / `securityOpt` field.
+
+7. **Strategic decision point (2026-05-09).** Given finding #6, four
+      paths forward, in order of decreasing scope:
+
+      1. **SmartSync v2** — stay on E2B base template, make the
+         upload+flushback path continuously bidirectional via a
+         small inotify daemon inside the sandbox + host-side
+         poller over envd. Lossier than contextfs but works on
+         every E2B sandbox out of the box.
+      2. **Vendor pivot** — Modal / RunPod / Daytona may allow
+         privileged FUSE. Defer the E2B contextfs path until E2B
+         adds capability flags. Real engineering: stand up a new
+         provider against an unknown API. RFD 0026's "future
+         vendors" section becomes the reference path.
+      3. **FUSE-less contextfs** — worker's read/write/edit/find/list
+         tools target `cfs-fs-server` directly over agora; agent's
+         `bash` either loses /work fs access or sees a local copy
+         that is stale w.r.t. host. Major UX regression.
+      4. **Wait for E2B** — file an issue requesting a capability-
+         configurable template variant; ship contextfs-on-microVM
+         v1 only for now, document the gap, revisit when the
+         vendor side moves.
+
 ### Acceptance criteria
 
 - `scripts/dogfood-e2b-remote-sandbox.sh --mount-mode=contextfs` passes
