@@ -36,8 +36,35 @@
 //! /work in v1 is whatever wromm sets up by default (project file sync at
 //! `wromm up`); the contextfs+agora mount layer ships in the follow-up
 //! commit, gated on `PI_SPRITES_CONTEXTFS=1` until dogfooded.
+//!
+//! ## contextfs host-side daemons (PI_SPRITES_CONTEXTFS=1)
+//!
+//! When `PI_SPRITES_CONTEXTFS=1` is set, `ensure_session_open` additionally
+//! spawns three host-side children and stores their room IDs in `SessionState`
+//! for the M2 sprite-side bootstrap:
+//!
+//!   1. `cfs-fs-server --root <cwd> --socket <run_dir>/cfs-fs.sock`
+//!   2. `contextfs-broker run --socket <run_dir>/broker.sock
+//!                             --policy <run_dir>/cedar.policy
+//!                             --tenant-secret-path <run_dir>/tenant.secret
+//!                             --allowed-uid <self_uid>`
+//!   3. `cfs-mesh agora-bridge --room <room_label_fs>
+//!                             --target-uds <run_dir>/cfs-fs.sock`
+//!      and a sibling for the broker UDS on a separate room label.
+//!
+//! Room labels are provisioned by shelling out to `agora create <label>`
+//! (the agora binary is resolved via `PI_AGORA_BIN` → `which agora`).
+//! The per-session `run_dir` lives under
+//! `/home/nemesis/code/.pi-sprites/<sprite_label>/` so UDSes survive the
+//! process lifetime (not tmpfs).
+//!
+//! Binary resolution env vars:
+//!   `PI_CFS_MESH_BIN`                  — override path to `cfs-mesh`
+//!   `PI_SANDBOX_CFS_FS_SERVER_BIN`     — override path to `cfs-fs-server`
+//!   `PI_SANDBOX_CONTEXTFS_BROKER_BIN`  — override path to `contextfs-broker`
+//!   `PI_AGORA_BIN`                     — override path to `agora`
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -45,7 +72,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{debug, warn};
 
@@ -53,6 +80,173 @@ use pi_ai::AuthStorage;
 use pi_tools::ToolContext;
 
 use crate::provider::{SandboxError, SandboxExecution, SandboxProvider};
+
+// ── contextfs host-side daemon helpers ──────────────────────────────────────
+// Linux-only: contextfs uses Linux-specific FUSE + UDS infra.
+// Gated on PI_SPRITES_CONTEXTFS=1 at runtime.
+
+#[cfg(target_os = "linux")]
+/// Resolve the `cfs-mesh` binary path.
+///   1. `PI_CFS_MESH_BIN` env var (explicit override)
+///   2. `which cfs-mesh` (PATH lookup)
+/// Returns `None` if both fail; caller surfaces a clear error.
+fn resolved_cfs_mesh() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("PI_CFS_MESH_BIN") {
+        let path = PathBuf::from(p);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    which::which("cfs-mesh").ok()
+}
+
+#[cfg(target_os = "linux")]
+/// Resolve the `agora` binary path.
+///   1. `PI_AGORA_BIN` env var (explicit override)
+///   2. `which agora` (PATH lookup)
+fn resolved_agora() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("PI_AGORA_BIN") {
+        let path = PathBuf::from(p);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    which::which("agora").ok()
+}
+
+#[cfg(target_os = "linux")]
+/// Spawn `cfs-mesh agora-bridge --room <room_label> --target-uds <target>`
+/// and return the live child handle. The caller holds it for the session's
+/// lifetime; `kill_on_drop` ensures the bridge dies when the provider drops.
+///
+/// Binary resolved via `PI_CFS_MESH_BIN` env override → `which cfs-mesh`.
+fn spawn_cfs_mesh_agora_bridge(
+    room_label: &str,
+    target_uds: &Path,
+) -> Result<Child, SandboxError> {
+    let bin = resolved_cfs_mesh().ok_or_else(|| {
+        SandboxError::Unavailable(
+            "cfs-mesh not found (set PI_CFS_MESH_BIN or put cfs-mesh on PATH;              needed by PI_SPRITES_CONTEXTFS=1;              build with `cd contextfs && cargo build --release --bin cfs-mesh`)"
+                .into(),
+        )
+    })?;
+    let child = Command::new(&bin)
+        .arg("agora-bridge")
+        .arg("--room")
+        .arg(room_label)
+        .arg("--target-uds")
+        .arg(target_uds)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| {
+            SandboxError::Provider(format!(
+                "spawn cfs-mesh agora-bridge ({}): {e}",
+                bin.display()
+            ))
+        })?;
+    debug!(
+        bin = %bin.display(),
+        room = %room_label,
+        target = %target_uds.display(),
+        "cfs-mesh agora-bridge spawned"
+    );
+    Ok(child)
+}
+
+#[cfg(target_os = "linux")]
+/// Provision a fresh agora room by shelling out to `agora create <label>`.
+/// Returns `(room_id, secret)` parsed from the CLI's stdout.
+///
+/// `agora create` prints lines like:
+/// ```text
+///   Room ID:    ag-xxxxxxxx
+///   Secret:     <64 hex chars>
+/// ```
+///
+/// If the `agora` binary is unavailable, returns `SandboxError::Unavailable`
+/// with a helpful install hint.
+async fn provision_agora_room(label: &str) -> Result<(String, String), SandboxError> {
+    let bin = resolved_agora().ok_or_else(|| {
+        SandboxError::Unavailable(
+            "agora not found (set PI_AGORA_BIN or put agora on PATH;              needed by PI_SPRITES_CONTEXTFS=1 for room provisioning;              install from https://theagora.dev or build from source)"
+                .into(),
+        )
+    })?;
+    let out = Command::new(&bin)
+        .arg("create")
+        .arg(label)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| {
+            SandboxError::Provider(format!("spawn `agora create {label}`: {e}"))
+        })?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(SandboxError::Provider(format!(
+            "`agora create {label}` failed (exit {}): {stderr}",
+            out.status.code().unwrap_or(-1)
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let room_id = stdout
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("Room ID:")
+                .map(|s| s.trim().to_string())
+        })
+        .ok_or_else(|| {
+            SandboxError::Provider(format!(
+                "`agora create {label}`: no 'Room ID:' in stdout:\n{stdout}"
+            ))
+        })?;
+    let secret = stdout
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("Secret:")
+                .map(|s| s.trim().to_string())
+        })
+        .ok_or_else(|| {
+            SandboxError::Provider(format!(
+                "`agora create {label}`: no 'Secret:' in stdout:\n{stdout}"
+            ))
+        })?;
+    debug!(label, room_id = %room_id, "agora room provisioned");
+    Ok((room_id, secret))
+}
+
+#[cfg(target_os = "linux")]
+/// Per-session run directory, rooted under a well-known persistent location
+/// so UDSes and secrets are NOT on tmpfs.
+///
+/// Default: `$PI_SPRITES_RUN_BASE/<label>/` where `PI_SPRITES_RUN_BASE`
+/// defaults to `<this-process-binary-adjacent>/.pi-sprites` resolved at
+/// runtime. Tests override via `PI_SPRITES_RUN_BASE`.
+///
+/// /tmp is explicitly avoided — on Linux dev hosts /tmp is often a tmpfs
+/// mount with limited capacity and processes/files may not survive a reboot
+/// or aggressive cleaning.
+fn sprites_run_dir(label: &str) -> PathBuf {
+    let base = if let Ok(p) = std::env::var("PI_SPRITES_RUN_BASE") {
+        PathBuf::from(p)
+    } else {
+        // Fallback: ~/.pi/sprites-sessions/ — guaranteed persistent, writable
+        // by the user, and not a tmpfs.
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".pi")
+            .join("sprites-sessions")
+    };
+    base.join(label)
+}
+
 
 /// Default provider name — lower-cased for the telemetry slug.
 const PROVIDER_NAME: &str = "sprites";
@@ -98,7 +292,6 @@ impl SpritesConfig {
 }
 
 /// Per-session state held inside the lifecycle mutex.
-#[derive(Default)]
 struct SessionState {
     /// Sprite ID once `wromm up` has succeeded. None until first
     /// `execute_tool` call.
@@ -108,6 +301,33 @@ struct SessionState {
     /// Set when host-side cleanup has poisoned the session.
     poisoned: Option<String>,
     session_open_start: Option<Instant>,
+    /// Host-side daemon children (cfs-fs-server, contextfs-broker,
+    /// cfs-mesh agora-bridge ×2). Populated only when
+    /// `PI_SPRITES_CONTEXTFS=1`. These are `kill_on_drop`, so they
+    /// die with the provider when `cleanup()` runs.
+    host_children: Vec<Child>,
+    /// Agora room label for the cfs-fs-server bridge (PI_SPRITES_CONTEXTFS=1).
+    room_id_fs: String,
+    /// Agora room label for the contextfs-broker bridge (PI_SPRITES_CONTEXTFS=1).
+    room_id_broker: String,
+    /// Per-session run directory: holds UDSes, cedar.policy, tenant.secret.
+    /// Set during `ensure_session_open` when PI_SPRITES_CONTEXTFS=1.
+    run_dir: Option<PathBuf>,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            sprite_id: None,
+            ready: false,
+            poisoned: None,
+            session_open_start: None,
+            host_children: Vec::new(),
+            room_id_fs: String::new(),
+            room_id_broker: String::new(),
+            run_dir: None,
+        }
+    }
 }
 
 /// Sprites SandboxProvider. v1 dispatches tool calls via `wromm exec`.
@@ -302,6 +522,115 @@ impl SpritesProvider {
             )));
         }
 
+        // ── contextfs host-side daemons (PI_SPRITES_CONTEXTFS=1) ────────
+        // Linux-only: contextfs uses Linux-specific FUSE + UDS infra.
+        //
+        // IMPORTANT: any failure inside this block must call
+        // `try_destroy_sprite` before returning, because the sprite was
+        // already provisioned above (wromm up + worker upload + chmod all
+        // succeeded). Without cleanup the sprite leaks until its own
+        // timeout fires. We collect the result of an inner async block and
+        // map errors through cleanup to enforce this invariant.
+        #[cfg(target_os = "linux")]
+        if std::env::var("PI_SPRITES_CONTEXTFS").as_deref() == Ok("1") {
+            let contextfs_result: Result<(), SandboxError> = async {
+                let run_dir = sprites_run_dir(&self.config.label);
+                std::fs::create_dir_all(&run_dir).map_err(|e| {
+                    SandboxError::Provider(format!(
+                        "create sprites run_dir {}: {e}",
+                        run_dir.display()
+                    ))
+                })?;
+
+                let fs_sock = run_dir.join("cfs-fs.sock");
+                let broker_sock = run_dir.join("broker.sock");
+                let cedar_path = run_dir.join("cedar.policy");
+                let secret_path = run_dir.join("tenant.secret");
+
+                // Write cedar policy (full RW — broker is the policy gate).
+                let policy_text =
+                    crate::microvm::broker_proxy::resolved_cedar_policy_text();
+                std::fs::write(&cedar_path, policy_text).map_err(|e| {
+                    SandboxError::Provider(format!("write cedar.policy: {e}"))
+                })?;
+
+                // Write a random tenant secret (32 random bytes, hex-encoded).
+                let tenant_secret: String = {
+                    let raw: Vec<u8> = (0..32).map(|_| {
+                        // cheap entropy via timestamp mixing
+                        let t = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0u64, |d| d.as_nanos() as u64)
+                            .wrapping_mul(0x9e3779b97f4a7c15u64)
+                            .wrapping_add(rand_u64());
+                        (t & 0xff) as u8
+                    }).collect();
+                    hex::encode(&raw)
+                };
+                std::fs::write(&secret_path, &tenant_secret).map_err(|e| {
+                    SandboxError::Provider(format!("write tenant.secret: {e}"))
+                })?;
+
+                // 1. Spawn cfs-fs-server (RW — broker is the policy gate).
+                let cfs_child =
+                    crate::microvm::contextfs_proxy::spawn_cfs_fs_server(
+                        cwd, &fs_sock, /*read_only=*/ false,
+                    )
+                    .await?;
+
+                // 2. Spawn contextfs-broker.
+                let broker_child =
+                    crate::microvm::broker_proxy::spawn_contextfs_broker(
+                        &broker_sock,
+                        &cedar_path,
+                        &secret_path,
+                    )
+                    .await?;
+
+                // 3. Provision two agora rooms (one for fs-server, one for broker).
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0u64, |d| d.as_nanos() as u64);
+                let fs_label = format!("pi-cfs-fs-{:x}", now_ns & 0xffff_ffff);
+                let broker_label = format!("pi-cfs-br-{:x}", now_ns & 0xffff_ffff);
+
+                let (room_id_fs, _fs_secret) =
+                    provision_agora_room(&fs_label).await?;
+                let (room_id_broker, _br_secret) =
+                    provision_agora_room(&broker_label).await?;
+
+                // 4. Spawn cfs-mesh agora-bridge for fs socket.
+                let bridge_fs = spawn_cfs_mesh_agora_bridge(&fs_label, &fs_sock)?;
+
+                // 5. Spawn cfs-mesh agora-bridge for broker socket.
+                let bridge_broker =
+                    spawn_cfs_mesh_agora_bridge(&broker_label, &broker_sock)?;
+
+                // Store everything in session state.
+                let mut st = self.state.lock().expect("state poisoned");
+                st.host_children.push(cfs_child);
+                st.host_children.push(broker_child);
+                st.host_children.push(bridge_fs);
+                st.host_children.push(bridge_broker);
+                st.room_id_fs = room_id_fs;
+                st.room_id_broker = room_id_broker;
+                st.run_dir = Some(run_dir);
+                Ok(())
+            }
+            .await;
+
+            if let Err(e) = contextfs_result {
+                // contextfs setup failed after the sprite was already
+                // provisioned. Best-effort destroy the sprite so we don't
+                // leak it, then surface the original error to the caller.
+                // The caller's session state does not have `sprite_id` yet
+                // (we return Err before `Ok(sprite_id)`) so cleanup() cannot
+                // reach it — that's why we destroy it inline here.
+                self.try_destroy_sprite(&sprite_id).await;
+                return Err(e);
+            }
+        }
+
         Ok(sprite_id)
     }
 
@@ -469,6 +798,111 @@ impl SpritesProvider {
             cost_usd: None,
         })
     }
+
+    /// Test-only entry point: open the host-side daemons without connecting
+    /// to a real sprite. Used by integration tests that mock the child
+    /// binaries and verify argv + process liveness.
+    ///
+    /// When `PI_SPRITES_CONTEXTFS=1`, this method:
+    ///   - skips the `wromm` lifecycle (no wromm up / cp / chmod)
+    ///   - runs only the contextfs host-side spawn path
+    ///   - stores a synthetic `sprite_id` so the session looks "ready"
+    ///
+    /// Never call this in production code.
+    ///
+    /// Available under `#[cfg(test)]` (unit tests in this crate) AND
+    /// under `#[cfg(feature = "test-helpers")]` (integration tests that
+    /// depend on `pi-sandbox` with `features = ["test-helpers"]`).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn _test_open_host_side_only(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<(), SandboxError> {
+        // Check the required binary env vars before we try anything
+        // (Linux-only check, since contextfs is Linux-only).
+        #[cfg(target_os = "linux")]
+        {
+            let _cfs_fs = crate::microvm::contextfs_proxy::resolved_cfs_fs_server()
+                .ok_or_else(|| {
+                    SandboxError::Unavailable(
+                        "cfs-fs-server not found (set PI_SANDBOX_CFS_FS_SERVER_BIN or                          put cfs-fs-server on PATH)"
+                            .into(),
+                    )
+                })?;
+        }
+
+        // Run the same contextfs block as ensure_session_open but with a
+        // synthetic sprite_id so we don't need wromm.
+        {
+            let mut st = self.state.lock().expect("state poisoned");
+            st.sprite_id = Some("test-sprite-id".to_string());
+        }
+
+        #[cfg(target_os = "linux")]
+        if std::env::var("PI_SPRITES_CONTEXTFS").as_deref() == Ok("1") {
+            let run_dir = sprites_run_dir(&self.config.label);
+            std::fs::create_dir_all(&run_dir).map_err(|e| {
+                SandboxError::Provider(format!(
+                    "create sprites run_dir {}: {e}",
+                    run_dir.display()
+                ))
+            })?;
+
+            let fs_sock = run_dir.join("cfs-fs.sock");
+            let broker_sock = run_dir.join("broker.sock");
+            let cedar_path = run_dir.join("cedar.policy");
+            let secret_path = run_dir.join("tenant.secret");
+
+            let policy_text =
+                crate::microvm::broker_proxy::resolved_cedar_policy_text();
+            std::fs::write(&cedar_path, policy_text).map_err(|e| {
+                SandboxError::Provider(format!("write cedar.policy: {e}"))
+            })?;
+            std::fs::write(&secret_path, "test-secret-placeholder").map_err(|e| {
+                SandboxError::Provider(format!("write tenant.secret: {e}"))
+            })?;
+
+            let cfs_child =
+                crate::microvm::contextfs_proxy::spawn_cfs_fs_server(
+                    cwd, &fs_sock, false,
+                )
+                .await?;
+
+            let broker_child =
+                crate::microvm::broker_proxy::spawn_contextfs_broker(
+                    &broker_sock,
+                    &cedar_path,
+                    &secret_path,
+                )
+                .await?;
+
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0u64, |d| d.as_nanos() as u64);
+            let fs_label = format!("pi-cfs-fs-test-{:x}", now_ns & 0xffff_ffff);
+            let broker_label = format!("pi-cfs-br-test-{:x}", now_ns & 0xffff_ffff);
+
+            let (room_id_fs, _fs_secret) = provision_agora_room(&fs_label).await?;
+            let (room_id_broker, _br_secret) =
+                provision_agora_room(&broker_label).await?;
+
+            let bridge_fs = spawn_cfs_mesh_agora_bridge(&fs_label, &fs_sock)?;
+            let bridge_broker =
+                spawn_cfs_mesh_agora_bridge(&broker_label, &broker_sock)?;
+
+            let mut st = self.state.lock().expect("state poisoned");
+            st.host_children.push(cfs_child);
+            st.host_children.push(broker_child);
+            st.host_children.push(bridge_fs);
+            st.host_children.push(bridge_broker);
+            st.room_id_fs = room_id_fs;
+            st.room_id_broker = room_id_broker;
+            st.run_dir = Some(run_dir);
+            st.ready = true;
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -532,11 +966,18 @@ impl SandboxProvider for SpritesProvider {
     }
 
     async fn cleanup(&self) -> Result<(), SandboxError> {
-        let id = {
+        let (id, children) = {
             let mut st = self.state.lock().expect("state poisoned");
             st.ready = false;
-            st.sprite_id.take()
+            let id = st.sprite_id.take();
+            // Drain children — `kill_on_drop` fires in the Drop impl of each
+            // `tokio::process::Child`, so draining the Vec is enough.
+            let children = std::mem::take(&mut st.host_children);
+            (id, children)
         };
+        // Drop the children first so their kill_on_drop fires while we still
+        // have async context. Then destroy the sprite.
+        drop(children);
         if let Some(id) = id {
             self.try_destroy_sprite(&id).await;
         }
