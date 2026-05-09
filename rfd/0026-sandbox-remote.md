@@ -1890,15 +1890,45 @@ transport.
       number; need a real benchmark before declaring this v2.
 2. **Static `contextfsd` portability.** Real-world FUSE behavior varies
       between Alpine, Debian, and Ubuntu kernels. We've validated the
-      microVM Alpine guest only; E2B's base template is Ubuntu-derived.
-3. **Bootstrap tar size.** ~15 MB upload at session open per the bin
-      sizes. Tolerable but pushes E2B's "instant" cold-start narrative.
+      microVM Alpine guest only; E2B's base template is Debian-derived.
+      *Confirmed 2026-05-09 probe:* the musl-static `contextfsd` binary
+      builds, runs, and reaches `mount(2)` cleanly inside an E2B
+      Debian-12 sandbox. The PDP, audit log, cache, and remote-fs
+      backend all initialise without modification.
+3. **Bootstrap tar size.** ~40 MB raw / ~15 MB after zstd for
+      contextfsd + cfs-mesh + cfs-fs-server + contextfs-broker + agora.
+      Tolerable for session-open, but a per-tool-call hit if we ever
+      need to re-upload anything.
 4. **agora broker dependency.** Single point of failure for fs ops.
       Need a health-check + graceful-degrade story before turning the
       Contextfs mode on by default.
 5. **Concurrent FUSE writes vs Cedar broker.** Already handled in
       microVM path (broker queues per-write evaluations); confirm
       end-to-end latency holds when broker is reached over agora.
+6. **🚧 E2B base template blocks user FUSE mounts (BLOCKING).**
+      *Confirmed 2026-05-09 probe:* on E2B's `base` template,
+      `/dev/fuse` is mode `600 root:root` and `no_new_privs=1` is
+      set on the agent process, which neutralises `fusermount3`'s
+      setuid bit AND blocks `sudo` outright (`sudo: The "no new
+      privileges" flag is set`). `contextfsd` reaches
+      `spawn_mount2 → Permission denied (os error 13)` on every
+      attempt. **No workaround within the base template.**
+
+      **Mitigation:** ship a pi-rs-owned E2B template
+      (`pi-rs-contextfs`, built once via `e2b template build`) that
+      either (a) `chmod 0666 /dev/fuse` at boot via root-owned init
+      script and runs the agent without `no_new_privs`, or (b)
+      starts `contextfsd` as root before dropping to `user`. The
+      template SHA is then a fixed E2B template ID we point
+      `--sandbox-provider=e2b` at via a new
+      `--e2b-template=pi-rs-contextfs` CLI knob.
+
+      Validation steps required before v2 ships:
+      - Build the template, confirm `mount(2)` succeeds for
+        `contextfsd` post-boot.
+      - Measure cold-start delta vs. `base` template
+        (custom templates have a slight cold-start tax on E2B).
+      - Document the template's Dockerfile + the rebuild cadence.
 
 ### Acceptance criteria
 
