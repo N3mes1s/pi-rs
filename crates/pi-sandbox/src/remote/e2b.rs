@@ -136,6 +136,12 @@ impl E2bConfig {
 struct SessionState {
     /// Active E2B sandbox ID (`None` until first `execute_tool` call).
     sandbox_id: Option<String>,
+    /// envd HTTP base URL (e.g. `https://49983-<sandboxID>-<clientID>.e2b.app`).
+    /// Constructed from the `POST /sandboxes` response (`domain`, `clientID`).
+    envd_url: Option<String>,
+    /// envd access token (from `POST /sandboxes`). Sent as `X-Access-Token`
+    /// on every envd request when present.
+    envd_access_token: Option<String>,
     /// True once the sandbox has been set up (worker uploaded, /work synced).
     ready: bool,
     /// True if host-side flushback failed — all subsequent calls are rejected.
@@ -318,34 +324,84 @@ struct CreateSandboxBody {
 }
 
 /// JSON response from `POST /sandboxes`.
+///
+/// Per the E2B OpenAPI spec, the control plane creates the sandbox and
+/// returns the metadata needed to reach envd on the per-sandbox subdomain
+/// (`{port}-{sandboxID}-{clientID}.{domain}`). All non-control-plane traffic
+/// (file upload/download, command execution) goes there, NOT to api.e2b.dev.
 #[derive(Deserialize)]
 struct CreateSandboxResponse {
     #[serde(rename = "sandboxID")]
     sandbox_id: String,
+    /// `clientID` — present in the response even though the OpenAPI spec
+    /// marks the field as deprecated. Still used to build the envd subdomain.
+    #[serde(default, rename = "clientID")]
+    client_id: Option<String>,
+    /// Base domain ("e2b.app" by default; nullable in the spec).
+    #[serde(default)]
+    domain: Option<String>,
+    /// Token sent on every envd request as `X-Access-Token`. Required for
+    /// `secure: true` sandboxes; harmless for non-secure ones.
+    #[serde(default, rename = "envdAccessToken")]
+    envd_access_token: Option<String>,
 }
 
-/// JSON body for `POST /sandboxes/{id}/commands`.
-#[derive(Serialize)]
-struct RunCommandBody {
-    cmd: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stdin: Option<String>,
+/// Default envd port. Documented in the E2B "How E2B works" page; the envd
+/// daemon binds `0.0.0.0:49983` inside every sandbox.
+const ENVD_PORT: u16 = 49983;
+/// Fallback domain when `CreateSandboxResponse.domain` is null.
+const ENVD_DEFAULT_DOMAIN: &str = "e2b.app";
+/// Where the worker binary lives inside the sandbox. Under `/home/user/` so
+/// the regular sandbox user can chmod +x it (envd Start runs as that user).
+const WORKER_REMOTE_PATH: &str = "/home/user/pi-sandbox-worker";
+
+/// Build the envd HTTP base URL for a given sandbox.
+///
+/// Pattern: `https://{port}-{sandboxID}[-{clientID}].{domain}`
+/// - clientID is included when present (deprecated but still required for
+///   compatibility with current E2B routing).
+/// - domain falls back to `e2b.app` when null.
+fn build_envd_url(sandbox_id: &str, client_id: Option<&str>, domain: Option<&str>) -> String {
+    let domain = domain.unwrap_or(ENVD_DEFAULT_DOMAIN);
+    match client_id {
+        Some(cid) if !cid.is_empty() => {
+            format!("https://{ENVD_PORT}-{sandbox_id}-{cid}.{domain}")
+        }
+        _ => format!("https://{ENVD_PORT}-{sandbox_id}.{domain}"),
+    }
 }
 
-/// JSON response from `POST /sandboxes/{id}/commands`.
-#[derive(Deserialize)]
-struct RunCommandResponse {
-    #[serde(rename = "cmdID")]
-    cmd_id: String,
+/// Bundle of fields needed to talk to a sandbox's envd: base URL + access
+/// token. Constructed inside `ensure_session_open` from the
+/// `POST /sandboxes` response and threaded through subsequent envd calls.
+#[derive(Clone, Debug)]
+struct EnvdEndpoint {
+    url: String,
+    access_token: Option<String>,
 }
 
-/// JSON response from `GET /sandboxes/{id}/commands/{cmd_id}`.
-#[derive(Deserialize)]
+impl EnvdEndpoint {
+    /// Apply the access token (if any) as an `X-Access-Token` header. envd
+    /// requires this header on `secure: true` sandboxes; non-secure sandboxes
+    /// ignore it.
+    fn auth(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(tok) = &self.access_token {
+            req = req.header("X-Access-Token", tok);
+        }
+        req
+    }
+}
+
+/// Result of a synchronous command execution. Populated from the envd
+/// Connect-RPC `Start` stream by `run_command_sync`.
 struct PollCommandResponse {
-    finished: bool,
-    #[serde(rename = "exitCode")]
     exit_code: Option<i32>,
+    /// Captured stdout from the streamed `DataEvent`s (for diagnostics; the
+    /// dispatch path routes the worker's real stdout to a file in /tmp).
+    #[allow(dead_code)]
     stdout: Option<String>,
+    #[allow(dead_code)]
+    stderr: Option<String>,
 }
 
 /// ToolResponse shape for parsing worker output.
@@ -446,39 +502,66 @@ impl E2bProvider {
             .await
             .map_err(|e| SandboxError::Provider(e.to_string()))?;
         let sandbox_id = sandbox.sandbox_id;
+        let envd = EnvdEndpoint {
+            url: build_envd_url(
+                &sandbox_id,
+                sandbox.client_id.as_deref(),
+                sandbox.domain.as_deref(),
+            ),
+            access_token: sandbox.envd_access_token,
+        };
+        tracing::debug!(sandbox_id, envd_url = %envd.url, "E2B: sandbox created, envd reachable at");
 
-        // 4. Upload the worker binary.
-        let upload_result = self
-            .upload_worker(&sandbox_id, &worker_bin)
-            .await;
-        if let Err(e) = upload_result {
+        // Stash envd info in session state so dispatch_tool can find it later.
+        {
+            let mut state = self.state.lock().expect("E2bProvider state lock poisoned");
+            state.envd_url = Some(envd.url.clone());
+            state.envd_access_token = envd.access_token.clone();
+        }
+
+        // 4. Wait until envd is responsive (the sandbox VM may need a moment
+        //    to finish booting). 5-second budget; ~50 ms polling interval.
+        if let Err(e) = self.wait_envd_ready(&envd).await {
             self.try_delete_sandbox(&sandbox_id).await;
             return Err(e);
         }
 
-        // 5. chmod +x the worker.
-        let chmod_result = self
+        // 5. Upload the worker binary via envd's REST file API.
+        if let Err(e) = self.upload_worker(&envd, &worker_bin).await {
+            self.try_delete_sandbox(&sandbox_id).await;
+            return Err(e);
+        }
+
+        // 6. chmod +x the worker. Fail loudly if the chmod itself succeeds at
+        // the RPC level but exits non-zero (e.g. permission issues).
+        let chmod_res = self
             .run_command_sync(
-                &sandbox_id,
-                vec![
-                    "chmod".into(),
-                    "+x".into(),
-                    "/usr/local/bin/pi-sandbox-worker".into(),
-                ],
+                &envd,
+                format!("chmod +x {WORKER_REMOTE_PATH}"),
                 None,
                 30_000,
             )
             .await;
-        if let Err(e) = chmod_result {
-            self.try_delete_sandbox(&sandbox_id).await;
-            return Err(SandboxError::Provider(format!(
-                "session open failed: chmod worker: {e}"
-            )));
+        match chmod_res {
+            Err(e) => {
+                self.try_delete_sandbox(&sandbox_id).await;
+                return Err(SandboxError::Provider(format!(
+                    "session open failed: chmod worker: {e}"
+                )));
+            }
+            Ok(p) if p.exit_code.unwrap_or(1) != 0 => {
+                let stderr = p.stderr.clone().unwrap_or_default();
+                self.try_delete_sandbox(&sandbox_id).await;
+                return Err(SandboxError::Provider(format!(
+                    "session open failed: chmod worker exited with {:?}: {stderr}",
+                    p.exit_code,
+                )));
+            }
+            Ok(_) => {}
         }
 
-        // 6. SmartSync cwd → /work (best-effort; errors abort session open).
-        let sync_result = self.smart_sync(&sandbox_id, cwd).await;
-        if let Err(e) = sync_result {
+        // 7. SmartSync cwd → /work (best-effort; errors abort session open).
+        if let Err(e) = self.smart_sync(&envd, cwd).await {
             self.try_delete_sandbox(&sandbox_id).await;
             return Err(e);
         }
@@ -486,66 +569,90 @@ impl E2bProvider {
         Ok(sandbox_id)
     }
 
-    /// Upload the worker binary to `/usr/local/bin/pi-sandbox-worker`.
-    async fn upload_worker(&self, sandbox_id: &str, worker_bin: &str) -> Result<(), SandboxError> {
+    /// Poll envd's `/health` endpoint until it returns 204 (or until the
+    /// budget is exhausted). E2B sandboxes are usually ready within ~1-2 s
+    /// after `POST /sandboxes` returns, but the network path takes a moment
+    /// to converge — so we don't slam the file API the instant the control
+    /// plane returns.
+    async fn wait_envd_ready(&self, envd: &EnvdEndpoint) -> Result<(), SandboxError> {
+        let url = format!("{}/health", envd.url);
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        let mut last_err: Option<String> = None;
+        loop {
+            let req = self.client.get(&url);
+            let req = envd.auth(req);
+            match req.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() || status.as_u16() == 204 {
+                        return Ok(());
+                    }
+                    last_err = Some(format!("/health returned {status}"));
+                }
+                Err(e) => last_err = Some(e.to_string()),
+            }
+            if Instant::now() >= deadline {
+                return Err(SandboxError::Provider(format!(
+                    "envd never became ready at {}: {}",
+                    envd.url,
+                    last_err.unwrap_or_else(|| "unknown".into())
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Upload the worker binary into the sandbox via envd's REST file API.
+    ///
+    /// Uploads to `/home/user/pi-sandbox-worker` owned by `user`, so the
+    /// follow-up `chmod +x` (which runs as `user` — envd's `Start` RPC has no
+    /// way to override the process UID) can apply the executable bit. We
+    /// previously uploaded under `/usr/local/bin/` owned by `root`, which
+    /// silently broke chmod and surfaced as "exit 126: Permission denied" on
+    /// every tool call.
+    async fn upload_worker(
+        &self,
+        envd: &EnvdEndpoint,
+        worker_bin: &str,
+    ) -> Result<(), SandboxError> {
         let bytes = tokio::fs::read(worker_bin).await.map_err(|e| {
             SandboxError::Provider(format!("upload failed: read worker binary: {e}"))
         })?;
-        let url = format!(
-            "{}/sandboxes/{}/files?path=/usr/local/bin/pi-sandbox-worker",
-            self.config.base_url, sandbox_id
-        );
-        let resp = self
-            .client
-            .post(&url)
-            .header("X-API-Key", &self.config.api_key)
-            .header("Content-Type", "application/octet-stream")
-            .body(bytes)
-            .send()
-            .await
-            .map_err(map_reqwest_err)?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(SandboxError::Provider(format!(
-                "upload failed: pi-sandbox-worker: {status} {body}"
-            )));
-        }
-        Ok(())
+        envd_upload_file(
+            &self.client,
+            envd,
+            WORKER_REMOTE_PATH,
+            "user",
+            bytes,
+            "pi-sandbox-worker",
+        )
+        .await
     }
 
     /// Upload host cwd files to /work in the sandbox using SmartSync.
     ///
     /// Walks the cwd, filters out excluded paths (node_modules, target, etc.
-    /// and files > 100 MB), then uploads concurrently.
+    /// and files > 100 MB), then uploads concurrently via envd's REST API.
     async fn smart_sync(
         &self,
-        sandbox_id: &str,
+        envd: &EnvdEndpoint,
         cwd: &std::path::Path,
     ) -> Result<(), SandboxError> {
         use futures::StreamExt;
 
         let files = collect_upload_files(cwd);
         let concurrency = self.config.upload_concurrency;
-        let base_url = self.config.base_url.clone();
-        let api_key = self.config.api_key.clone();
         let client = self.client.clone();
-        let sandbox_id = sandbox_id.to_string();
+        let envd = envd.clone();
         let cwd = cwd.to_path_buf();
 
         futures::stream::iter(files)
             .map(|path| {
-                let base_url = base_url.clone();
-                let api_key = api_key.clone();
                 let client = client.clone();
-                let sandbox_id = sandbox_id.clone();
+                let envd = envd.clone();
                 let cwd = cwd.clone();
                 async move {
                     let rel = path.strip_prefix(&cwd).unwrap_or(&path);
-                    // Build the POSIX remote path with explicit forward-slash
-                    // separators. `to_string_lossy()` uses the *host* OS path
-                    // separator (backslash on Windows), which would produce an
-                    // invalid guest path like `/work\src\main.rs`.
                     let posix_rel: String = rel
                         .components()
                         .filter_map(|c| {
@@ -558,31 +665,21 @@ impl E2bProvider {
                         .collect::<Vec<_>>()
                         .join("/");
                     let remote_path = format!("/work/{posix_rel}");
-                    let encoded = percent_encode_path(&remote_path);
-                    let url =
-                        format!("{base_url}/sandboxes/{sandbox_id}/files?path={encoded}");
                     let bytes = tokio::fs::read(&path).await.map_err(|e| {
                         SandboxError::Provider(format!(
                             "upload failed: {}: {e}",
                             path.display()
                         ))
                     })?;
-                    let resp = client
-                        .post(&url)
-                        .header("X-API-Key", &api_key)
-                        .header("Content-Type", "application/octet-stream")
-                        .body(bytes)
-                        .send()
-                        .await
-                        .map_err(map_reqwest_err)?;
-                    if !resp.status().is_success() {
-                        let status = resp.status();
-                        return Err(SandboxError::Provider(format!(
-                            "upload failed: {}: {status}",
-                            rel.display()
-                        )));
-                    }
-                    Ok::<(), SandboxError>(())
+                    envd_upload_file(
+                        &client,
+                        &envd,
+                        &remote_path,
+                        "user",
+                        bytes,
+                        &rel.display().to_string(),
+                    )
+                    .await
                 }
             })
             .buffer_unordered(concurrency)
@@ -593,78 +690,158 @@ impl E2bProvider {
             .unwrap_or(Ok(()))
     }
 
-    /// Run a command synchronously (create + poll until finished).
-    /// Returns the exit code or an error if the poll times out.
+    /// Run a shell command in the sandbox via envd's Connect-RPC
+    /// `/process.Process/Start` endpoint (server-streaming).
+    ///
+    /// `cmd` is interpreted by `/bin/sh -c` so callers can use shell features
+    /// (pipes, redirection). `stdin` is currently ignored — callers needing
+    /// stdin should pre-upload a file and redirect from it inside the shell
+    /// command. `timeout_ms` is enforced both client-side (HTTP read timeout)
+    /// and via the streaming response: if the process doesn't emit an
+    /// `EndEvent` before the deadline we return `SandboxError::Timeout`.
     async fn run_command_sync(
         &self,
-        sandbox_id: &str,
-        cmd: Vec<String>,
-        stdin: Option<String>,
+        envd: &EnvdEndpoint,
+        cmd: String,
+        _stdin: Option<String>,
         timeout_ms: u64,
     ) -> Result<PollCommandResponse, SandboxError> {
-        // Submit the command.
-        let cmd_url = format!("{}/sandboxes/{}/commands", self.config.base_url, sandbox_id);
-        let body = RunCommandBody { cmd, stdin };
-        let resp = self
+        let req = serde_json::json!({
+            "process": {
+                "cmd": "/bin/sh",
+                "args": ["-c", cmd],
+            },
+        });
+        let body = serde_json::to_vec(&req)
+            .map_err(|e| SandboxError::Provider(format!("encode StartRequest: {e}")))?;
+        let envelope = connect_envelope(0, &body);
+
+        let url = format!("{}/process.Process/Start", envd.url);
+        let req = self
             .client
-            .post(&cmd_url)
-            .header("X-API-Key", &self.config.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_err)?;
+            .post(&url)
+            .header("Content-Type", "application/connect+json")
+            .header("Connect-Protocol-Version", "1")
+            .header(
+                "Connect-Timeout-Ms",
+                (timeout_ms + 5_000).to_string(),
+            )
+            .body(envelope);
+        let req = envd.auth(req);
+        let resp = req.send().await.map_err(map_reqwest_err)?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             return Err(SandboxError::Provider(format!(
-                "E2B command submit failed: {status} {text}"
+                "envd /process.Process/Start failed: {status} {text}"
             )));
         }
-        let run_resp: RunCommandResponse =
-            resp.json().await.map_err(|e| SandboxError::Provider(e.to_string()))?;
-        let cmd_id = run_resp.cmd_id;
 
-        // Poll until finished or timeout.
-        let deadline = tokio::time::Instant::now()
-            + tokio::time::Duration::from_millis(timeout_ms + 5000);
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let deadline = Instant::now() + std::time::Duration::from_millis(timeout_ms + 5_000);
+        let mut stdout = Vec::<u8>::new();
+        let mut stderr = Vec::<u8>::new();
+        let mut exit_code: Option<i32> = None;
+
+        let mut stream = resp.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
+
+        use futures::StreamExt;
         loop {
-            if tokio::time::Instant::now() > deadline {
+            // Drain any complete envelopes already in `buf`.
+            loop {
+                if Instant::now() > deadline {
+                    return Err(SandboxError::Timeout);
+                }
+                if buf.len() < 5 {
+                    break;
+                }
+                let flags = buf[0];
+                let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+                if buf.len() < 5 + len {
+                    break;
+                }
+                let payload = buf[5..5 + len].to_vec();
+                buf.drain(..5 + len);
+
+                if flags & 0x02 != 0 {
+                    // End-of-stream marker. Body may carry an error JSON.
+                    let trailers: serde_json::Value =
+                        serde_json::from_slice(&payload).unwrap_or(serde_json::json!({}));
+                    if let Some(err) = trailers.get("error") {
+                        return Err(SandboxError::Provider(format!(
+                            "envd Start RPC error: {err}"
+                        )));
+                    }
+                    let exit = exit_code.unwrap_or(0);
+                    return Ok(PollCommandResponse {
+                        exit_code: Some(exit),
+                        stdout: Some(String::from_utf8_lossy(&stdout).into_owned()),
+                        stderr: Some(String::from_utf8_lossy(&stderr).into_owned()),
+                    });
+                }
+
+                // Normal message envelope. Parse StartResponse.event.
+                let msg: serde_json::Value = serde_json::from_slice(&payload).map_err(|e| {
+                    SandboxError::Provider(format!(
+                        "decode StartResponse envelope: {e}: {}",
+                        String::from_utf8_lossy(&payload)
+                    ))
+                })?;
+                let event = msg.get("event").cloned().unwrap_or(serde_json::Value::Null);
+                if let Some(data) = event.get("data") {
+                    if let Some(b64) = data.get("stdout").and_then(|v| v.as_str()) {
+                        if let Ok(bytes) = base64_decode(b64) {
+                            stdout.extend_from_slice(&bytes);
+                        }
+                    }
+                    if let Some(b64) = data.get("stderr").and_then(|v| v.as_str()) {
+                        if let Ok(bytes) = base64_decode(b64) {
+                            stderr.extend_from_slice(&bytes);
+                        }
+                    }
+                }
+                if let Some(end) = event.get("end") {
+                    exit_code = end.get("exitCode").and_then(|v| v.as_i64()).map(|n| n as i32);
+                }
+                // start / keepalive: ignore.
+            }
+
+            if Instant::now() > deadline {
                 return Err(SandboxError::Timeout);
             }
-            let poll_url = format!(
-                "{}/sandboxes/{}/commands/{}",
-                self.config.base_url, sandbox_id, cmd_id
-            );
-            let poll_resp = self
-                .client
-                .get(&poll_url)
-                .header("X-API-Key", &self.config.api_key)
-                .send()
-                .await
-                .map_err(map_reqwest_err)?;
-            if !poll_resp.status().is_success() {
-                let status = poll_resp.status();
-                return Err(SandboxError::Provider(format!(
-                    "E2B command poll failed: {status}"
-                )));
+            match stream.next().await {
+                Some(Ok(chunk)) => buf.extend_from_slice(&chunk),
+                Some(Err(e)) => {
+                    return Err(SandboxError::Provider(format!(
+                        "envd Start stream read error: {e}"
+                    )));
+                }
+                None => {
+                    // Stream ended without an end-of-stream envelope.
+                    let exit = exit_code.unwrap_or(1);
+                    return Ok(PollCommandResponse {
+                        exit_code: Some(exit),
+                        stdout: Some(String::from_utf8_lossy(&stdout).into_owned()),
+                        stderr: Some(String::from_utf8_lossy(&stderr).into_owned()),
+                    });
+                }
             }
-            let poll: PollCommandResponse = poll_resp
-                .json()
-                .await
-                .map_err(|e| SandboxError::Provider(e.to_string()))?;
-            if poll.finished {
-                return Ok(poll);
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
     }
 
-    /// Execute a tool in the sandbox by running the worker one-shot via stdin.
-    /// Returns SandboxExecution and any file_writes from the response.
+    /// Execute a tool in the sandbox by running the worker one-shot.
+    ///
+    /// The flow:
+    /// 1. Upload the serialised `ToolRequest` JSON to `/tmp/pi-req-{call}.json`
+    ///    via envd's REST file API.
+    /// 2. Run `pi-sandbox-worker --transport stdin` under `/bin/sh`, redirecting
+    ///    stdin from the uploaded request file and stdout to a response file
+    ///    (envd's `Start` RPC doesn't accept streamed stdin in this provider's
+    ///    one-shot mode, so we route it through a file).
+    /// 3. Download the response file and parse it as a `ToolResponse`.
     async fn dispatch_tool(
         &self,
-        sandbox_id: &str,
+        envd: &EnvdEndpoint,
         tool_name: &str,
         tool_input: &serde_json::Value,
         ctx: &ToolContext,
@@ -672,14 +849,8 @@ impl E2bProvider {
         use pi_sandbox_protocol::{ToolRequest, CURRENT_PROTOCOL_VERSION};
 
         // Extract per-tool timeout from the tool_input JSON (e.g. bash passes
-        // `timeout_ms`). Fall back to 120 000 ms (the bash default) so we don't
-        // silently cap long-running commands at 60 s. The RFD specifies that
-        // `ToolRequest.timeout_ms` is the actual enforced guest timeout.
-        //
-        // Cap at 600_000 ms (10 minutes) — the same hard ceiling BashTool
-        // enforces via `BASH_MAX_TIMEOUT_MS` (pi_tools_core::bash). Without
-        // this clamp a caller can pass `timeout_ms = u32::MAX` (~49 days) and
-        // the poll loop blocks far past any reasonable deadline.
+        // `timeout_ms`). Fall back to 120 000 ms; cap at 600 000 ms (the same
+        // hard ceiling BashTool enforces via `BASH_MAX_TIMEOUT_MS`).
         let tool_timeout_ms: u32 = tool_input
             .get("timeout_ms")
             .and_then(|v| v.as_u64())
@@ -695,29 +866,62 @@ impl E2bProvider {
             max_output_bytes: ctx.max_output_bytes as u32,
             timeout_ms: tool_timeout_ms,
         };
-        let stdin_line = serde_json::to_string(&request)
+        let request_json = serde_json::to_string(&request)
             .map_err(|e| SandboxError::Provider(e.to_string()))?
             + "\n";
 
-        let cmd = vec![
-            "/usr/local/bin/pi-sandbox-worker".to_string(),
-            "--transport".to_string(),
-            "stdin".to_string(),
-            "--work-dir".to_string(),
-            "/work".to_string(),
-            "--log-level".to_string(),
-            "warn".to_string(),
-        ];
+        // Stage request/response/stderr in /home/user — envd's file API and
+        // the user's shell see the same view there.  /tmp behaves as if the
+        // file API and Start were chroot'd separately, so files written via
+        // shell redirection to /tmp aren't visible via GET /files.
+        let req_path = format!("/home/user/pi-req-{call_id}.json");
+        let resp_path = format!("/home/user/pi-resp-{call_id}.json");
 
-        let poll = self
-            .run_command_sync(sandbox_id, cmd, Some(stdin_line), tool_timeout_ms as u64)
+        envd_upload_file(
+            &self.client,
+            envd,
+            &req_path,
+            "user",
+            request_json.into_bytes(),
+            "ToolRequest",
+        )
+        .await?;
+
+        // Run the worker with stdin from the request file. We use single-quoted
+        // paths to keep the shell from re-interpreting them. Path components are
+        // ascii (uuid_like + fixed prefix) so escaping is unnecessary, but we
+        // still include explicit redirection for stdout and stderr so we can
+        // surface worker stderr in errors.
+        let stderr_path = format!("/home/user/pi-err-{call_id}.log");
+        let cmd = format!(
+            "{WORKER_REMOTE_PATH} --transport stdin --work-dir /work --log-level warn \
+             < '{req_path}' > '{resp_path}' 2> '{stderr_path}'"
+        );
+
+        let run_res = self
+            .run_command_sync(envd, cmd, None, tool_timeout_ms as u64)
             .await?;
+        let exit_code = run_res.exit_code.unwrap_or(1);
 
-        let exit_code = poll.exit_code.unwrap_or(1);
-        let raw_stdout = poll.stdout.unwrap_or_default();
+        // Best-effort: download the response file. If the worker crashed
+        // before writing it, surface its stderr to help debugging.
+        let resp_bytes = match envd_download_file(&self.client, envd, &resp_path).await {
+            Ok(b) => b,
+            Err(e) => {
+                let stderr = envd_download_file(&self.client, envd, &stderr_path)
+                    .await
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .unwrap_or_default();
+                return Err(SandboxError::Provider(format!(
+                    "worker exited with code {exit_code}; no response file at {resp_path}: {e}; \
+                     worker stderr: {stderr}"
+                )));
+            }
+        };
+        let resp_text = String::from_utf8_lossy(&resp_bytes);
 
-        // Parse the ToolResponse from stdout.
-        match serde_json::from_str::<WorkerToolResponse>(raw_stdout.trim()) {
+        match serde_json::from_str::<WorkerToolResponse>(resp_text.trim()) {
             Ok(tr) => {
                 let exec = SandboxExecution {
                     stdout: tr.stdout,
@@ -728,9 +932,18 @@ impl E2bProvider {
                 };
                 Ok((exec, tr.file_writes))
             }
-            Err(_) => Err(SandboxError::Provider(format!(
-                "worker exited with code {exit_code}; no valid ToolResponse in stdout"
-            ))),
+            Err(e) => {
+                let stderr = envd_download_file(&self.client, envd, &stderr_path)
+                    .await
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .unwrap_or_default();
+                Err(SandboxError::Provider(format!(
+                    "worker exited with code {exit_code}; ToolResponse parse failed: {e}; \
+                     stdout snippet: {snip}; stderr: {stderr}",
+                    snip = resp_text.chars().take(400).collect::<String>(),
+                )))
+            }
         }
     }
 
@@ -1053,7 +1266,8 @@ impl SandboxProvider for E2bProvider {
                     }
                 }
 
-                // Lazy session open.
+                // Lazy session open. ensure_session_open also stashes envd_url
+                // and envd_access_token in state.
                 let id = self.ensure_session_open(&ctx.cwd).await?;
                 {
                     let mut state =
@@ -1072,9 +1286,21 @@ impl SandboxProvider for E2bProvider {
             // open_guard drops here, releasing the async lock.
         };
 
+        // Re-read the envd info from state (populated by ensure_session_open).
+        let envd = {
+            let state = self.state.lock().expect("E2bProvider state lock poisoned");
+            EnvdEndpoint {
+                url: state
+                    .envd_url
+                    .clone()
+                    .expect("ready=true but envd_url is None"),
+                access_token: state.envd_access_token.clone(),
+            }
+        };
+
         // Dispatch the tool call.
         let (mut exec, file_writes) = self
-            .dispatch_tool(&sandbox_id, tool_name, tool_input, ctx)
+            .dispatch_tool(&envd, tool_name, tool_input, ctx)
             .await?;
 
         // Detect inline-flushback overflow (RFD 0026 §"Size cap and fallback").
@@ -1200,6 +1426,88 @@ fn percent_encode_path(s: &str) -> String {
         .add(b'|')
         .add(b'}');
     percent_encode(s.as_bytes(), QUERY_COMPONENT).to_string()
+}
+
+// ── envd helpers ────────────────────────────────────────────────────────────
+
+/// Build a Connect-RPC envelope: 1 byte flags + 4 bytes BE message length +
+/// payload. flags=0 for a normal message, flags=2 for the end-stream marker.
+fn connect_envelope(flags: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + payload.len());
+    out.push(flags);
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Standard base64 decode wrapper. envd JSON-encodes byte fields with the
+/// `bytes` proto type, which protojson serialises as standard-base64.
+fn base64_decode(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(s.as_bytes())
+}
+
+/// Upload a file to a sandbox via envd's REST `POST /files` endpoint.
+///
+/// `username` is required by envd: pass "user" for the regular sandbox user
+/// or "root" when writing to root-owned paths (e.g. `/usr/local/bin/`).
+async fn envd_upload_file(
+    client: &reqwest::Client,
+    envd: &EnvdEndpoint,
+    remote_path: &str,
+    username: &str,
+    bytes: Vec<u8>,
+    label: &str,
+) -> Result<(), SandboxError> {
+    let encoded_path = percent_encode_path(remote_path);
+    let encoded_user = percent_encode_path(username);
+    let url = format!("{}/files?path={encoded_path}&username={encoded_user}", envd.url);
+
+    // envd's POST /files accepts multipart/form-data with a "file" part. The
+    // OpenAPI spec also mentions application/octet-stream, but the multipart
+    // path is what every official SDK uses and is the most reliable across
+    // envd versions.
+    let part = reqwest::multipart::Part::bytes(bytes)
+        .file_name("upload")
+        .mime_str("application/octet-stream")
+        .map_err(|e| SandboxError::Provider(format!("upload {label}: {e}")))?;
+    let form = reqwest::multipart::Form::new().part("file", part);
+
+    let req = client.post(&url).multipart(form);
+    let req = envd.auth(req);
+    let resp = req.send().await.map_err(map_reqwest_err)?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(SandboxError::Provider(format!(
+            "upload failed: {label}: {status} {body}"
+        )));
+    }
+    Ok(())
+}
+
+/// Download a file from the sandbox via envd's REST `GET /files`.
+async fn envd_download_file(
+    client: &reqwest::Client,
+    envd: &EnvdEndpoint,
+    remote_path: &str,
+) -> Result<Vec<u8>, SandboxError> {
+    let encoded_path = percent_encode_path(remote_path);
+    // Use "user" — non-secure sandboxes accept any username; secure ones
+    // map signature scope by username.
+    let url = format!("{}/files?path={encoded_path}&username=user", envd.url);
+    let req = client.get(&url);
+    let req = envd.auth(req);
+    let resp = req.send().await.map_err(map_reqwest_err)?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(SandboxError::Provider(format!(
+            "download {remote_path}: {status} {body}"
+        )));
+    }
+    let bytes = resp.bytes().await.map_err(map_reqwest_err)?;
+    Ok(bytes.to_vec())
 }
 
 /// Hard exclusion globs for SmartSync (applied in addition to .gitignore).
