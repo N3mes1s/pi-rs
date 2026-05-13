@@ -8,8 +8,8 @@
 
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event as CtEvent, EventStream, KeyCode, KeyEvent,
-    KeyModifiers,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as CtEvent, EventStream, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::style::{available_color_count, Color, ResetColor, SetForegroundColor};
 use crossterm::terminal::{
@@ -55,7 +55,13 @@ impl RawGuard {
         // CSI 200~ ... CSI 201~ so multi-line paste arrives as a single
         // CtEvent::Paste(String) rather than a sequence of Enter keys
         // that would submit early on the first newline.
-        execute!(out, EnterAlternateScreen, Hide, EnableBracketedPaste)?;
+        execute!(
+            out,
+            EnterAlternateScreen,
+            Hide,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )?;
         Ok(RawGuard)
     }
 }
@@ -65,6 +71,7 @@ impl Drop for RawGuard {
         let mut out = std::io::stdout();
         let _ = execute!(
             out,
+            DisableMouseCapture,
             DisableBracketedPaste,
             Show,
             LeaveAlternateScreen,
@@ -597,12 +604,10 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
         return KeyOutcome::None;
     }
 
-    // Scrollback navigation. The transcript is unbounded — until now,
-    // PageUp/PageDown were no-ops and content scrolled off the top was
-    // simply lost from view. These keys mutate `view.scroll_offset`
+    // Scrollback navigation. These keys mutate `view.scroll_offset`
     // (rows above the tail) which the renderer applies as a window
-    // shift. Clamping happens at render time. Mouse-wheel support
-    // pending.
+    // shift. Clamping happens at render time. Mouse wheel events
+    // are handled in the event loop dispatcher.
     const SCROLL_PAGE: usize = 10;
     const SCROLL_FINE: usize = 1;
     match (ev.code, ev.modifiers) {
@@ -1155,11 +1160,6 @@ pub(crate) fn build_frame(
     slash_registry: &SlashRegistry,
 ) -> Frame {
     let mut frame = view.transcript.render(theme, cols);
-    // Plumb the scrollback offset so renderer can window the visible
-    // rows above the input area. Renderer clamps against total visual
-    // rows, so an out-of-range value (e.g. usize::MAX from Ctrl+Home)
-    // simply lands at "top of transcript".
-    frame.scroll_offset = view.scroll_offset;
 
     // Autoresearch dashboard widget (Ctrl+Shift+T toggles).
     let dashboard_lines: Vec<Line> = match (view.dashboard_mode, view.dashboard_snapshot.as_ref()) {
@@ -1180,26 +1180,65 @@ pub(crate) fn build_frame(
         }
     };
 
-    // Limit transcript to rows minus chrome (editor + footer + separator + dashboard).
+    // Window the transcript to (rows - chrome) lines. With
+    // `scroll_offset == 0` we follow the tail (bottom-pinned, the
+    // default). With a positive offset we shift the window UP into
+    // history — that's how PageUp / Shift+Up / mouse-wheel surface
+    // older lines. Chrome (editor + footer + separator + dashboard)
+    // stays pinned because it's appended *after* this window step.
+    // Clamp out-of-range offsets (e.g. usize::MAX from Ctrl+Home).
     let editor_lines = std::cmp::max(1, view.editor.text.lines().count()) as u16;
     let dash_lines = dashboard_lines.len() as u16;
     let chrome = editor_lines + 2 + dash_lines; // separator + footer + dashboard
     let max_transcript = rows.saturating_sub(chrome) as usize;
-    if frame.lines.len() > max_transcript {
-        let drop = frame.lines.len() - max_transcript;
-        frame.lines.drain(0..drop);
+    let total = frame.lines.len();
+    if total > max_transcript {
+        let max_offset = total - max_transcript;
+        let offset = view.scroll_offset.min(max_offset);
+        let end = total - offset;
+        let start = end - max_transcript;
+        frame.lines = frame.lines.drain(start..end).collect();
     }
 
     // Dashboard renders ABOVE the editor separator.
     frame.lines.extend(dashboard_lines);
 
-    // Separator.
-    frame.lines.push(Line {
-        spans: vec![Span::coloured(
-            "─".repeat(cols as usize),
-            theme.muted.to_crossterm(),
-        )],
-    });
+    // Separator. When the transcript is scrolled away from the
+    // bottom, embed a "↑ N more · END to follow" badge so the user
+    // notices they're in scrollback mode — otherwise it's easy to
+    // miss that new output is landing off-screen.
+    let scrolled_above = {
+        if total > max_transcript {
+            let max_offset = total - max_transcript;
+            view.scroll_offset.min(max_offset)
+        } else {
+            0
+        }
+    };
+    if scrolled_above > 0 {
+        let badge = format!(" ↑ {scrolled_above} more · END ↓ to follow ");
+        let badge_w = badge.chars().count();
+        let cols_u = cols as usize;
+        let pad = cols_u.saturating_sub(badge_w);
+        let left = pad / 2;
+        let right = pad - left;
+        let dash = theme.muted.to_crossterm();
+        let accent = theme.accent.to_crossterm();
+        frame.lines.push(Line {
+            spans: vec![
+                Span::coloured("─".repeat(left), dash),
+                Span::coloured(badge, accent),
+                Span::coloured("─".repeat(right), dash),
+            ],
+        });
+    } else {
+        frame.lines.push(Line {
+            spans: vec![Span::coloured(
+                "─".repeat(cols as usize),
+                theme.muted.to_crossterm(),
+            )],
+        });
+    }
 
     // Picker overlay or editor pane.
     if let Some(overlay) = &view.picker {
@@ -1742,6 +1781,19 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                         cols = c; rows = r;
                         renderer.resize(cols);
                         view.dirty = true;
+                    }
+                    CtEvent::Mouse(MouseEvent { kind, .. }) => {
+                        match kind {
+                            MouseEventKind::ScrollUp => {
+                                view.scroll_offset = view.scroll_offset.saturating_add(3);
+                                view.dirty = true;
+                            }
+                            MouseEventKind::ScrollDown => {
+                                view.scroll_offset = view.scroll_offset.saturating_sub(3);
+                                view.dirty = true;
+                            }
+                            _ => {}
+                        }
                     }
                     CtEvent::Paste(text)
                         // Bracketed-paste payload — insert verbatim into the
