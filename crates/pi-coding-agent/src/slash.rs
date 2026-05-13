@@ -58,6 +58,10 @@ impl SlashRegistry {
             ("quit", "Exit pi"),
             ("theme", "Switch the active theme; e.g. /theme dark, /theme light, or any installed theme name"),
             (
+                "route",
+                "Switch model-routing mode: /route off|static|auto|learned (or /route to show current)",
+            ),
+            (
                 "autoresearch",
                 "Autonomous experiment loop (off | clear | export | <text>)",
             ),

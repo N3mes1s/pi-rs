@@ -170,10 +170,17 @@ pub struct View {
     /// Index of the currently-highlighted entry in the inline slash-command
     /// dropdown. Distinct from `slash_ac_cycle_index` (which tracks Tab
     /// cycle state): this drives Down/Up navigation in the menu *before*
-    /// any Tab has been pressed, and Enter accepts whatever it points at.
-    /// Reset to 0 whenever the slash token text changes; clamped to the
-    /// visible window at render time.
+    /// any Tab has been pressed, and Enter accepts whatever it points at
+    /// — but only if the user actually navigated (see
+    /// `slash_menu_navigated`). Reset to 0 whenever the slash token
+    /// text changes; clamped to the visible window at render time.
     pub slash_menu_selected: usize,
+    /// True once the user has pressed Down/Up over the inline slash
+    /// dropdown. While false, Enter falls through to the normal submit
+    /// path — typing `/help<Enter>` should send the command, not
+    /// re-accept the highlighted menu item and stall. Reset whenever
+    /// the slash token text changes.
+    pub slash_menu_navigated: bool,
 }
 
 /// How the autoresearch dashboard should be rendered above the editor.
@@ -224,6 +231,7 @@ impl View {
             slash_ac_accepted_range: None,
             slash_ac_hidden_until_char: false,
             slash_menu_selected: 0,
+            slash_menu_navigated: false,
         }
     }
 }
@@ -715,6 +723,7 @@ fn move_slash_menu_selection(view: &mut View, delta: i32) -> bool {
     let cur = view.slash_menu_selected as i32;
     let next = (cur + delta).rem_euclid(len);
     view.slash_menu_selected = next as usize;
+    view.slash_menu_navigated = true;
     view.dirty = true;
     true
 }
@@ -750,13 +759,14 @@ fn try_handle_slash_autocomplete_key(view: &mut View, ev: &KeyEvent) -> bool {
             KeyCode::Down => return move_slash_menu_selection(view, 1),
             KeyCode::Up => return move_slash_menu_selection(view, -1),
             KeyCode::Enter
-                if !ev.modifiers.contains(KeyModifiers::SHIFT)
+                if view.slash_menu_navigated
+                    && !ev.modifiers.contains(KeyModifiers::SHIFT)
                     && !ev.modifiers.contains(KeyModifiers::ALT) =>
             {
-                // Accept the highlighted suggestion. We deliberately do
-                // NOT submit on the same Enter — accept first, let the
-                // user review the populated args (or press Enter again
-                // to send). This matches the @file picker UX.
+                // Accept the highlighted suggestion. We only hijack Enter
+                // AFTER the user has pressed Down/Up at least once — that
+                // way typing `/route<Enter>` still submits as a slash
+                // command, but Down/Down/Enter picks the third menu item.
                 return accept_highlighted_slash_menu(view);
             }
             _ => {}
@@ -962,6 +972,7 @@ fn clear_slash_autocomplete_state(view: &mut View) {
     view.slash_ac_cycle_index = 0;
     view.slash_ac_accepted_range = None;
     view.slash_menu_selected = 0;
+    view.slash_menu_navigated = false;
 }
 
 fn reset_slash_autocomplete_after_typed_char(view: &mut View) {
@@ -1985,6 +1996,60 @@ async fn handle_slash(
                         .blocks
                         .push(crate::renderer::Block::Error(body));
                 }
+            }
+            SlashOutcome::Continue
+        }
+        "route" => {
+            // Switch the model-routing mode at runtime. Without an arg, show
+            // the current mode + the static catalogue. The CLI exposes
+            // --route off|static|auto|learned and the status bar shows the
+            // current value, but until now there was no way to *change* it
+            // from inside the TUI — the maintainer's complaint.
+            let arg = args.trim();
+            if arg.is_empty() {
+                let body = format!(
+                    "Current route mode: {}\n\
+                     \n\
+                     Available modes:\n  \
+                     off       — bypass the router; use --model verbatim\n  \
+                     static    — pick by hand-tuned rules in ~/.pi/agent/router/*.txt\n  \
+                     auto      — let a small model classify each turn (fast/default/hard)\n  \
+                     learned   — auto + learn from accepted/rejected suggestions\n\
+                     \n\
+                     Switch with /route <mode>.",
+                    match view.route_mode {
+                        pi_agent_core::RouteMode::Off => "off",
+                        pi_agent_core::RouteMode::Static => "static",
+                        pi_agent_core::RouteMode::Auto => "auto",
+                        pi_agent_core::RouteMode::Learned => "learned",
+                    }
+                );
+                view.transcript
+                    .blocks
+                    .push(crate::renderer::Block::Note(body));
+            } else if let Some(new_mode) = pi_agent_core::RouteMode::parse(arg) {
+                startup.settings.route = new_mode;
+                view.route_mode = new_mode;
+                view.dirty = true;
+                let path = crate::context::settings_paths().0;
+                let _ = startup.settings.save(&path);
+                view.transcript
+                    .blocks
+                    .push(crate::renderer::Block::Note(format!(
+                        "[route set to {}]",
+                        match new_mode {
+                            pi_agent_core::RouteMode::Off => "off",
+                            pi_agent_core::RouteMode::Static => "static",
+                            pi_agent_core::RouteMode::Auto => "auto",
+                            pi_agent_core::RouteMode::Learned => "learned",
+                        }
+                    )));
+            } else {
+                view.transcript
+                    .blocks
+                    .push(crate::renderer::Block::Error(format!(
+                        "unknown route mode '{arg}' — expected one of: off, static, auto, learned",
+                    )));
             }
             SlashOutcome::Continue
         }
