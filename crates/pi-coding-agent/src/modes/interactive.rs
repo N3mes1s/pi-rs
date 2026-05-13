@@ -2297,10 +2297,28 @@ async fn handle_slash(
     match name {
         "quit" | "exit" => SlashOutcome::Quit,
         "help" => {
-            let mut body = String::from("commands:\n");
-            for n in slash.names() {
-                body.push_str(&format!("  /{n}\n"));
+            // Show command names *with* descriptions, aligned. Previously
+            // we just dumped names which left users guessing what each
+            // one did.
+            let mut commands: Vec<(String, String)> = slash
+                .iter()
+                .map(|c| (c.name.clone(), c.description.clone()))
+                .collect();
+            commands.sort_by(|a, b| a.0.cmp(&b.0));
+            let name_w = commands.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+            let mut body = String::from("commands (type /<name> to invoke):\n");
+            for (name, desc) in commands {
+                let desc_first_line = desc.lines().next().unwrap_or("");
+                body.push_str(&format!(
+                    "  /{name:<w$}  {desc_first_line}\n",
+                    name = name,
+                    w = name_w,
+                    desc_first_line = desc_first_line
+                ));
             }
+            body.push_str("\nshortcuts: Ctrl+A/E/B/F/W (cursor), Ctrl+U/K (kill), \
+                          PageUp/PageDown (scrollback), Ctrl+Home/End (top/bottom), \
+                          @<file> (file pick), !<cmd> (run shell)\n");
             view.transcript
                 .blocks
                 .push(crate::renderer::Block::Note(body));
