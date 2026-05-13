@@ -118,6 +118,13 @@ pub struct View {
     pub history_idx: Option<usize>,
     pub queued_count: usize,
     pub thinking: ThinkingSetting,
+    /// Number of visual rows to scroll up from the tail of the transcript.
+    /// 0 (default) pins the view to the latest line — incoming output
+    /// auto-follows. PageUp / Shift+Up / mouse wheel mutate this; Home
+    /// jumps to the top of the transcript, End back to 0. Reset to 0
+    /// when the user submits a turn so a long agent response doesn't
+    /// land off-screen. Plumbed to Frame::scroll_offset by build_frame.
+    pub scroll_offset: usize,
     /// Mirror of `Settings.scoped_models`. Drives footer colour and whether
     /// `/model`-via-picker reverts after the next Submit.
     pub scoped_models: bool,
@@ -211,6 +218,7 @@ impl View {
             history_idx: None,
             queued_count: 0,
             thinking,
+            scroll_offset: 0,
             scoped_models: false,
             scoped_previous_model: None,
             last_quit: None,
@@ -410,6 +418,9 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
                 let buf = std::mem::take(&mut view.editor.text);
                 view.editor.cursor = 0;
                 view.history_idx = None;
+                // Auto-follow on submit: a new turn should land in
+                // view, even if the user was scrolled mid-history.
+                view.scroll_offset = 0;
                 if buf.trim().is_empty() {
                     return KeyOutcome::None;
                 }
@@ -566,6 +577,53 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
     if ev.code == KeyCode::Char('o') && ev.modifiers.contains(KeyModifiers::CONTROL) {
         view.transcript.tool_collapsed = !view.transcript.tool_collapsed;
         return KeyOutcome::None;
+    }
+
+    // Scrollback navigation. The transcript is unbounded — until now,
+    // PageUp/PageDown were no-ops and content scrolled off the top was
+    // simply lost from view. These keys mutate `view.scroll_offset`
+    // (rows above the tail) which the renderer applies as a window
+    // shift. Clamping happens at render time. Mouse-wheel support
+    // pending.
+    const SCROLL_PAGE: usize = 10;
+    const SCROLL_FINE: usize = 1;
+    match (ev.code, ev.modifiers) {
+        (KeyCode::PageUp, _) => {
+            view.scroll_offset = view.scroll_offset.saturating_add(SCROLL_PAGE);
+            view.dirty = true;
+            return KeyOutcome::None;
+        }
+        (KeyCode::PageDown, _) => {
+            view.scroll_offset = view.scroll_offset.saturating_sub(SCROLL_PAGE);
+            view.dirty = true;
+            return KeyOutcome::None;
+        }
+        // Shift+Up / Shift+Down: fine-grained scroll one row at a time.
+        // Useful for rereading the last chunk of an agent response.
+        (KeyCode::Up, m) if m.contains(KeyModifiers::SHIFT) => {
+            view.scroll_offset = view.scroll_offset.saturating_add(SCROLL_FINE);
+            view.dirty = true;
+            return KeyOutcome::None;
+        }
+        (KeyCode::Down, m) if m.contains(KeyModifiers::SHIFT) => {
+            view.scroll_offset = view.scroll_offset.saturating_sub(SCROLL_FINE);
+            view.dirty = true;
+            return KeyOutcome::None;
+        }
+        // Ctrl+Home / Ctrl+End: jump to top / bottom of transcript.
+        // (Plain Home/End move the editor cursor; don't repurpose
+        // them.)
+        (KeyCode::Home, m) if m.contains(KeyModifiers::CONTROL) => {
+            view.scroll_offset = usize::MAX; // renderer clamps to top
+            view.dirty = true;
+            return KeyOutcome::None;
+        }
+        (KeyCode::End, m) if m.contains(KeyModifiers::CONTROL) => {
+            view.scroll_offset = 0;
+            view.dirty = true;
+            return KeyOutcome::None;
+        }
+        _ => {}
     }
 
     // No mapping — fall back to raw editing.
@@ -1079,6 +1137,11 @@ pub(crate) fn build_frame(
     slash_registry: &SlashRegistry,
 ) -> Frame {
     let mut frame = view.transcript.render(theme, cols);
+    // Plumb the scrollback offset so renderer can window the visible
+    // rows above the input area. Renderer clamps against total visual
+    // rows, so an out-of-range value (e.g. usize::MAX from Ctrl+Home)
+    // simply lands at "top of transcript".
+    frame.scroll_offset = view.scroll_offset;
 
     // Autoresearch dashboard widget (Ctrl+Shift+T toggles).
     let dashboard_lines: Vec<Line> = match (view.dashboard_mode, view.dashboard_snapshot.as_ref()) {

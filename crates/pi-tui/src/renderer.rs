@@ -67,6 +67,27 @@ pub struct Frame {
     /// painting and sets it visible. When `None`, the cursor stays
     /// hidden (default for picker overlays etc.).
     pub cursor_at: Option<(u16, u16)>,
+    /// Number of *visual rows* to scroll up from the bottom of the
+    /// rendered content. 0 (default) pins the view to the latest line
+    /// — the bottom-trim behaviour. When > 0, the renderer windows
+    /// `[end - offset - height, end - offset)` instead of the tail;
+    /// this is what enables PageUp / mouse-wheel scrollback. The
+    /// caller is responsible for clamping the value (see
+    /// `Frame::max_scroll_offset_for_height`).
+    pub scroll_offset: usize,
+}
+
+impl Frame {
+    /// Cap on `scroll_offset` given an `area_height`. Caller uses this
+    /// to clamp user input so PageUp stops at the top of the
+    /// transcript instead of scrolling into empty rows. Requires a
+    /// fully-built frame (cell-wrapped row count = sum over
+    /// `split_line_to_visual` for each logical Line). This helper
+    /// approximates via the logical-line count, which is a safe upper
+    /// bound (a logical line wraps to ≥ 1 visual rows).
+    pub fn max_scroll_offset_for_height(&self, area_height: u16) -> usize {
+        self.lines.len().saturating_sub(area_height as usize)
+    }
 }
 
 /// Differential renderer implemented on top of ratatui's terminal backend.
@@ -134,17 +155,31 @@ impl<W: Write> DiffRenderer<W> {
                 visual.extend(lines);
             }
 
-            // Pass 2: trim from the TOP so the most-recent content
-            // (transcript tail + input field + autocomplete dropdown) stays
-            // visible. The previous `take(area.height)` from the top
-            // dropped the input itself off-screen on tall histories.
+            // Pass 2: window into `[start, end)` so the last `height`
+            // rows are visible. `scroll_offset` (in visual rows)
+            // shifts the window UP from the tail — 0 follows the
+            // bottom, growing values walk into history. Effective
+            // offset is clamped so PageUp doesn't scroll into empty
+            // rows above the transcript.
             let height = area.height as usize;
-            let drop = visual.len().saturating_sub(height);
-            if drop > 0 {
-                // Move cursor target up by however many lines we just shaved.
-                visual_cursor = visual_cursor.map(|(r, c)| (r.saturating_sub(drop as u16), c));
-                let _ = visual.drain(..drop);
-            }
+            let total = visual.len();
+            let max_offset = total.saturating_sub(height);
+            let offset = frame.scroll_offset.min(max_offset);
+            let end = total.saturating_sub(offset);
+            let start = end.saturating_sub(height);
+
+            // Trim cursor against the window: if the cursor lands
+            // outside [start, end), it's not visible — hide it. The
+            // ratatui cursor API doesn't allow "negative" rows.
+            visual_cursor = visual_cursor.and_then(|(r, c)| {
+                let r = r as usize;
+                if r < start || r >= end {
+                    None
+                } else {
+                    Some(((r - start) as u16, c))
+                }
+            });
+            let visual: Vec<RtLine<'static>> = visual.drain(start..end).collect();
 
             let text = Text::from(visual);
             let paragraph = Paragraph::new(text);

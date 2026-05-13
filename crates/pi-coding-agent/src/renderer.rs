@@ -304,6 +304,7 @@ impl Transcript {
         Frame {
             lines,
             cursor_at: None,
+            scroll_offset: 0,
         }
     }
 
