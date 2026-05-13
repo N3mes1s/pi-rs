@@ -1452,11 +1452,13 @@ pub(crate) fn build_frame(
                 ],
             });
         }
-        if !is_empty {
-            let target_line = editor_start_line + cursor_line_offset;
-            // 2-column prefix (`› ` or `  `) before each editor line.
-            frame.cursor_at = Some((target_line as u16, (2 + cursor_col_offset) as u16));
-        }
+        // Always park the cursor in the editor area — even when empty,
+        // the user expects a visible caret indicating "type here".
+        // When non-empty, position it at the byte-offset cursor; when
+        // empty, place it right after the "› " prefix.
+        let target_line = editor_start_line + cursor_line_offset;
+        let target_col = 2 + cursor_col_offset;
+        frame.cursor_at = Some((target_line as u16, target_col as u16));
         if text_for_display.is_empty() {
             frame.lines.push(Line {
                 spans: vec![Span::coloured(
@@ -1742,13 +1744,29 @@ fn thinking_to_runtime(t: ThinkingSetting) -> pi_ai::ThinkingLevel {
 
 /// Translate an editor byte-offset cursor into `(line_index_in_text,
 /// col_in_line)` for hardware-cursor placement. `col` is in display
-/// columns (assumes ASCII / 1-col-per-char for now; extend to
-/// `unicode-width` once we hit a CJK regression).
+/// columns. pi-tui's renderer matches the cursor by *cell width*
+/// (sum of `UnicodeWidthChar::width`), not byte offset — so this
+/// must walk char-by-char and accumulate widths, otherwise multi-byte
+/// chars (é, 中, 🎉) cause the cursor to land off by one or more
+/// cells.
 fn byte_cursor_to_visual(text: &str, cursor: usize) -> (usize, usize) {
+    use unicode_width::UnicodeWidthChar;
     let cursor = cursor.min(text.len());
-    let prefix = &text[..cursor];
-    let line = prefix.matches('\n').count();
-    let col = prefix.rfind('\n').map(|p| cursor - p - 1).unwrap_or(cursor);
+    let mut line = 0usize;
+    let mut col = 0usize;
+    let mut byte_pos = 0usize;
+    for ch in text.chars() {
+        if byte_pos >= cursor {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += ch.width().unwrap_or(0);
+        }
+        byte_pos += ch.len_utf8();
+    }
     (line, col)
 }
 
@@ -4925,6 +4943,29 @@ mod tests {
             dump.contains("END") && dump.contains("to follow"),
             "scroll badge missing from frame; got:\n{dump}"
         );
+    }
+
+    #[test]
+    fn byte_cursor_to_visual_handles_multibyte_chars() {
+        // ASCII baseline.
+        assert_eq!(byte_cursor_to_visual("hello", 5), (0, 5));
+        assert_eq!(byte_cursor_to_visual("hello", 2), (0, 2));
+
+        // 2-byte char "é" (U+00E9): byte len 2, width 1.
+        // After "hé" (3 bytes) the visual col is 2.
+        assert_eq!(byte_cursor_to_visual("héllo", 3), (0, 2));
+
+        // 3-byte char "中" (U+4E2D, CJK): byte len 3, width 2.
+        // After "a中" (4 bytes) the visual col is 1 + 2 = 3.
+        assert_eq!(byte_cursor_to_visual("a中b", 4), (0, 3));
+
+        // 4-byte emoji "🎉" (U+1F389): byte len 4, width 2.
+        assert_eq!(byte_cursor_to_visual("🎉hi", 4), (0, 2));
+
+        // Newlines reset the column.
+        assert_eq!(byte_cursor_to_visual("ab\ncd", 4), (1, 1));
+        assert_eq!(byte_cursor_to_visual("a\nb", 1), (0, 1));
+        assert_eq!(byte_cursor_to_visual("a\nb", 2), (1, 0));
     }
 
     #[test]
