@@ -56,6 +56,7 @@ impl SlashRegistry {
             ("hotkeys", "Show all keyboard shortcuts"),
             ("help", "Show help"),
             ("clear", "Wipe the visible transcript (session unaffected)"),
+            ("version", "Show pi-rs build version"),
             ("quit", "Exit pi"),
             ("theme", "Switch the active theme; e.g. /theme dark, /theme light, or any installed theme name"),
             (

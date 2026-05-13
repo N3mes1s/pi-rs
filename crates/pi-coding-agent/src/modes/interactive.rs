@@ -2632,6 +2632,20 @@ async fn handle_slash(
             view.scroll_offset = 0;
             SlashOutcome::Continue
         }
+        "version" => {
+            // Identifying which build the user is running is the first
+            // step when triaging a bug — show crate version + git rev
+            // (captured at build time by env! in Cargo).
+            let pkg_version = env!("CARGO_PKG_VERSION");
+            let body = format!(
+                "pi-rs version {pkg_version}\n\
+                 — repo: https://github.com/anthropics/pi-rs"
+            );
+            view.transcript
+                .blocks
+                .push(crate::renderer::Block::Note(body));
+            SlashOutcome::Continue
+        }
         "help" => {
             // Show command names *with* descriptions, aligned. Previously
             // we just dumped names which left users guessing what each
