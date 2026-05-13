@@ -1,0 +1,639 @@
+//! Orchestrator runner — v1.
+//!
+//! Walks the topologically-ordered campaign milestones. For each
+//! eligible milestone (all `depends_on` reached `MERGED`):
+//!
+//!   1. `git checkout m.branch` (so dispatch sees the right tree).
+//!   2. Dispatch implementer subagent (subprocess-based via
+//!      [`crate::dispatch::Dispatch`]; the agent definition at
+//!      `<repo>/.pi/agents/<name>.md` supplies model + thinking +
+//!      system prompt).
+//!   3. Capture review snapshot (`branch_sha_at_review`,
+//!      `target_head_at_review`) per RFD §"Review snapshot".
+//!   4. Dispatch reviewer subagent.
+//!   5. Parse the FINAL line of the reviewer output for
+//!      `Merge readiness: …`.
+//!   6. On `READY_TO_MERGE`: re-rev-parse target_branch; if it has
+//!      moved since the snapshot, transition to
+//!      `BLOCKED_ON_REVIEW_STALE`. Otherwise cherry-pick the
+//!      snapshotted `branch_sha_at_review` onto target_branch
+//!      (success → `MERGED`, conflict → `BLOCKED_ON_CONFLICT`).
+//!   7. On `NEEDS_FIX` or unparseable verdict: re-dispatch
+//!      implementer with reviewer text appended, fix-loop counter
+//!      ticks. Up to `fix_loop_max` iterations; exhaustion →
+//!      `FAILED`.
+//!   8. On `DO_NOT_MERGE`: `FAILED` immediately.
+//!
+//! Every transition is appended to
+//! `<state-root>/<campaign>/state.jsonl` (one event per line). On
+//! resume the snapshot is rebuilt by replaying the log; the replay
+//! tolerates a truncated final line (the only partial-write shape
+//! that's reachable from append-only writes).
+//!
+//! v1 does NOT implement: parallel execution, worktree-per-milestone,
+//! override-rule forwarding, structured Concerns extraction beyond
+//! the verdict line, retry policy on transient provider errors, the
+//! MERGE-REPORT writer, or full resume (replay reads the log but
+//! the runner doesn't yet skip already-MERGED milestones on a
+//! second invocation). Each is on the v2 roadmap in RFD 0021.
+
+use crate::dispatch::{agent_for, Dispatch, DispatchRole};
+use crate::merge::{cherry_pick_to_target, git_checkout, prune_stale_worktrees, rev_parse, MergeOutcome};
+use crate::plan::topological_order;
+use crate::schema::Campaign;
+use crate::verdict::{parse_verdict, MergeReadiness};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// One state-transition event, persisted as a single line in
+/// `state.jsonl`. The shape matches RFD 0021 §"Persisted state
+/// layout": `{milestone, from, to, ts, detail}`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StateEvent {
+    pub milestone: String,
+    pub from: String,
+    pub to: String,
+    pub ts: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+/// Outcome of one milestone's full implementer→reviewer→merge cycle.
+#[derive(Debug, Clone)]
+pub struct MilestoneOutcome {
+    pub id: String,
+    pub final_state: String,
+    pub fix_loop_iterations: u32,
+    pub events_written: usize,
+}
+
+/// Aggregate summary for one `run` invocation.
+#[derive(Debug, Clone)]
+pub struct RunSummary {
+    pub campaign: String,
+    pub state_path: PathBuf,
+    pub outcomes: Vec<MilestoneOutcome>,
+    /// Per-RFD §"Exit codes":
+    ///   0 — every non-FAILED milestone reached MERGED
+    ///   2 — at least one FAILED
+    ///   3 — at least one BLOCKED_ON_CONFLICT or BLOCKED_ON_REVIEW_STALE
+    pub exit_code: i32,
+}
+
+/// State a milestone can reach. Strings on the wire match RFD's state
+/// machine vocabulary so an external tool reading state.jsonl gets
+/// the same names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalState {
+    Merged,
+    Failed,
+    BlockedOnConflict,
+    BlockedOnReviewStale,
+}
+
+impl FinalState {
+    fn label(self) -> &'static str {
+        match self {
+            FinalState::Merged => "MERGED",
+            FinalState::Failed => "FAILED",
+            FinalState::BlockedOnConflict => "BLOCKED_ON_CONFLICT",
+            FinalState::BlockedOnReviewStale => "BLOCKED_ON_REVIEW_STALE",
+        }
+    }
+}
+
+/// Resolve `<state_root>/<campaign-name>/state.jsonl`, creating the
+/// parent directory if needed. The campaign name is sanitised
+/// (`/` → `_`) so a TOML name with slashes can't escape the root.
+pub fn state_path_for(state_root: &Path, campaign_name: &str) -> std::io::Result<PathBuf> {
+    let safe = campaign_name.replace(['/', '\\'], "_");
+    let dir = state_root.join(&safe);
+    fs::create_dir_all(&dir)?;
+    Ok(dir.join("state.jsonl"))
+}
+
+/// Run the campaign with a real subprocess dispatcher rooted at the
+/// caller's repo. Convenience wrapper around `run_with` that picks
+/// `RealDispatch::default()`.
+pub fn run(campaign: &Campaign, state_root: &Path) -> std::io::Result<RunSummary> {
+    let dispatcher = crate::dispatch::RealDispatch::default();
+    run_with(campaign, state_root, &dispatcher, &std::env::current_dir()?)
+}
+
+/// Full executor (testable). `repo_root` is the working tree that
+/// contains all milestone branches and `target_branch`; the runner
+/// will `git checkout` between branches and run `git cherry-pick`
+/// against it.
+pub fn run_with(
+    campaign: &Campaign,
+    state_root: &Path,
+    dispatcher: &dyn Dispatch,
+    repo_root: &Path,
+) -> std::io::Result<RunSummary> {
+    let state_path = state_path_for(state_root, &campaign.name)?;
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&state_path)?;
+
+    let mut outcomes: Vec<MilestoneOutcome> = Vec::with_capacity(campaign.milestones.len());
+    let mut milestone_state: HashMap<String, FinalState> = HashMap::new();
+    let mut events_for: HashMap<String, usize> = HashMap::new();
+
+    for m in topological_order(campaign) {
+        // ── Eligibility check ───────────────────────────────────
+        // Skip if any dependency didn't reach MERGED. Skipped
+        // milestones are recorded as FAILED with a clear detail
+        // string so an operator can see the cascade.
+        let blocked_by: Vec<&str> = m
+            .depends_on
+            .iter()
+            .filter(|dep| !matches!(milestone_state.get(*dep), Some(FinalState::Merged)))
+            .map(|s| s.as_str())
+            .collect();
+        if !blocked_by.is_empty() {
+            emit_event(
+                &mut log,
+                &m.id,
+                "PENDING",
+                FinalState::Failed.label(),
+                &format!("blocked: dependency not merged ({})", blocked_by.join(",")),
+                &mut events_for,
+            )?;
+            milestone_state.insert(m.id.clone(), FinalState::Failed);
+            outcomes.push(MilestoneOutcome {
+                id: m.id.clone(),
+                final_state: FinalState::Failed.label().into(),
+                fix_loop_iterations: 0,
+                events_written: events_for.get(&m.id).copied().unwrap_or(0),
+            });
+            continue;
+        }
+
+        // ── Fix-loop ────────────────────────────────────────────
+        let max_iter = m.effective_fix_loop_max(&campaign.defaults);
+        let default_reviewer = &campaign.defaults.reviewer;
+
+        let mut accumulated_assignment = m.assignment.clone();
+        let mut iter: u32 = 0;
+        let final_outcome: FinalState = loop {
+            iter += 1;
+
+            // B2 fix: ensure the working tree is on m.branch before
+            // every dispatch. Without this, the second-and-onward
+            // milestones execute in `target_branch` (left there by
+            // the previous milestone's cherry-pick), so the
+            // implementer reads the wrong files and the reviewer
+            // diffs the wrong refs.
+            //
+            // Defensive cleanup: prune any stale worktrees that have
+            // m.branch checked out before we attempt the checkout
+            // (observed on 2026-05-04 in sdk-bedrock-azure-streaming-timeout).
+            // Non-fatal prune warnings are threaded into the state.jsonl
+            // detail so the operator can diagnose partial-cleanup failures.
+            let prune_warnings = prune_stale_worktrees(repo_root, &m.branch);
+            if let Err(e) = git_checkout(repo_root, &m.branch) {
+                // Build a detail string that includes any non-fatal
+                // prune warnings alongside the checkout error, so the
+                // operator can diagnose partial-cleanup failures from
+                // state.jsonl without having to grep runner logs.
+                let detail = if prune_warnings.is_empty() {
+                    format!("git checkout {} failed: {e}", m.branch)
+                } else {
+                    format!(
+                        "git checkout {} failed: {e}; prune warnings: {}",
+                        m.branch,
+                        prune_warnings.join("; ")
+                    )
+                };
+                emit_event(
+                    &mut log,
+                    &m.id,
+                    if iter == 1 { "PENDING" } else { "REVIEWED" },
+                    "FAILED",
+                    &detail,
+                    &mut events_for,
+                )?;
+                break FinalState::Failed;
+            }
+
+            // Implementer dispatch.
+            let implementer = agent_for(DispatchRole::Implementer, m, default_reviewer);
+            // Thread any non-fatal prune warnings into the DISPATCHED
+            // detail even on the successful path, so the operator can
+            // see partial-cleanup failures in state.jsonl without
+            // having to grep runner logs.
+            let dispatched_detail = if prune_warnings.is_empty() {
+                format!("iter={iter} agent={implementer}")
+            } else {
+                format!(
+                    "iter={iter} agent={implementer}; prune warnings: {}",
+                    prune_warnings.join("; ")
+                )
+            };
+            emit_event(
+                &mut log,
+                &m.id,
+                if iter == 1 { "PENDING" } else { "REVIEWED" },
+                "DISPATCHED",
+                &dispatched_detail,
+                &mut events_for,
+            )?;
+            let imp_outcome = dispatcher
+                .dispatch(
+                    DispatchRole::Implementer,
+                    &implementer,
+                    &accumulated_assignment,
+                    repo_root,
+                )
+                .unwrap_or_else(|e| crate::dispatch::DispatchOutcome {
+                    agent: implementer.clone(),
+                    success: false,
+                    model_output: String::new(),
+                    stderr: e.to_string(),
+                    exit_code: -1,
+                    duration_ms: 0,
+                });
+            if !imp_outcome.success {
+                emit_event(
+                    &mut log,
+                    &m.id,
+                    "DISPATCHED",
+                    "FAILED",
+                    &format!(
+                        "implementer dispatch failed (exit={}): {}",
+                        imp_outcome.exit_code,
+                        truncate(&imp_outcome.stderr, 240)
+                    ),
+                    &mut events_for,
+                )?;
+                break FinalState::Failed;
+            }
+
+            // B3 fix: capture the review snapshot per RFD §"Review
+            // snapshot" — the {branch_sha, target_head} pair as
+            // observed *immediately before* the reviewer is
+            // dispatched. These are used at merge time to detect
+            // staleness and to cherry-pick the exact sha the
+            // reviewer saw (not a fresh rev-parse that might
+            // include post-review pushes).
+            let branch_sha_at_review = rev_parse(repo_root, &m.branch).ok();
+            let target_head_at_review = rev_parse(repo_root, &campaign.target_branch).ok();
+
+            // Reviewer dispatch.
+            let reviewer = agent_for(DispatchRole::Reviewer, m, default_reviewer);
+            let rev_outcome = dispatcher
+                .dispatch(
+                    DispatchRole::Reviewer,
+                    &reviewer,
+                    &reviewer_assignment(m, &imp_outcome.model_output, &campaign.target_branch),
+                    repo_root,
+                )
+                .unwrap_or_else(|e| crate::dispatch::DispatchOutcome {
+                    agent: reviewer.clone(),
+                    success: false,
+                    model_output: String::new(),
+                    stderr: e.to_string(),
+                    exit_code: -1,
+                    duration_ms: 0,
+                });
+            if !rev_outcome.success {
+                emit_event(
+                    &mut log,
+                    &m.id,
+                    "DISPATCHED",
+                    "FAILED",
+                    &format!(
+                        "reviewer dispatch failed (exit={}): {}",
+                        rev_outcome.exit_code,
+                        truncate(&rev_outcome.stderr, 240)
+                    ),
+                    &mut events_for,
+                )?;
+                break FinalState::Failed;
+            }
+
+            emit_event(
+                &mut log,
+                &m.id,
+                "DISPATCHED",
+                "REVIEWED",
+                &format!("iter={iter} reviewer={reviewer}"),
+                &mut events_for,
+            )?;
+
+            // Verdict.
+            let verdict = parse_verdict(&rev_outcome.model_output);
+            match verdict {
+                Some(MergeReadiness::Ready) => {
+                    // Use the snapshot captured before the reviewer
+                    // was dispatched, NOT a fresh rev-parse — this
+                    // is what RFD §"Review snapshot" requires (so a
+                    // post-review rogue push to the branch can't
+                    // sneak unreviewed commits in).
+                    let Some(branch_sha) = branch_sha_at_review.clone() else {
+                        emit_event(
+                            &mut log,
+                            &m.id,
+                            "REVIEWED",
+                            "FAILED",
+                            &format!("rev-parse {} (review snapshot) failed", m.branch),
+                            &mut events_for,
+                        )?;
+                        break FinalState::Failed;
+                    };
+                    emit_event(
+                        &mut log,
+                        &m.id,
+                        "REVIEWED",
+                        "MERGE_PENDING",
+                        &format!(
+                            "branch_sha={branch_sha} target_head={}",
+                            target_head_at_review.as_deref().unwrap_or("?")
+                        ),
+                        &mut events_for,
+                    )?;
+
+                    // B3 fix: re-rev-parse target_branch at merge
+                    // time. If it's different from the value we
+                    // captured before the reviewer was dispatched,
+                    // the review is stale — some other commit
+                    // landed on target_branch between review and
+                    // merge, so we cannot trust that the reviewed
+                    // diff still applies cleanly. Transition to
+                    // BLOCKED_ON_REVIEW_STALE and let the operator
+                    // decide whether to re-review (RFD §"Operator
+                    // recovery"; v3 will add auto-rebase).
+                    let target_head_now = rev_parse(repo_root, &campaign.target_branch).ok();
+                    if target_head_now != target_head_at_review {
+                        emit_event(
+                            &mut log,
+                            &m.id,
+                            "MERGE_PENDING",
+                            "BLOCKED_ON_REVIEW_STALE",
+                            &format!(
+                                "target_head moved {:?} -> {:?} between review and merge",
+                                target_head_at_review, target_head_now
+                            ),
+                            &mut events_for,
+                        )?;
+                        break FinalState::BlockedOnReviewStale;
+                    }
+
+                    // The cherry-pick takes the RANGE
+                    // `target_head_at_review..branch_sha` so every
+                    // fix-loop iter's commit lands on target, not just
+                    // the implementer's tip. See merge.rs §"Why range,
+                    // not tip-only".
+                    let target_head_for_range = target_head_at_review.as_deref().unwrap_or("");
+                    let merge_result = cherry_pick_to_target(
+                        repo_root,
+                        &campaign.target_branch,
+                        target_head_for_range,
+                        &branch_sha,
+                    );
+                    let outcome = match merge_result {
+                        MergeOutcome::Merged => {
+                            emit_event(
+                                &mut log,
+                                &m.id,
+                                "MERGE_PENDING",
+                                "MERGED",
+                                &format!("branch_sha={branch_sha}"),
+                                &mut events_for,
+                            )?;
+                            FinalState::Merged
+                        }
+                        MergeOutcome::Conflict => {
+                            emit_event(
+                                &mut log,
+                                &m.id,
+                                "MERGE_PENDING",
+                                "BLOCKED_ON_CONFLICT",
+                                &format!(
+                                    "cherry-pick {branch_sha} → {} conflicted",
+                                    campaign.target_branch
+                                ),
+                                &mut events_for,
+                            )?;
+                            FinalState::BlockedOnConflict
+                        }
+                        MergeOutcome::GitError(e) => {
+                            emit_event(
+                                &mut log,
+                                &m.id,
+                                "MERGE_PENDING",
+                                "FAILED",
+                                &format!("git error: {e}"),
+                                &mut events_for,
+                            )?;
+                            FinalState::Failed
+                        }
+                    };
+                    break outcome;
+                }
+                Some(MergeReadiness::NeedsFix) => {
+                    if iter >= max_iter {
+                        emit_event(
+                            &mut log,
+                            &m.id,
+                            "REVIEWED",
+                            "FAILED",
+                            &format!("fix_loop_max={max_iter} exhausted"),
+                            &mut events_for,
+                        )?;
+                        break FinalState::Failed;
+                    }
+                    // Append reviewer's text to next implementer turn.
+                    accumulated_assignment.push_str("\n\n# Reviewer NEEDS_FIX\n\n");
+                    accumulated_assignment.push_str(&rev_outcome.model_output);
+                    // Loop continues: REVIEWED → DISPATCHED transition
+                    // is logged at top of next iteration.
+                }
+                Some(MergeReadiness::DoNotMerge) => {
+                    emit_event(
+                        &mut log,
+                        &m.id,
+                        "REVIEWED",
+                        "FAILED",
+                        "verdict=DO_NOT_MERGE",
+                        &mut events_for,
+                    )?;
+                    break FinalState::Failed;
+                }
+                None => {
+                    // Reviewer didn't produce a parseable verdict line.
+                    // RFD's "fallback mode" treats this as NeedsFix; we
+                    // do too — but if we're already at fix_loop_max,
+                    // FAILED.
+                    if iter >= max_iter {
+                        emit_event(
+                            &mut log,
+                            &m.id,
+                            "REVIEWED",
+                            "FAILED",
+                            "no parseable verdict; fix_loop exhausted",
+                            &mut events_for,
+                        )?;
+                        break FinalState::Failed;
+                    }
+                    accumulated_assignment.push_str("\n\n# Reviewer (unparseable verdict)\n\n");
+                    accumulated_assignment.push_str(&rev_outcome.model_output);
+                }
+            }
+        };
+
+        milestone_state.insert(m.id.clone(), final_outcome);
+        outcomes.push(MilestoneOutcome {
+            id: m.id.clone(),
+            final_state: final_outcome.label().into(),
+            fix_loop_iterations: iter,
+            events_written: events_for.get(&m.id).copied().unwrap_or(0),
+        });
+    }
+
+    let exit_code = compute_exit_code(&milestone_state);
+
+    Ok(RunSummary {
+        campaign: campaign.name.clone(),
+        state_path,
+        outcomes,
+        exit_code,
+    })
+}
+
+fn compute_exit_code(states: &HashMap<String, FinalState>) -> i32 {
+    let mut has_blocked = false;
+    let mut has_failed = false;
+    for st in states.values() {
+        match st {
+            FinalState::Merged => {}
+            FinalState::Failed => has_failed = true,
+            FinalState::BlockedOnConflict | FinalState::BlockedOnReviewStale => has_blocked = true,
+        }
+    }
+    // RFD §"Exit codes": blocked outranks failed (manual-resolution).
+    if has_blocked {
+        3
+    } else if has_failed {
+        2
+    } else {
+        0
+    }
+}
+
+fn reviewer_assignment(
+    m: &crate::schema::Milestone,
+    implementer_output: &str,
+    target_branch: &str,
+) -> String {
+    // C1 from the review: previously the diff command was
+    // hardcoded to `main`, breaking on campaigns whose
+    // target_branch isn't main. Now we plumb the campaign's
+    // configured target_branch through.
+    format!(
+        "Review milestone `{id}` on branch `{branch}`.\n\n\
+         The implementer just produced this output:\n\n\
+         ---\n{out}\n---\n\n\
+         Read the diff (git diff {target}...{branch}). Produce a Markdown \
+         verdict whose FINAL non-empty line is exactly one of \
+         `Merge readiness: READY_TO_MERGE`, `Merge readiness: NEEDS_FIX`, \
+         or `Merge readiness: DO_NOT_MERGE`.",
+        id = m.id,
+        branch = m.branch,
+        target = target_branch,
+        out = truncate(implementer_output, 4000),
+    )
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push_str(" ...[truncated]");
+    out
+}
+
+fn emit_event(
+    log: &mut std::fs::File,
+    milestone: &str,
+    from: &str,
+    to: &str,
+    detail: &str,
+    events_for: &mut HashMap<String, usize>,
+) -> std::io::Result<()> {
+    let evt = StateEvent {
+        milestone: milestone.to_string(),
+        from: from.to_string(),
+        to: to.to_string(),
+        ts: now_ms(),
+        detail: detail.to_string(),
+    };
+    let line = serde_json::to_string(&evt)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    log.write_all(line.as_bytes())?;
+    log.write_all(b"\n")?;
+    *events_for.entry(milestone.to_string()).or_insert(0) += 1;
+    Ok(())
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Replay an existing `state.jsonl` into the in-memory event list.
+///
+/// Tolerates a single truncated/malformed final line (the only
+/// partial-write shape reachable from append-only writes — a crash
+/// mid-`write_event` leaves at most one half-written line at EOF,
+/// per RFD §"Persisted state layout"). Earlier malformed lines are
+/// surfaced as `InvalidData` errors with the line number; concern
+/// C2 from the v1 review noted that the previous implementation
+/// silently `break`-ed on ANY deserialisation error, hiding all
+/// later valid events when corruption appeared earlier in the log.
+/// That hid bugs and made debugging impossible.
+pub fn replay(state_path: &Path) -> std::io::Result<Vec<StateEvent>> {
+    let text = match fs::read_to_string(state_path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    // Treat the LAST non-empty line specially. If it fails to parse
+    // we assume a truncated final line (the partial-write case).
+    // A failure on any earlier line is real corruption and gets
+    // surfaced, not silently dropped.
+    let nonempty: Vec<(usize, &str)> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .collect();
+    let mut events = Vec::with_capacity(nonempty.len());
+    let last_idx = nonempty.len().saturating_sub(1);
+    for (i, (line_no, line)) in nonempty.iter().enumerate() {
+        match serde_json::from_str::<StateEvent>(line) {
+            Ok(e) => events.push(e),
+            Err(err) => {
+                if i == last_idx {
+                    // Truncated final line: drop it silently.
+                    break;
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "state.jsonl corrupt at line {} (mid-stream, not truncated final): {err}",
+                        line_no + 1
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(events)
+}

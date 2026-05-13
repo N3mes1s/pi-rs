@@ -1,0 +1,30 @@
+# pi-sdk compatibility matrix — source of truth for the
+# CI-generated COMPATIBILITY.md table per RFD 0027 §3.
+#
+# Each row = one pi-sdk MINOR. CI generates COMPATIBILITY.md from
+# this file using `scripts/gen-compatibility-matrix.sh`. Maintainers
+# never hand-edit the markdown table — only this TOML.
+#
+# Schema:
+#   [[release]]
+#   pi_sdk        = "0.1"
+#   pi_tool_types = "..."
+#   pi_ai         = "..."
+#   pi_tools_core = "..."
+#   pi_sandbox    = "..."
+#   pi_agent_core = "..."
+#   notes         = "..."        # optional; appears in markdown column
+#   security      = false        # optional; flags emergency MINOR
+#
+# Add a new [[release]] row at the TOP per release. Don't reorder
+# historical rows.
+
+[[release]]
+pi_sdk        = "0.1.0"
+pi_tool_types = "0.1"
+pi_ai         = "0.1"
+pi_tools_core = "0.1"
+pi_sandbox    = "0.1"
+pi_agent_core = "0.1"
+notes = "Initial 0.x. Façade + 7 hardening commits + 6 examples + quick_start convenience."
+security = false

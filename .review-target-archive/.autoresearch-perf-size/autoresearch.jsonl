@@ -1,0 +1,10 @@
+{"id":"300b8801-47e0-4e7c-b00b-000000000000","timestamp":1777280470,"kind":"init","config":{"name":"pi-rs-perf-size","metric":"score","unit":"µs+KiB","direction":"lower","max_iterations":7,"working_dir":null}}
+{"id":"52baf966-63f9-4ff7-92ba-79b97f4a7c15","timestamp":1777280475,"kind":"run","idea":"baseline (post-startup-pass)","commit_before":"8b3a0a2"}
+{"id":"57ba0e2a-bd3c-4fa4-97ba-f372fe94f82a","timestamp":1777280597,"kind":"run","idea":"Remove unused tokio/async-trait/anyhow/thiserror from pi-tui","commit_before":"8b3a0a2"}
+{"id":"c02922b5-7408-44c7-8029-6d2c7ddf743f","timestamp":1777280618,"kind":"result","run_id":"57ba0e2a-bd3c-4fa4-97ba-f372fe94f82a","metric_value":8441.0,"duration_ms":0,"kept":false,"commit_after":"8b3a0a2","checks_passed":false}
+{"id":"a820030c-4b5c-4766-a820-e6e5fd29f054","timestamp":1777280737,"kind":"run","idea":"Tighten tokio features per-crate from `full` to minimal sets actually used","commit_before":"8b3a0a2"}
+{"id":"f94caa06-329b-4d10-b94c-609f7c746c69","timestamp":1777280748,"kind":"result","run_id":"a820030c-4b5c-4766-a820-e6e5fd29f054","metric_value":8492.0,"duration_ms":0,"kept":false,"commit_after":"8b3a0a2","checks_passed":false}
+{"id":"ae90438a-bef6-4a29-ae90-da58fbbee87e","timestamp":1777280847,"kind":"run","idea":"[profile.release] opt-level = \"z\" (size-optimise)","commit_before":"8b3a0a2"}
+{"id":"b378a116-214d-4ca3-b378-54127b096493","timestamp":1777280935,"kind":"result","run_id":"ae90438a-bef6-4a29-ae90-da58fbbee87e","metric_value":6784.0,"duration_ms":0,"kept":true,"commit_after":"bbb2afd","checks_passed":false}
+{"id":"f3bbb73a-8fb4-4c5a-b3bb-cdcbfa53e0a8","timestamp":1777280982,"kind":"run","idea":"Argv pre-sniff `--list/--config/--update` before Cli::parse()","commit_before":"bbb2afd"}
+{"id":"e8850a85-2faf-4e85-a885-155173f23d65","timestamp":1777281639,"kind":"result","run_id":"9ec947f9-d704-46c6-9ec9-9b97f4a7c150","metric_value":6732.0,"duration_ms":0,"kept":false,"commit_after":"4d90ab6","checks_passed":false}

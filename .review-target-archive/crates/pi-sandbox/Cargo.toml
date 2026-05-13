@@ -1,0 +1,52 @@
+[package]
+name = "pi-sandbox"
+version.workspace = true
+edition.workspace = true
+description = "Sandbox abstraction for tool execution isolation in pi-rs"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+pi-tools.workspace = true
+pi-tool-types.workspace = true
+pi-search-proto.workspace = true
+# pi-sandbox-rootfs is a workspace-internal `publish = false` crate
+# (build-recipe scaffolding only). Pre-pass-6 finding #1: depending
+# on it would have made pi-sandbox unpublishable to crates.io.
+# `ROOTFS_VERSION` was inlined into pi-sandbox/src/microvm/types.rs
+# instead; the build.sh script in crates/pi-sandbox-rootfs has the
+# same constant on its `VERSION=` line and must be bumped in lockstep.
+pi-sandbox-protocol.workspace = true
+dirs.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+futures.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+which.workspace = true
+zstd = "0.13"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = "0.7"
+libc = "0.2"
+
+# Contextfs daemon library — embedded in-process for the
+# Linux/Firecracker file-sharing path (RFD 0023 §3.5 / Commit G3
+# prep). Pinned to a specific git commit at the workspace root;
+# see Cargo.toml's `contextfsd = { git = …, rev = … }` entry.
+# Linux-only because the daemon binds FUSE mounts.
+contextfsd = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio-test.workspace = true
+wiremock.workspace = true
+toml = "0.8"

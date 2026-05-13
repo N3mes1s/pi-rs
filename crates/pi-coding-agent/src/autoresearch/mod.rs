@@ -29,4 +29,4 @@ pub use confidence::{compute as compute_confidence, ConfidenceBand, ConfidenceSc
 pub use dashboard::{render_inline, render_table, DashboardState};
 pub use log::{jsonl_path, BestDirection, ConfigEntry, JsonlLog, RunEntry, RunStatus};
 pub use session::{MetricDirection, Session, SessionConfig};
-pub use tools::{InitExperimentTool, LogExperimentTool, RunExperimentTool};
+pub use tools::{InitExperimentTool, LogExperimentTool, RunExperimentRecursiveTool, RunExperimentTool};

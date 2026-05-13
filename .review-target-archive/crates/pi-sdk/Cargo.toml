@@ -1,0 +1,79 @@
+[package]
+name = "pi-sdk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Public Rust SDK for embedding the pi-rs coding-agent harness in another application"
+
+[lib]
+name = "pi_sdk"
+path = "src/lib.rs"
+
+# Public surface: re-exports plus the `quick_start` convenience.
+# See RFD 0027 (rfd/0027-pi-rs-sdk.md) for the design contract.
+
+[dependencies]
+# Workspace-aliased pi-rs crates that contribute to the public surface.
+# No pi-tui, no pi-coding-agent, no pi-orchestrate, no pi-stats —
+# those are binary-side per RFD 0027 §2.
+pi-tool-types.workspace = true
+pi-ai.workspace = true
+pi-tools.workspace = true
+pi-tools-core.workspace = true
+pi-tools-net.workspace = true
+pi-sandbox.workspace = true
+pi-agent-core.workspace = true
+
+# Cross-cutting deps used by the SDK glue (quick_start, error type, cost).
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+anyhow.workspace = true
+
+# ─── Feature flag matrix (RFD 0027 §1) ───────────────────────────
+#
+# Inert in Commit A: the underlying crates (pi-ai, pi-tools-core,
+# pi-tools-net, pi-sandbox) do not yet honor these flags. Defining
+# them here pins the public API contract so future commits can
+# wire them through underlying crates without breaking embedders'
+# Cargo.toml entries.
+#
+# Today every feature pulls in the full underlying crate. Embedders
+# CAN already write `pi-sdk = { features = ["provider-openai"] }`
+# in anticipation of real gating landing in a follow-up commit.
+[features]
+default = ["provider-anthropic", "tools-readonly"]
+
+# Providers — embedders pick what they need; pulling all six is opt-in.
+# (Currently inert: pi-ai always compiles every provider. Real gating
+#  in a follow-up commit per RFD 0027 §Implementation schedule.)
+provider-anthropic       = []
+provider-openai          = []
+provider-openai-compat   = []
+provider-google          = []
+provider-bedrock         = []
+provider-azure           = []
+
+# Tools — readonly is the safe default; mutation/exec require explicit opt-in.
+# (Currently inert: pi-tools-core compiles all tools.)
+tools-readonly           = []
+tools-mutation           = []
+tools-process            = []
+tools-net                = []
+
+# Sandbox launchers — gated *-unstable until SDK 1.2 (RFD 0027 §3).
+sandbox-microvm-unstable = []
+sandbox-remote-unstable  = []
+
+# Mock provider / sandbox for embedder tests (zero LLM cost in CI).
+# Public surface lands in Commit D; flag declared now so embedders'
+# Cargo.toml entries don't need to change when the impls land.
+mocks                    = []

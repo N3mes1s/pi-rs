@@ -310,7 +310,7 @@ impl Default for Settings {
             lsp: LspSettings::default(),
             task: TaskSettings::default(),
             monitor: MonitorSettings::default(),
-            route: RouteMode::Static,
+            route: RouteMode::Auto,
             route_provider_override: None,
             route_model_override: None,
             route_thinking_override: None,

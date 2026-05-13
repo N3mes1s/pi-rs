@@ -1,0 +1,64 @@
+# cargo-deny config — supply-chain CI gate per RFD 0027 §6 + Commit I.
+#
+# Run with: cargo deny check
+# CI runs: bans, advisories, licenses, sources.
+#
+# Tightened over time as the dep tree settles. Embedders running their
+# own cargo-deny config should NOT inherit this one verbatim — their
+# license/source allow-lists may differ.
+
+[graph]
+# Check workspace + all transitive deps. Don't restrict to specific
+# crates; CI runs over the full resolved graph.
+all-features = true
+
+[advisories]
+# Per RFD §6: each pi-sdk MINOR ships cargo-audit clean against the
+# published advisory database. New advisories that land between
+# releases are tracked here as `ignore` entries with a target-fix-MINOR.
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+[bans]
+# Reject duplicate transitive deps differing in MAJOR (per RFD §6).
+# A single MAJOR collision means two copies of a crate in our binary
+# — wasted bytes + potential type-incompatibility footgun.
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+[licenses]
+# Per RFD §6: reject GPL/AGPL deps (license incompatibility with the
+# MIT/Apache-2.0 dual-license SDK). MIT, Apache-2.0, BSD-2/3, ISC, MPL-2.0,
+# Unicode-DFS-2016, Zlib are all permissive enough for the SDK to
+# absorb. Anything else surfaces in CI for explicit review.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",
+    "BSL-1.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.93
+
+[sources]
+# Only crates.io is a trusted source. Git URLs in the dep graph
+# require explicit allow-listing.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

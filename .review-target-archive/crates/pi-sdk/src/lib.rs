@@ -1,0 +1,133 @@
+#![doc = include_str!("../README.md")]
+//!
+//! ---
+//!
+//! `pi-sdk` — the public Rust API for embedding pi-rs in another application.
+//!
+//! Pi-sdk is a thin façade over a small set of pi-rs workspace crates
+//! (`pi-tool-types`, `pi-ai`, `pi-tools`, `pi-sandbox`, `pi-agent-core`).
+//! Embedders depend on this crate and nothing else. The underlying crates
+//! remain the source of truth; if a type moves between crates, only
+//! `pi-sdk/src/lib.rs` updates and the embedder sees no change.
+//!
+//! See `RFD 0027 — Pi-rs as a Self-Contained Rust SDK` for the full design
+//! contract, stability commitment, and threat model.
+//!
+//! # ⚠ Pre-1.0
+//!
+//! pi-sdk is in pre-1.0. Any 0.x → 0.x+1 release MAY break the public API.
+//! Pin a fixed version in your Cargo.toml. The 1.0 freeze waits on
+//! RFD 0023 (microvm sandbox) + RFD 0026 (remote sandbox) + the hardening
+//! contract from RFD 0027 §4.5 landing in pi-rs itself.
+//!
+//! # Quick start (safe by default)
+//!
+//! ```no_run
+//! use pi_sdk::{quick_start, AgentEventKind, AuthMethod};
+//!
+//! # async fn run() -> anyhow::Result<()> {
+//! // `quick_start` wires the SAFE defaults: AuthStorage::in_memory()
+//! // (no env scan), readonly tools only (read/grep/find/ls), no shell.
+//! let runtime = quick_start("anthropic", "claude-haiku-4-5-20251001")?;
+//!
+//! // Embedder MUST set credentials before the first prompt — `in_memory()`
+//! // means no env scan, so the SDK starts with zero secrets.
+//! runtime.config().auth_storage.set(
+//!     "anthropic",
+//!     AuthMethod::ApiKey { value: std::env::var("ANTHROPIC_API_KEY")? },
+//! );
+//!
+//! let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+//! let session = runtime.create_session(Some(tx))?;
+//! tokio::spawn(async move { let _ = session.prompt("Hello".into()).await; });
+//! while let Some(evt) = rx.recv().await {
+//!     match evt.kind {
+//!         AgentEventKind::AssistantTextDelta { text } => print!("{text}"),
+//!         AgentEventKind::TurnComplete => break,
+//!         _ => {}
+//!     }
+//! }
+//! # Ok(()) }
+//! ```
+//!
+//! For embedders that need shell or fs-mutation tools, construct the
+//! [`RuntimeConfig`] explicitly via [`RuntimeConfig::builder()`] and
+//! pick the tool set deliberately (`ToolRegistry::with_unsafe_extras()`
+//! registers `bash`, the full set including code-execution + mutation
+//! tools — the name itself signals the risk). See the README and
+//! `examples/01_minimal.rs` for a runnable end-to-end version.
+
+// ─── Provider / model ─────────────────────────────────────────────
+pub use pi_ai::{
+    AiError, AnthropicProvider, AuthMethod, AuthStorage, AzureOpenAiProvider,
+    BedrockAnthropicProvider, ContentBlock, EventStream, FinishReason,
+    GenerateRequest, GenerateResponse, GoogleProvider, Message, ModelInfo,
+    ModelRegistry, OpenAiCompatProvider, OpenAiProvider, Provider,
+    ProviderConfig, ProviderKind, Role, StreamEvent, StreamEventKind,
+    ThinkingLevel, ToolCall, Usage,
+};
+
+// ─── Tools ────────────────────────────────────────────────────────
+pub use pi_tool_types::{ToolError, ToolResult, ToolSpec};
+pub use pi_tools::{DuplicateName, Tool, ToolContext, ToolRegistry};
+
+// ─── Sandbox ──────────────────────────────────────────────────────
+pub use pi_sandbox::{
+    LocalProcessProvider, SandboxError, SandboxExecution, SandboxProvider,
+};
+// Sandbox launcher types (`MicroVmLauncher`, `MicroVmProvider`, `VmHandle`,
+// `VmSpec`, `VmCeiling`, `CallLimits`, RFD 0023 §Proposal §2) and remote
+// transport types (`RemoteTransport`, `RemoteProvider`, `RemoteSession`,
+// `UploadStrategy`, RFD 0026 §Proposal §2) join the public surface
+// behind `sandbox-microvm-unstable` / `sandbox-remote-unstable` features
+// once those RFDs' implementations land. Trait shapes are already
+// specified; only the impl artifacts need to materialise.
+
+// ─── Agent runtime ────────────────────────────────────────────────
+pub use pi_agent_core::{
+    create_agent_session, default_system_prompt, AgentEvent, AgentEventKind,
+    AgentSession, AgentSessionRuntime, Compactor, ConfigBuilder, ConfigError,
+    ContextFile, DefaultProviderFactory, EventSender, EvolveSettings, GateContext,
+    InterceptAction, MonitorSettings, OutcomeSource, ProviderFactory, QueueMode,
+    RouteMode, RuntimeConfig, RuntimeError, SessionEntry, SessionEntryKind,
+    SessionManager, SessionMeta, SessionTree, Settings, SettingsBuilder,
+    StreamInterceptor, ThinkingSetting, ToolGate, ToolGateOutcome, WireSerializer,
+};
+
+// ─── quick_start convenience ──────────────────────────────────────
+//
+// One-liner for first-touch demos that wires the safe defaults
+// (in_memory auth, readonly tools, in-process sandbox). Production
+// embedders construct via `RuntimeConfig::builder()` directly.
+pub mod build;
+pub use build::quick_start;
+
+// ─── Top-level error type (Commit C per RFD 0027 §1) ─────────────
+//
+// One thiserror-based facade so embedders catch one error type instead
+// of `anyhow`-chaining `pi_ai::AiError`, `pi_sandbox::SandboxError`,
+// `pi_tool_types::ToolError`, and `pi_agent_core::RuntimeError` from
+// different call sites.
+pub mod error;
+pub use error::{Error, Result};
+
+// ─── Cost helper (Commit E per RFD 0027 §1) ──────────────────────
+//
+// Every embedder writes the same per-model price table. Ship one.
+// Best-effort numbers, refreshed each MINOR; embedders override via
+// `CostRegistry::override_for(model_id, prices)`.
+pub mod cost;
+pub use cost::{estimate_cost_usd, sum_session_cost_usd, CostRegistry, Pricing};
+
+// ─── Mock provider + sandbox (Commit D, gated on `mocks` feature) ─
+//
+// Embedder tests should not need to hit a real LLM endpoint or spin
+// up a microvm. `mocks::MockProvider` + `mocks::MockSandboxProvider`
+// give them stub implementations they can install via the standard
+// `RuntimeConfig::builder()` plug-in points. Gated to keep production
+// builds free of test-only code.
+#[cfg(feature = "mocks")]
+pub mod mocks;
+#[cfg(feature = "mocks")]
+pub use mocks::{MockProvider, MockProviderFactory, MockSandboxProvider, MockSandboxCall};
+

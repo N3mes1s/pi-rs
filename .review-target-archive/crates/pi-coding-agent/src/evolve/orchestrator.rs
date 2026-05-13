@@ -1,0 +1,584 @@
+//! Tick orchestrator — strings together every G-group primitive (G8 part 2).
+//!
+//! This is the function that the `--internal-evolve-tick` subprocess
+//! actually runs:
+//!
+//! 1. Acquire single-instance [`Lock`] (return early if held).
+//! 2. Load [`State`] + [`CostLedger`] for the cwd.
+//! 3. Locate AGENTS.md (project, then global).
+//! 4. Load benchmark [`BenchmarkCase`]s from past trajectories
+//!    (excluding `Replay`-source outcomes).
+//! 5. Pass everything through [`should_run`]; bail with [`SkipReason`]
+//!    if any gate fails.
+//! 6. Build evidence (split cases by historical_success).
+//! 7. Build [`Mutator`] (slow model) and [`Replay`] backend
+//!    (subprocess, in production).
+//! 8. Run baseline benchmark → [`Candidate`] with `mutated_section: None`.
+//! 9. For each generation: pick a target section, mutate, build candidate
+//!    [`AgentsMd`], run benchmark, append to candidates list. Cost-cap
+//!    bail-out between iterations.
+//! 10. [`pareto_frontier`] + [`best_strict_improvement`].
+//! 11. If a winner is found: [`backup_and_apply`] + write
+//!     [`PendingApply`] for the rollback monitor.
+//! 12. Persist new state + cost ledger + append all candidates to the
+//!     generations log.
+//! 13. Lock auto-releases on Drop.
+//!
+//! Failures are logged into the generations log as a `note` field on a
+//! synthetic skip-entry; the daemon never panics out.
+
+use std::path::{Path, PathBuf};
+
+use chrono::Utc;
+use pi_agent_core::{EvolveSettings, Settings};
+use pi_ai::{AuthStorage, ModelRegistry};
+
+use super::agents_md::AgentsMd;
+use super::apply::{
+    add_poison, append_generation, backup_and_apply, best_strict_improvement, decide,
+    default_history_path, pareto_frontier, Candidate, GenerationLogEntry, PendingApply,
+};
+use super::benchmark::{
+    load_cases, run_all, summarize, BenchmarkCase, BenchmarkSummary, Replay, RolloutResult,
+};
+use super::mutate::{EvidenceItem, MutationEvidence, Mutator, MutatorConfig};
+use super::tick::{should_run, CostLedger, Lock, SkipReason, State, TickDecision};
+
+/// Default margin gate (RFD 0013, open question: lean 0.10).
+const DEFAULT_MIN_MARGIN: f32 = 0.10;
+
+/// What a tick actually did. Returned to the daemon caller for logging.
+#[derive(Debug)]
+pub enum TickReport {
+    Skipped(SkipReason),
+    Ran {
+        baseline: BenchmarkSummary,
+        generations: Vec<Candidate>,
+        applied_hash: Option<String>,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TickError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("benchmark: {0}")]
+    Benchmark(#[from] super::benchmark::BenchmarkError),
+    #[error("mutate: {0}")]
+    Mutate(#[from] super::mutate::MutateError),
+    #[error("apply: {0}")]
+    Apply(#[from] super::agents_md::ReplaceError),
+}
+
+/// Inputs the daemon hands the orchestrator.
+pub struct TickInputs<'a> {
+    pub cwd: &'a Path,
+    pub sessions_root: &'a Path,
+    pub agents_md_path: PathBuf,
+    pub settings: &'a Settings,
+    pub registry: &'a ModelRegistry,
+    pub auth: &'a AuthStorage,
+}
+
+/// Run one tick. The Replay backend is pluggable so tests can pass a
+/// mock; production hands in a [`super::SubprocessReplay`].
+pub async fn run_tick<R: Replay>(
+    inputs: TickInputs<'_>,
+    replay: &R,
+) -> Result<TickReport, TickError> {
+    let tick_start = std::time::Instant::now();
+    let cwd_display = inputs.cwd.display();
+    let span = tracing::info_span!("evolve::tick", cwd = %cwd_display);
+    let _enter = span.enter();
+    tracing::info!(cwd = %cwd_display, "evolve: tick starting");
+
+    // 1. Lock.
+    let lock = Lock::try_acquire(inputs.cwd)?;
+    let _lock_guard = match lock {
+        Some(l) => l,
+        None => {
+            tracing::debug!(cwd = %cwd_display, "evolve: tick skipped — lock already held");
+            return Ok(TickReport::Skipped(SkipReason::LockHeld));
+        }
+    };
+
+    // 2. State + cost.
+    let state = State::load(inputs.cwd);
+    let mut cost = CostLedger::load(inputs.cwd);
+    tracing::debug!(
+        cwd = %cwd_display,
+        ticks_run = state.ticks_run,
+        outcomes_seen = state.outcomes_seen_lifetime,
+        spend_today_usd = cost.today_spend(),
+        "evolve: loaded state and cost ledger",
+    );
+
+    // 3. Locate AGENTS.md.
+    let has_agents_md = inputs.agents_md_path.is_file();
+
+    // 4. Load benchmark cases.
+    let cwd_slug = slug(inputs.cwd);
+    let cases = load_cases(
+        inputs.sessions_root,
+        &cwd_slug,
+        inputs.settings.evolve.benchmark_size as usize,
+    )?;
+    tracing::debug!(
+        cwd = %cwd_display,
+        n_cases = cases.len(),
+        "evolve: loaded benchmark cases",
+    );
+
+    // 5. Gate.
+    let decision = should_run(
+        &inputs.settings.evolve,
+        &mut cost,
+        &state,
+        inputs.cwd,
+        cases.len() as u32,
+        has_agents_md,
+    );
+    if let TickDecision::Skip(ref why) = decision {
+        tracing::info!(
+            cwd = %cwd_display,
+            reason = %skip_reason_display(why),
+            "evolve: tick skipped",
+        );
+        return Ok(TickReport::Skipped(why.clone()));
+    }
+
+    // 6. Build evidence.
+    let evidence = build_evidence(&cases);
+    tracing::debug!(
+        cwd = %cwd_display,
+        wins = evidence.wins.len(),
+        losses = evidence.losses.len(),
+        "evolve: built mutation evidence",
+    );
+
+    // 7. Build Mutator (only if we'll actually mutate). When no
+    // generations are configured we still run the baseline benchmark
+    // and emit a TickReport — useful for measuring the current AGENTS.md
+    // before the daemon is fully wired with a slow-model.
+    let n_gens = inputs.settings.evolve.generations_per_tick as usize;
+    let mutator: Option<Mutator> = if n_gens > 0 {
+        let mutator_cfg = mutator_config_from_settings(&inputs.settings.evolve, inputs.settings);
+        tracing::debug!(
+            cwd = %cwd_display,
+            provider = %mutator_cfg.provider,
+            model = %mutator_cfg.model,
+            "evolve: building mutator",
+        );
+        match Mutator::build(inputs.registry, inputs.auth, mutator_cfg) {
+            Ok(m) => {
+                tracing::debug!(cwd = %cwd_display, n_gens, "evolve: mutator ready");
+                Some(m)
+            }
+            Err(e) => {
+                tracing::warn!(cwd = %cwd_display, error = %e, "evolve: mutator build failed — skipping tick");
+                return Ok(TickReport::Skipped(SkipReason::NotEnabled));
+            }
+        }
+    } else {
+        tracing::debug!(cwd = %cwd_display, "evolve: no generations configured; baseline-only run");
+        None
+    };
+
+    // 8. Load + parse AGENTS.md, run baseline benchmark.
+    tracing::info!(
+        cwd = %cwd_display,
+        n_cases = cases.len(),
+        "evolve: running baseline benchmark",
+    );
+    let baseline_text = std::fs::read_to_string(&inputs.agents_md_path)?;
+    let baseline_doc = AgentsMd::parse(&baseline_text);
+    let baseline_results = run_all(replay, &cases, &baseline_doc.render()).await?;
+    let baseline_summary = summarize(&baseline_results);
+    tracing::info!(
+        cwd = %cwd_display,
+        pass_rate = baseline_summary.pass_rate,
+        mean_score = baseline_summary.mean_score,
+        total_cost_usd = baseline_summary.total_cost_usd,
+        "evolve: baseline benchmark complete",
+    );
+
+    let mut candidates: Vec<Candidate> = vec![Candidate {
+        hash: baseline_doc.hash(),
+        summary: baseline_summary.clone(),
+        body: baseline_doc.render(),
+        mutated_section: None,
+        note: "baseline".into(),
+    }];
+    let mut candidate_scores: Vec<Vec<f32>> = vec![rollout_scores(&baseline_results)];
+
+    // 9. Generations.
+    let mutable_indices: Vec<usize> = baseline_doc.mutable_sections().map(|(i, _)| i).collect();
+    if mutable_indices.is_empty() {
+        // Nothing we're allowed to touch (entire file pi:keep, or only
+        // preamble). Log + return without applying.
+        tracing::info!(
+            cwd = %cwd_display,
+            "evolve: no mutable sections found in AGENTS.md — skipping mutations",
+        );
+        log_candidates(inputs.cwd, &candidates);
+        return Ok(TickReport::Ran {
+            baseline: baseline_summary,
+            generations: candidates,
+            applied_hash: None,
+        });
+    }
+    tracing::debug!(
+        cwd = %cwd_display,
+        n_mutable = mutable_indices.len(),
+        n_gens,
+        "evolve: starting mutation generations",
+    );
+
+    let poisoned = super::apply::poisoned_hashes(inputs.cwd);
+
+    for gen in 0..n_gens {
+        let Some(mutator) = mutator.as_ref() else {
+            break; // no mutator → can't mutate; skip the loop
+        };
+        // Cost cap mid-loop.
+        let today_spend = cost.today_spend();
+        if today_spend >= inputs.settings.evolve.daily_cost_cap_usd {
+            tracing::info!(
+                cwd = %cwd_display,
+                gen,
+                spend_usd = today_spend,
+                cap_usd = inputs.settings.evolve.daily_cost_cap_usd,
+                "evolve: daily cost cap reached — stopping generations early",
+            );
+            break;
+        }
+
+        // Pick target section: cycle through mutable sections by gen.
+        let target_idx = mutable_indices[gen % mutable_indices.len()];
+        tracing::debug!(cwd = %cwd_display, gen, target_section = target_idx, "evolve: mutating section");
+        let new_body = match mutator
+            .mutate_section(&baseline_doc, target_idx, &evidence)
+            .await
+        {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    cwd = %cwd_display,
+                    gen,
+                    target_section = target_idx,
+                    error = %e,
+                    "evolve: mutation failed — skipping generation",
+                );
+                continue;
+            }
+        };
+
+        let mut candidate_doc = baseline_doc.clone();
+        candidate_doc.replace_section(target_idx, new_body)?;
+        let cand_hash = candidate_doc.hash();
+
+        // Skip if we've poisoned this exact body before.
+        if poisoned.iter().any(|h| h == &cand_hash) {
+            tracing::debug!(
+                cwd = %cwd_display,
+                gen,
+                hash = %cand_hash,
+                "evolve: candidate hash is poisoned — skipping",
+            );
+            continue;
+        }
+
+        let cand_results = run_all(replay, &cases, &candidate_doc.render()).await?;
+        let cand_summary = summarize(&cand_results);
+        cost.add(cand_summary.total_cost_usd);
+        tracing::info!(
+            cwd = %cwd_display,
+            gen,
+            target_section = target_idx,
+            pass_rate = cand_summary.pass_rate,
+            mean_score = cand_summary.mean_score,
+            cost_usd = cand_summary.total_cost_usd,
+            "evolve: generation benchmark complete",
+        );
+
+        candidate_scores.push(rollout_scores(&cand_results));
+        candidates.push(Candidate {
+            hash: cand_hash,
+            summary: cand_summary,
+            body: candidate_doc.render(),
+            mutated_section: Some(target_idx),
+            note: format!("gen{} section={}", gen, target_idx),
+        });
+    }
+
+    // 10. Pareto + winner pick.
+    let _frontier = pareto_frontier(&candidates);
+    let winner_idx = best_strict_improvement(&candidates, 0);
+    tracing::debug!(
+        cwd = %cwd_display,
+        n_candidates = candidates.len(),
+        winner_idx = ?winner_idx,
+        "evolve: pareto selection complete",
+    );
+
+    // 11. Apply winner if any. RFD 0013 gate: candidate's mean rollout
+    // score must beat the baseline's by at least DEFAULT_MIN_MARGIN.
+    let mut applied_hash: Option<String> = None;
+    if let Some(idx) = winner_idx {
+        let decision = decide(
+            &candidate_scores[0],
+            &candidate_scores[idx],
+            DEFAULT_MIN_MARGIN,
+        );
+        if decision.apply {
+            let winner = &candidates[idx];
+            tracing::info!(
+                cwd = %cwd_display,
+                winner_hash = %winner.hash,
+                baseline_mean = decision.current_mean,
+                candidate_mean = decision.candidate_mean,
+                margin = decision.margin,
+                "evolve: applying winning candidate",
+            );
+            let backup = backup_and_apply(
+                inputs.cwd,
+                &inputs.agents_md_path,
+                &winner.body,
+                &candidates[0].hash,
+            )?;
+            // Append a structured row to the cross-cwd history.jsonl
+            // (RFD 0013) so rollback::tick can find the prior body.
+            let history_path = default_history_path();
+            if let Some(parent) = history_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = super::apply::append_history(
+                &history_path,
+                &super::apply::HistoryEntry {
+                    ts: Utc::now().to_rfc3339(),
+                    action: "apply".to_string(),
+                    from_hash: candidates[0].hash.clone(),
+                    to_hash: winner.hash.clone(),
+                    pre_mean: Some(decision.current_mean),
+                    post_mean_estimate: Some(decision.candidate_mean),
+                    margin: Some(decision.margin),
+                    observed_mean: None,
+                    trigger: None,
+                    prev_body: Some(candidates[0].body.clone()),
+                },
+            ) {
+                tracing::warn!(
+                    cwd = %cwd_display,
+                    error = %e,
+                    "evolve: failed to append apply entry to history log",
+                );
+            }
+            let pending = PendingApply {
+                applied_hash: winner.hash.clone(),
+                previous_hash: candidates[0].hash.clone(),
+                backup_path: backup,
+                baseline_pass_rate: candidates[0].summary.pass_rate,
+                applied_at_ms: Utc::now().timestamp_millis(),
+                outcomes_seen_at_apply: state.outcomes_seen_lifetime,
+            };
+            pending.save(inputs.cwd)?;
+            applied_hash = Some(winner.hash.clone());
+        } else {
+            tracing::info!(
+                cwd = %cwd_display,
+                reason = %decision.reason,
+                current_mean = decision.current_mean,
+                candidate_mean = decision.candidate_mean,
+                margin = decision.margin,
+                min_margin = DEFAULT_MIN_MARGIN,
+                "evolve: candidate failed margin gate — not applying",
+            );
+        }
+    } else {
+        tracing::info!(cwd = %cwd_display, "evolve: no strict improvement found among candidates");
+    }
+
+    // 12. Persist state + log.
+    let new_state = State {
+        last_tick_at_ms: Utc::now().timestamp_millis(),
+        outcomes_seen_lifetime: state.outcomes_seen_lifetime.max(cases.len() as u32),
+        outcomes_at_last_tick: cases.len() as u32,
+        ticks_run: state.ticks_run + 1,
+    };
+    new_state.save(inputs.cwd)?;
+    cost.save(inputs.cwd)?;
+    log_candidates_with_apply(inputs.cwd, &candidates, applied_hash.as_deref());
+
+    tracing::info!(
+        cwd = %cwd_display,
+        n_candidates = candidates.len(),
+        applied = applied_hash.is_some(),
+        ticks_run = new_state.ticks_run,
+        elapsed_secs = tick_start.elapsed().as_secs_f64(),
+        "evolve: tick complete",
+    );
+
+    Ok(TickReport::Ran {
+        baseline: baseline_summary,
+        generations: candidates,
+        applied_hash,
+    })
+}
+
+/// Rollback monitor: call after recording a new outcome. If a
+/// `PendingApply` exists and the post-apply pass rate has regressed,
+/// restore the prior AGENTS.md and poison the offending hash.
+///
+/// `min_window_size` and `regression_threshold` are tunable; defaults
+/// `(10, 0.15)` mean "wait for 10 sessions, rollback if pass rate
+/// dropped by >= 15 percentage points".
+pub fn check_rollback(
+    cwd: &Path,
+    agents_md_path: &Path,
+    post_apply_outcomes: &[bool],
+    min_window_size: u32,
+    regression_threshold: f32,
+) -> Result<bool, TickError> {
+    let Some(pending) = PendingApply::load(cwd) else {
+        return Ok(false);
+    };
+    let window_size = post_apply_outcomes.len() as u32;
+    if window_size < min_window_size {
+        tracing::debug!(
+            cwd = %cwd.display(),
+            window_size,
+            min_window_size,
+            applied_hash = %pending.applied_hash,
+            "evolve: rollback check deferred — window too small",
+        );
+        return Ok(false);
+    }
+    let pass_rate = post_apply_outcomes.iter().filter(|b| **b).count() as f32
+        / post_apply_outcomes.len() as f32;
+    if !super::apply::should_rollback(
+        pending.baseline_pass_rate,
+        pass_rate,
+        post_apply_outcomes.len() as u32,
+        min_window_size,
+        regression_threshold,
+    ) {
+        tracing::debug!(
+            cwd = %cwd.display(),
+            applied_hash = %pending.applied_hash,
+            baseline_pass_rate = pending.baseline_pass_rate,
+            post_apply_pass_rate = pass_rate,
+            "evolve: no rollback needed — pass rate is acceptable",
+        );
+        return Ok(false);
+    }
+    tracing::warn!(
+        cwd = %cwd.display(),
+        applied_hash = %pending.applied_hash,
+        baseline_pass_rate = pending.baseline_pass_rate,
+        post_apply_pass_rate = pass_rate,
+        regression_threshold,
+        "evolve: regression detected — rolling back AGENTS.md",
+    );
+    super::apply::rollback(agents_md_path, &pending.backup_path)?;
+    add_poison(cwd, &pending.applied_hash)?;
+    PendingApply::clear(cwd)?;
+    tracing::info!(
+        cwd = %cwd.display(),
+        poisoned_hash = %pending.applied_hash,
+        "evolve: rollback complete — hash poisoned",
+    );
+    Ok(true)
+}
+
+// ─── helpers ───────────────────────────────────────────────────────────
+
+fn slug(p: &Path) -> String {
+    p.display().to_string().replace(['/', '\\', ':'], "_")
+}
+
+fn rollout_scores(results: &[RolloutResult]) -> Vec<f32> {
+    results.iter().map(|r| r.score).collect()
+}
+
+/// Human-readable one-liner for a [`SkipReason`] (used in log messages
+/// so operators don't have to decode the debug representation).
+fn skip_reason_display(reason: &SkipReason) -> String {
+    match reason {
+        SkipReason::NotEnabled => "evolve not enabled in settings".into(),
+        SkipReason::Disabled => "evolution disabled for this cwd (pi evolve off)".into(),
+        SkipReason::LockHeld => "another tick is already in progress (lock held)".into(),
+        SkipReason::CostCapExceeded => "daily cost cap already reached".into(),
+        SkipReason::InsufficientSamples { have, need } => {
+            format!("insufficient outcome samples ({have}/{need})")
+        }
+        SkipReason::TooSoon { hours_left } => {
+            format!("rate-limited: {hours_left}h until next tick is allowed")
+        }
+        SkipReason::NotEnoughNewOutcomes { since, need } => {
+            format!("not enough new outcomes since last tick ({since}/{need})")
+        }
+        SkipReason::NoAgentsMd => "no AGENTS.md found in cwd or global location".into(),
+    }
+}
+
+fn build_evidence(cases: &[BenchmarkCase]) -> MutationEvidence {
+    let mut wins = Vec::new();
+    let mut losses = Vec::new();
+    for c in cases {
+        let item = EvidenceItem {
+            user_request: c.user_prompt.clone(),
+            verdict_reason: c
+                .historical_score
+                .map(|s| format!("score={s:.2}"))
+                .unwrap_or_else(|| "no score".into()),
+        };
+        match c.historical_success {
+            Some(true) => wins.push(item),
+            Some(false) => losses.push(item),
+            None => {}
+        }
+    }
+    MutationEvidence { wins, losses }
+}
+
+fn mutator_config_from_settings(_evolve: &EvolveSettings, settings: &Settings) -> MutatorConfig {
+    let mut cfg = MutatorConfig::default();
+    if let Some(slow) = &settings.roles.slow {
+        if let Some((p, m)) = slow.split_once('/') {
+            cfg.provider = p.to_string();
+            cfg.model = m.to_string();
+        } else {
+            cfg.model = slow.clone();
+        }
+    }
+    cfg
+}
+
+fn log_candidates(cwd: &Path, candidates: &[Candidate]) {
+    log_candidates_with_apply(cwd, candidates, None);
+}
+
+fn log_candidates_with_apply(cwd: &Path, candidates: &[Candidate], applied_hash: Option<&str>) {
+    let now = Utc::now().timestamp_millis();
+    let baseline_hash = candidates.first().map(|c| c.hash.clone());
+    for (i, c) in candidates.iter().enumerate() {
+        let parent = if i == 0 { None } else { baseline_hash.clone() };
+        let entry = GenerationLogEntry {
+            timestamp_ms: now,
+            hash: c.hash.clone(),
+            parent_hash: parent,
+            mutated_section: c.mutated_section,
+            summary: c.summary.clone(),
+            applied: applied_hash == Some(&c.hash),
+            note: c.note.clone(),
+        };
+        if let Err(e) = append_generation(cwd, &entry) {
+            tracing::warn!(
+                cwd = %cwd.display(),
+                generation_note = %entry.note,
+                error = %e,
+                "evolve: failed to append generation log entry",
+            );
+        }
+    }
+}

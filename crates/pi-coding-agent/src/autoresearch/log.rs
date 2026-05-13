@@ -102,6 +102,19 @@ pub struct RunEntry {
     pub iteration_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asi: Option<serde_json::Value>,
+
+    // ── RAO (RFD 0032): recursive-delegation fields ──────────────────────────
+    /// Delegation depth in the recursive execution tree.
+    /// `0` = top-level (root) agent; `1` = first child; etc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+    /// Delegation bonus applied to this run:
+    /// `λ × mean(child_success_rate)`.  `None` when no children were spawned.
+    #[serde(rename = "delegationBonus", default, skip_serializing_if = "Option::is_none")]
+    pub delegation_bonus: Option<f64>,
+    /// Run numbers of child experiments spawned by this run.
+    #[serde(rename = "childRunIds", default, skip_serializing_if = "Vec::is_empty")]
+    pub child_run_ids: Vec<u32>,
 }
 
 // ── log file ─────────────────────────────────────────────────────────────────

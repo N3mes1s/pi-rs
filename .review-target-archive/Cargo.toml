@@ -1,0 +1,126 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pi-ai",
+    "crates/pi-tool-types",
+    "crates/pi-tools-core",
+    "crates/pi-tools-net",
+    "crates/pi-tools",
+    "crates/pi-agent-core",
+    "crates/pi-tui",
+    "crates/pi-coding-agent",
+    "crates/pi-orchestrate",
+    "crates/pi-stats", "crates/pi-sandbox",
+    "crates/pi-sandbox-protocol",
+    "crates/pi-sandbox-worker",
+    "crates/pi-search-proto",
+    "crates/pi-sandbox-rootfs",
+    "crates/pi-sdk",
+    "crates/pi-sdk-canary",
+    "crates/pi-build",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["pi-rs contributors"]
+license = "MIT"
+repository = "https://github.com/n3mes1s/playground"
+description = "Rust reimplementation of pi (badlogic/pi-mono) - a minimal terminal coding agent harness"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls-native-roots"], default-features = false }
+futures = "0.3"
+async-trait = "0.1"
+anyhow = "1"
+thiserror = "1"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+crossterm = "0.27"
+unicode-width = "0.1"
+dirs = "5"
+walkdir = "2"
+ignore = "0.4"
+regex = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+url = "2"
+base64 = "0.22"
+sha2 = "0.10"
+eventsource-stream = "0.2"
+which = "6"
+shellexpand = "3"
+glob = "0.3"
+tempfile = "3"
+nucleo-matcher = "0.3"
+wiremock = "0.6"
+proptest = "1"
+tokio-test = "0.4"
+notify = "6"
+hmac = "0.12"
+sha1 = "0.10"
+hex = "0.4"
+rand = "0.8"
+ring = "0.17"
+percent-encoding = "2"
+unicode-segmentation = "1"
+serde_yaml = "0.9"
+tiktoken-rs = "0.5"
+toml = "0.8"
+semver = "1"
+include_dir = "0.7"
+textwrap = "0.16"
+pulldown-cmark = "0.9"
+syntect = { version = "5", features = ["parsing"] }
+ratatui = { version = "0.28", features = ["crossterm"] }
+
+# Per RFD 0027 §6: every workspace crate carries an explicit
+# `version` so `cargo publish --dry-run` succeeds. The version
+# matches `[workspace.package].version` (currently 0.1.0). When
+# bumping, bump all in lockstep — the workspace pinning policy
+# (RFD 0027 §3) treats the SDK and all underlying crates as one
+# release event.
+pi-tool-types = { path = "crates/pi-tool-types", version = "0.1.0" }
+pi-ai = { path = "crates/pi-ai", version = "0.1.0" }
+pi-tools-core = { path = "crates/pi-tools-core", version = "0.1.0" }
+pi-tools-net = { path = "crates/pi-tools-net", version = "0.1.0" }
+pi-tools = { path = "crates/pi-tools", version = "0.1.0" }
+pi-agent-core = { path = "crates/pi-agent-core", version = "0.1.0" }
+pi-tui = { path = "crates/pi-tui", version = "0.1.0" }
+pi-stats = { path = "crates/pi-stats", version = "0.1.0" }
+pi-sandbox = { path = "crates/pi-sandbox", version = "0.1.0" }
+pi-sandbox-protocol = { path = "crates/pi-sandbox-protocol", version = "0.1.0" }
+pi-sandbox-worker = { path = "crates/pi-sandbox-worker", version = "0.1.0" }
+pi-search-proto = { path = "crates/pi-search-proto", version = "0.1.0" }
+pi-sandbox-rootfs = { path = "crates/pi-sandbox-rootfs", version = "0.1.0" }
+pi-orchestrate = { path = "crates/pi-orchestrate", version = "0.1.0" }
+pi-sdk = { path = "crates/pi-sdk", version = "0.1.0" }
+pi-sdk-canary = { path = "crates/pi-sdk-canary", version = "0.1.0" }
+pi-build = { path = "crates/pi-build", version = "0.1.0" }
+
+# Contextfs integration (RFD 0023 §3.5 / Commit G3 prep).
+#
+# **Pinned to commit `6c15a0ae784e72660e2536efc604f0db8ddba0c4`** of
+# https://github.com/N3mes1s/contextfs.git. We use a path dep here
+# while that commit isn't on the public remote yet; switch to
+# `{ git = ..., rev = "d4cdab5..." }` once contextfs pushes.
+#
+# The `pi-sandbox::contextfs::PINNED_REV` constant carries the
+# expected rev; the smoke test asserts the local checkout matches
+# (so a `git pull` in contextfs that moves HEAD to a different
+# commit fails the build, not silently drifts the API).
+#
+# Bump the rev (and re-run `contextfs_smoke.rs`) when picking up
+# a new contextfs feature; do NOT relax to "branch = main".
+contextfsd = { path = "../contextfs/crates/contextfsd", default-features = false, features = ["local", "remote-fs"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+opt-level = "z"

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>pi-stats</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; margin: 2rem; max-width: 60rem; }
+    h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.05rem; margin-top: 2rem; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
+    th, td { border-bottom: 1px solid #ddd; padding: 4px 8px; text-align: left; }
+    th { background: #f6f6f6; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .muted { color: #888; }
+    button { padding: 4px 12px; }
+  </style>
+</head>
+<body>
+  <h1>pi-stats <span id="status" class="muted"></span></h1>
+  <p><button onclick="refresh()">refresh</button> <button onclick="sync()">sync</button></p>
+
+  <h2>Overall</h2>
+  <table id="overall"></table>
+
+  <h2>By model</h2>
+  <table id="by_model"><thead><tr>
+    <th>model</th><th>provider</th>
+    <th class="num">requests</th>
+    <th class="num">sessions</th>
+    <th class="num">in</th><th class="num">out</th>
+    <th class="num">cache_read</th><th class="num">cost ($)</th>
+  </tr></thead><tbody></tbody></table>
+
+  <h2>By folder</h2>
+  <table id="by_folder"><thead><tr>
+    <th>folder</th>
+    <th class="num">requests</th>
+    <th class="num">cost ($)</th>
+    <th class="num">in</th><th class="num">out</th>
+  </tr></thead><tbody></tbody></table>
+
+  <script>
+    function fmt(n) {
+      if (typeof n !== 'number') return n;
+      if (Math.abs(n) > 999) return n.toLocaleString();
+      return n.toFixed(n % 1 === 0 ? 0 : 4);
+    }
+    async function refresh() {
+      document.getElementById('status').textContent = 'loading…';
+      try {
+        const r = await fetch('/api/stats');
+        const d = await r.json();
+        const o = d.overall;
+        const overall = document.getElementById('overall');
+        overall.innerHTML = '';
+        for (const [k, v] of Object.entries(o)) {
+          overall.insertAdjacentHTML('beforeend',
+            `<tr><th>${k}</th><td class="num">${fmt(v)}</td></tr>`);
+        }
+        const mtbody = document.querySelector('#by_model tbody');
+        mtbody.innerHTML = '';
+        for (const m of d.by_model) {
+          mtbody.insertAdjacentHTML('beforeend',
+            `<tr><td>${m.model}</td><td>${m.provider}</td>
+              <td class="num">${fmt(m.requests)}</td>
+              <td class="num">${fmt(m.sessions)}</td>
+              <td class="num">${fmt(m.input_tokens)}</td>
+              <td class="num">${fmt(m.output_tokens)}</td>
+              <td class="num">${fmt(m.cache_read_tokens)}</td>
+              <td class="num">${fmt(m.cost)}</td></tr>`);
+        }
+        const ftbody = document.querySelector('#by_folder tbody');
+        ftbody.innerHTML = '';
+        for (const f of d.by_folder) {
+          ftbody.insertAdjacentHTML('beforeend',
+            `<tr><td>${f.folder}</td>
+              <td class="num">${fmt(f.requests)}</td>
+              <td class="num">${fmt(f.cost)}</td>
+              <td class="num">${fmt(f.input_tokens)}</td>
+              <td class="num">${fmt(f.output_tokens)}</td></tr>`);
+        }
+        document.getElementById('status').textContent = '';
+      } catch (e) {
+        document.getElementById('status').textContent = 'error: ' + e;
+      }
+    }
+    async function sync() {
+      document.getElementById('status').textContent = 'syncing…';
+      await fetch('/api/sync');
+      await refresh();
+    }
+    refresh();
+  </script>
+</body>
+</html>

@@ -1,0 +1,90 @@
+{
+  "session_id": "6cdff70e-6dac-49d3-b691-d3b9654995ef",
+  "estimated_tokens": 40738,
+  "turns": [
+    {
+      "index": 1,
+      "blocks": [
+        {
+          "kind": "meta",
+          "tokens": 0,
+          "label": "session start"
+        },
+        {
+          "kind": "context_load",
+          "tokens": 1046,
+          "label": "/home/user/quartet/validate/AGENTS.md"
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "blocks": [
+        {
+          "kind": "user",
+          "tokens": 11,
+          "label": "Summarize what RFD 0008 ships, in one sentence."
+        },
+        {
+          "kind": "assistant_text",
+          "tokens": 0,
+          "label": "",
+          "cost_usd": 0.06252500000000001
+        },
+        {
+          "kind": "tool_error",
+          "tokens": 23,
+          "label": "AUTO-APPROVE BLOCKED: user-confirmation required (headless):…"
+        },
+        {
+          "kind": "assistant_text",
+          "tokens": 0,
+          "label": "",
+          "cost_usd": 0.06252500000000001
+        },
+        {
+          "kind": "tool_result",
+          "tokens": 3,
+          "label": "(no matches)"
+        },
+        {
+          "kind": "assistant_text",
+          "tokens": 0,
+          "label": "",
+          "cost_usd": 0.06252500000000001
+        },
+        {
+          "kind": "tool_result",
+          "tokens": 15,
+          "label": "/home/user/quartet/validate/rfd/0008-populate-usage-fields.m…"
+        },
+        {
+          "kind": "assistant_text",
+          "tokens": 0,
+          "label": "",
+          "cost_usd": 0.06252500000000001
+        },
+        {
+          "kind": "tool_result",
+          "tokens": 2575,
+          "label": "1\t# RFD 0008 — Populate every `Usage` field on stream finish…"
+        },
+        {
+          "kind": "assistant_text",
+          "tokens": 82,
+          "label": "RFD 0008 wires every streaming provider (Anthropic, OpenAI, …",
+          "cost_usd": 0.06252500000000001
+        },
+        {
+          "kind": "outcome",
+          "tokens": 0,
+          "label": "outcome: win (0.95)",
+          "outcome": {
+            "success": true,
+            "score": 0.95
+          }
+        }
+      ]
+    }
+  ]
+}

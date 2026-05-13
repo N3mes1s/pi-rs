@@ -1,0 +1,416 @@
+# RFD 0026 v2 — wire contextfs + agora into the Sprites remote sandbox.
+#
+# Successor to rfd-0026-implement-e2b-campaign.toml. The E2B path
+# is on main as commit ccc2675 + envd-route fix 6a0a7e8. The
+# Sprites path now has its skeleton on main as commit 9ed9e45
+# (SpritesProvider via wromm shell-out, no /work mount yet).
+#
+# This campaign lights up bidirectional real-time host↔sandbox
+# /work via contextfs + cfs-mesh agora-listen + agora, replacing
+# wromm's default project-sync at session-open.
+#
+# Architecture (RFD 0026 v2 §"Architecture"):
+#
+#   HOST (per pi session):
+#     - cfs-fs-server  (UDS, root=cwd, RW)
+#     - contextfs-broker (UDS, Cedar policy gate)
+#     - cfs-mesh agora-bridge --room=<X> --target-uds=<cfs-fs UDS>
+#     - cfs-mesh agora-bridge --room=<Y> --target-uds=<broker UDS>
+#     - agora client joined to rooms X+Y
+#
+#   SPRITE (after wromm up):
+#     - musl-static contextfsd / cfs-mesh / agora binaries uploaded
+#     - apt-get install -y fuse3 (required, ~3s)
+#     - agora client joined to rooms X+Y
+#     - cfs-mesh agora-listen --room=<X> --uds=/run/cfs/fs.sock
+#     - cfs-mesh agora-listen --room=<Y> --uds=/run/cfs/broker.sock
+#     - contextfsd --config <toml> with [mount.remote_fs]
+#       target_uds=/run/cfs/fs.sock, [broker] socket_path=/run/cfs/broker.sock
+#     - contextfsd FUSE-mounts /work
+#
+#   WORKER (in sprite):
+#     - pi-sandbox-worker --work-dir /work
+#     - All filesystem ops flow through contextfsd → agora room → host
+#
+# Prereqs (campaign verifies + fails loudly if absent):
+#   - main has commits 9ed9e45 (Sprites skeleton) + 640a3f0 (RFD v2)
+#   - SPRITES_TOKEN env var or pi auth storage
+#   - musl-static contextfsd / cfs-mesh / cfs-fs-server / contextfs-broker
+#     under /home/nemesis/code/contextfs/target/x86_64-unknown-linux-musl/
+#   - musl-static agora under /home/nemesis/code/agora/target/x86_64-unknown-linux-musl/
+#   - musl-static pi-sandbox-worker under PI_SANDBOX_WORKER_BIN
+#   - wromm CLI on PATH (or PI_WROMM_BIN)
+#   - Network from host to api.sprites.dev + agora's broker
+#
+# Run:
+#   pi --orchestrate rfd-0026-sprites-contextfs-campaign.toml \
+#      --auto-approve auto-judge --route auto
+
+name = "rfd-0026-sprites-contextfs"
+description = """
+Wire contextfs + cfs-mesh + agora into the Sprites remote sandbox
+provider so /work is a real-time bidirectional FUSE mount instead
+of wromm's project-sync-at-open. Three milestones:
+  M1 — host-side orchestration (spawn cfs-fs-server, broker,
+       cfs-mesh agora-bridge; provision agora room + key).
+  M2 — sprite-side bootstrap (upload binaries, install fuse3,
+       start agora + cfs-mesh + contextfsd inside the sprite).
+  M3 — real e2e dogfood: pi solves a coding task through
+       --sandbox-provider=sprites with bidirectional /work; verify
+       host-side edit during a tool call propagates to the sprite
+       on the next read.
+
+Acceptance: scripts/dogfood-sprites-contextfs.sh runs end-to-end
+green AND a 100-MB stress test (10 files × 10 MB) round-trips
+without error AND host-edit-during-tool-call visibility test passes.
+"""
+
+target_branch = "rfd-0026-sprites-contextfs-target"
+
+[defaults]
+fix_loop_max = 15
+push_retry_max = 0
+reviewer = "gpt5-code-reviewer"
+
+# ─────────────────────────────────────────────────────────────────
+# M1 — Host-side orchestration: spawn the daemons + provision the
+#      agora room. NO sprite-side changes yet; this milestone
+#      writes pure host-side code that pi-sandbox::SpritesProvider
+#      drives on session open.
+# ─────────────────────────────────────────────────────────────────
+[[milestones]]
+id = "sprites-host-orchestration"
+branch = "rfd-0026-sprites-contextfs-host"
+implementer = "halo-implementer"
+reviewer = "gpt5-code-reviewer"
+fix_loop_max = 12
+
+assignment = """
+You are extending the SpritesProvider in pi-rs to spawn the
+host-side contextfs + agora daemons that the sprite will tunnel
+back through.
+
+Read FIRST:
+  - rfd/0026-sandbox-remote.md (especially the §"v2 — contextfs-
+    backed /work for remote sandboxes" section, Architecture +
+    Phase A/B/C work plan)
+  - crates/pi-sandbox/src/microvm/contextfs_proxy.rs (existing
+    `spawn_cfs_fs_server` + `spawn_cfs_vsock_bridge` pattern;
+    you'll reuse spawn_cfs_fs_server, replace vsock_bridge with
+    cfs-mesh agora-bridge)
+  - crates/pi-sandbox/src/microvm/broker_proxy.rs (existing
+    `spawn_contextfs_broker` + Cedar policy file generation)
+  - crates/pi-sandbox/src/remote/sprites.rs (the skeleton you're
+    extending; commit 9ed9e45 on main)
+  - contextfs/crates/contextfs-mesh/src/main.rs::AgoraBridge
+    + AgoraListen (the cfs-mesh subcommands you'll spawn)
+  - agora's CLI for joining a room with a key (look at
+    /home/nemesis/code/agora/README.md for the `agora dm` /
+    `agora accept` flow OR a programmatic API if available)
+
+## What this milestone ships
+
+Extend `crates/pi-sandbox/src/remote/sprites.rs` to spawn three
+host-side child processes during `ensure_session_open`:
+
+  1. `cfs-fs-server --root <ctx.cwd> --socket <run_dir>/cfs-fs.sock`
+     (RW; the broker is the policy gate)
+  2. `contextfs-broker run --socket <run_dir>/broker.sock
+                            --policy <run_dir>/cedar.policy
+                            --tenant-secret-path <run_dir>/tenant.secret
+                            --allowed-uid <self_uid>`
+  3. `cfs-mesh agora-bridge --room <room_id_X>
+                            --target-uds <run_dir>/cfs-fs.sock`
+     and a sibling for the broker UDS on a separate room Y.
+
+REUSE the existing `spawn_cfs_fs_server` + `spawn_contextfs_broker`
+helpers from `microvm/{contextfs_proxy,broker_proxy}.rs` — these
+are already `pub(crate)` and produce a `Child`; promote them to
+`pub(super)` (or the smallest scope needed) so the `remote::`
+module can call them without duplication.
+
+For the agora-bridge spawn, write a small new helper next to the
+vsock-bridge ones (say `spawn_cfs_mesh_agora_bridge`) following
+the same `Child` ownership pattern (`kill_on_drop`, per-pi-process
+`Drop`). The binary path is resolved via `PI_CFS_MESH_BIN` env
+override → `which cfs-mesh`.
+
+`SessionState` (already in sprites.rs) gains:
+  - `host_children: Vec<tokio::process::Child>` so the daemons
+    die with the provider when `cleanup()` runs.
+  - `room_id_fs: String`, `room_id_broker: String` so M2 can
+    inject them into the sprite-side bootstrap.
+  - `run_dir: PathBuf` (a per-session tempdir under
+    /home/nemesis/code/.pi-sprites/<sprite_id>/, NOT /tmp —
+    /tmp is tmpfs on this box per memory feedback).
+
+## Agora room provisioning
+
+For v1, generate two fresh agora room IDs + symmetric keys per
+session via `agora dm <self> --new-room` (or programmatic
+equivalent — check the agora CLI). Store the room ID + key in
+the same tempdir as the rest of the session state. M2 will pass
+these into the sprite via env vars set on the contextfsd /
+cfs-mesh wromm exec calls.
+
+If agora doesn't expose a stable programmatic API for room
+creation, shell out to the `agora` CLI in single-shot mode and
+parse the result; document the fallback in a code comment.
+
+## Tests this milestone owns
+
+Three integration tests in `crates/pi-sandbox/tests/`:
+
+  1. `sprites_host_orchestration_smoke` (Linux-only,
+     network-free): mocks all four binaries (cfs-fs-server,
+     contextfs-broker, cfs-mesh, agora) by writing tiny shell
+     scripts to a tempdir that record their argv and sleep
+     forever. Sets `PI_SANDBOX_CFS_FS_SERVER_BIN` etc. to
+     point at them. Constructs a SpritesProvider, calls a
+     test-only `_test_open_host_side_only()` method (you'll
+     add it behind `#[cfg(test)]`). Asserts each mock was
+     called with the expected argv and that all three
+     children are alive after `ensure_session_open` returns.
+
+  2. `sprites_host_orchestration_clean_kill_on_drop`: same
+     mocks, then drop the provider and assert all four child
+     processes are SIGKILL'd within 1s (kill_on_drop contract).
+
+  3. `sprites_host_orchestration_missing_binary_fails_loudly`:
+     unset PI_SANDBOX_CFS_FS_SERVER_BIN, ensure
+     `from_auth().execute_tool()` returns
+     `SandboxError::Unavailable` with a helpful message
+     listing the missing binary.
+
+NO live Sprites or live agora room in M1 — those land in M2/M3.
+
+## Constraints
+
+- Don't edit anything in `crates/contextfs/` or
+  `/home/nemesis/code/contextfs/`. The user's standing rule:
+  contextfs changes need explicit OK. Only consume contextfs
+  binaries via env-resolved paths.
+- /tmp is tmpfs on the dev host — do NOT put long-running
+  state (UDSes, secrets, agora session files) there. Use
+  `/home/nemesis/code/.pi-sprites/<sprite_id>/`.
+- Keep the wromm shell-out path working for users who run
+  `--sandbox-provider=sprites` without contextfs (i.e. the
+  binaries aren't found). Behind a feature gate
+  `PI_SPRITES_CONTEXTFS=1` (default off) until M3 dogfoods green.
+
+Acceptance: reviewer's verdict line is `Verdict: APPROVED`
+AND `cargo build -p pi-sandbox -p pi-coding-agent` is clean
+AND all three tests in `cargo test -p pi-sandbox` pass.
+"""
+
+# ─────────────────────────────────────────────────────────────────
+# M2 — Sprite-side bootstrap: upload the musl binaries, install
+#      fuse3, start agora + cfs-mesh agora-listen + contextfsd
+#      inside the sprite, FUSE-mount /work.
+# ─────────────────────────────────────────────────────────────────
+[[milestones]]
+id = "sprites-sandbox-bootstrap"
+branch = "rfd-0026-sprites-contextfs-sandbox"
+implementer = "halo-implementer"
+reviewer = "gpt5-code-reviewer"
+fix_loop_max = 12
+
+assignment = """
+M1 landed the host-side daemons. This milestone writes the
+sprite-side bootstrap: upload the contextfs/agora/cfs-mesh
+binaries to the sprite, install fuse3, configure + start the
+daemons inside, and verify /work mounts.
+
+Read FIRST:
+  - rfd/0026-sandbox-remote.md §"v2" Phase B (sandbox bootstrap)
+  - The probe findings cataloged in §6/§7 — Sprites has
+    NoNewPrivs=0, sudo, /dev/fuse openable; fusermount3 is NOT
+    preinstalled but apt-get install -y fuse3 works (~3s)
+  - contextfs/crates/contextfsd/src/config.rs — the TOML schema
+    for `[mount.remote_fs]` + `[broker]` + tenant-secret path
+    expectations (mode 0600, hex-encoded 32-byte secret)
+  - crates/pi-sandbox/src/remote/sprites.rs after M1 lands
+
+## What this milestone ships
+
+Extend `ensure_session_open` (after the M1 host-side daemons
+are up) with a sprite-side bootstrap sequence:
+
+  1. `wromm cp` the four musl-static binaries into the sprite
+     under /home/sprite/pi-cfs/:
+       - contextfsd
+       - cfs-mesh
+       - cfs-fs-server (NOT used inside sprite, but useful
+         for diagnostics; optional — skip if it bloats upload)
+       - agora
+     Resolve binary paths via env: PI_SANDBOX_CONTEXTFSD_BIN,
+     PI_SANDBOX_CFS_MESH_BIN, PI_SANDBOX_AGORA_BIN. Default to
+     the musl-static `target/x86_64-unknown-linux-musl/release/`
+     paths if unset. Total upload ≈ 27 MB.
+
+  2. Run `sudo apt-get install -y fuse3` inside the sprite via
+     `wromm exec`. This is idempotent so re-running is fine.
+     Time: ~3s.
+
+  3. Generate a contextfsd config TOML on the host (writeable
+     to a per-session host tempdir), then `wromm cp` it into
+     the sprite at /home/sprite/pi-cfs/contextfsd.toml:
+       - tenant_secret_path = "/home/sprite/pi-cfs/tenant.secret"
+       - audit_log_path = "/home/sprite/pi-cfs/audit.log"
+       - [pdp].policy_path = "/home/sprite/pi-cfs/policy.cedar"
+       - [[mount]].name = "work"
+       - [[mount]].mountpoint = "/work"
+       - [[mount]].backend = "remote-fs"
+       - [[mount]].cache_dir = "/home/sprite/pi-cfs/cache"
+       - [[mount]].read_only = false
+       - [mount.remote_fs].target_uds = "/run/cfs/fs.sock"
+       - [broker].socket_path = "/run/cfs/broker.sock"
+     Generate fresh tenant.secret + policy.cedar on the host,
+     `wromm cp` them in (chmod 0600 happens via wromm exec
+     since cp may not preserve mode).
+
+  4. Start the sprite-side daemons. Each via `wromm exec` with
+     proper detachment (`setsid`, redirect stdin/out/err to
+     files in /home/sprite/pi-cfs/logs/, `&` + `disown`):
+       a. `agora` joining rooms <room_id_fs> + <room_id_broker>
+          using the keys M1 generated. Daemonised; logs to
+          agora.log.
+       b. `cfs-mesh agora-listen --room <room_id_fs>
+              --uds /run/cfs/fs.sock`
+       c. `cfs-mesh agora-listen --room <room_id_broker>
+              --uds /run/cfs/broker.sock`
+       d. `contextfsd --config /home/sprite/pi-cfs/contextfsd.toml`
+
+  5. Wait until `/work` is FUSE-mounted in the sprite. Poll
+     `mount | grep /work` via `wromm exec` with a 30s budget;
+     fail loudly if not mounted (and surface contextfsd.log
+     for debug).
+
+  6. Update the worker invocation in `dispatch_tool` to use
+     `--work-dir /work` (currently `/home/sprite`). The worker
+     binary itself stays at /home/sprite/pi-sandbox-worker
+     since it's already chmod'd in M1's wromm cp path.
+
+## Tests this milestone owns
+
+  1. `sprites_sandbox_bootstrap_smoke` (Linux-only, gated on
+     SPRITES_TOKEN + ALL FOUR binary env vars being set):
+     creates a real sprite via wromm, runs the full
+     ensure_session_open(), asserts /work is mounted via a
+     `wromm exec ls /work` round-trip, then runs cleanup().
+     One sprite, one assertion. Wall-clock budget: 90s
+     (provision + apt-get + binary uploads + bootstrap).
+
+  2. `sprites_sandbox_bootstrap_skip_when_no_token`: with
+     SPRITES_TOKEN unset, the test prints SKIP and returns Ok.
+
+NO multi-sprite or stress in M2 — those are M3.
+
+## Constraints
+
+- Use `setsid` + explicit `< /dev/null > log 2>&1 &` + `disown`
+  for sprite-side daemon launches. nohup alone hangs `wromm
+  exec` (verified during the manual probe loop).
+- Per-session host tempdir for tenant.secret + policy.cedar
+  + agora session files. Clean up on `cleanup()` (the same
+  Drop path that kills host-side children).
+- Don't bake any sprite-internal paths into the pi-sandbox
+  crate's public API — they're implementation details.
+
+Acceptance: reviewer APPROVED + workspace builds + the two
+tests pass (smoke green when SPRITES_TOKEN set; skip otherwise).
+"""
+
+# ─────────────────────────────────────────────────────────────────
+# M3 — Real e2e dogfood + the host-edit-during-tool-call test
+#      that proves bidirectional liveness.
+# ─────────────────────────────────────────────────────────────────
+[[milestones]]
+id = "sprites-contextfs-dogfood"
+branch = "rfd-0026-sprites-contextfs-dogfood"
+implementer = "halo-implementer"
+reviewer = "gpt5-code-reviewer"
+fix_loop_max = 10
+
+assignment = """
+M1 + M2 wire up the architecture mechanically. This milestone
+proves the result holds end-to-end with a real LLM solving a
+real coding task — same dogfood pattern that closed E2B's loop.
+
+Read FIRST:
+  - scripts/dogfood-e2b-remote-sandbox.sh (the E2B precedent;
+    you're writing the Sprites equivalent + extending it with
+    the bidirectional-liveness check)
+  - rfd/0026-sandbox-remote.md §"v2" §"Acceptance criteria"
+
+## What ships
+
+A scripted reproducible demo at
+`scripts/dogfood-sprites-contextfs.sh` that:
+
+  1. Stages a small toy Rust source tree in a tempdir
+     (matches the E2B dogfood: src/math.rs with a buggy
+     abs_diff + an empty tests/).
+
+  2. Runs `pi -p --sandbox-provider=sprites
+        --auto-approve=yolo --json` with a self-contained
+     brief: "read src/math.rs, identify the bug, write a
+     test in tests/bug_test.rs that catches it; before
+     writing the test, run hostname (the sandbox's id should
+     differ from kusanagi); after writing, sleep 3 then
+     re-read tests/bug_test.rs to confirm it persists".
+
+  3. While the agent is running (specifically: at the
+     'sleep 3' window inside the brief), the script edits
+     src/math.rs from the HOST, appending a comment line
+     `// host-edit-marker-<timestamp>`.
+
+  4. After pi exits, asserts:
+       a. The agent's hostname call output matches a sprite
+          (not 'kusanagi'). Same proof shape as E2B dogfood.
+       b. tests/bug_test.rs exists on the host and references
+          abs_diff.
+       c. The host-edit-marker comment is present in the
+          sandbox's view of /work/src/math.rs (proven by a
+          wromm exec cat at the end of the script). This is
+          the bidirectional-liveness gate that contextfs+agora
+          delivers and that wromm's project-sync-at-open
+          can't.
+
+  4. (separate `--stress` flag): write 10 files × 10 MB of
+     random bytes from inside the sprite, then read each one
+     back from the host and assert the SHA256 matches. 100 MB
+     round-trip stress, mirrors the RFD's "Acceptance criteria"
+     bullet 2.
+
+## Documentation
+
+Update RFD 0026 v2:
+  - Mark §"Acceptance criteria" bullets 1 and 2 as DONE with a
+    link to the dogfood script + the iteration this campaign
+    landed.
+  - Append an "Operating notes" subsection with: how to set
+    up the env (PI_SANDBOX_CONTEXTFSD_BIN, PI_SANDBOX_CFS_MESH_BIN,
+    PI_SANDBOX_AGORA_BIN), how to run the dogfood, what
+    wall-time the script measured, and any failure modes the
+    M3 work surfaced (likely: the agora room cold-start adds
+    ~Ns to session-open vs wromm-only; document the number).
+
+## Hard constraints
+
+- Script must NOT commit the demo's tempdir to the repo —
+  side-effect-free repro.
+- Skip cleanly if SPRITES_TOKEN unset.
+- Tear down its sprite + host-side daemons + agora session
+  on exit (trap-based cleanup); never leave orphaned state.
+- The host-edit-during-tool-call check MUST fail if
+  PI_SPRITES_CONTEXTFS is unset (i.e. wromm-only mode shouldn't
+  pass this gate). That's how we prove contextfs is the thing
+  delivering the property.
+- Wall-clock target: < 3 minutes for the basic demo,
+  < 5 minutes with --stress.
+
+Acceptance: dogfood script passes all three verifications
+green AND --stress passes all 10 SHA matches AND reviewer's
+verdict is APPROVED.
+"""

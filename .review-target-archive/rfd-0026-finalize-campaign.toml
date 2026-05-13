@@ -1,0 +1,181 @@
+# RFD 0026 — Remote sandbox transports: rfd-critic iteration loop campaign.
+#
+# Drives the same iteration pattern that took RFD 0023 to READY in 35+
+# revisions: write draft → rfd-critic reviews → opus revises →
+# rfd-critic reviews v0.2 → … → READY verdict → polish pass.
+#
+# Reviewer: rfd-critic agent (gpt-5.4 thinking xhigh, .pi/agents/rfd-critic.md).
+# Implementer: opus-4.7 1M-context (halo-implementer).
+#
+# The loop terminates when the reviewer's last verdict line says
+# `Verdict: READY`. fix_loop_max sets the upper bound; if we blow it
+# without a READY, the campaign fails loudly so we don't burn budget
+# silently.
+#
+# Run:
+#   pi --orchestrate rfd-0026-finalize-campaign.toml \
+#      --auto-approve auto-judge --route auto
+
+name = "rfd-0026-finalize"
+description = """
+Iterate RFD 0026 (Remote Sandbox Transports — E2B, Sprites,
+Daytona) from its current 199-line stub ("v0.2 — stub" status,
+TBD rows in the vendor table) to a READY verdict from
+rfd-critic. The stub explicitly defers substance until RFD
+0023's MicroVmLauncher + pi-sandbox-worker land. RFD 0023 has
+now shipped through Commit G (microVM provider + CLI flag +
+sandbox doctor + dogfood — main branch), so the dependency is
+cleared.
+
+Acceptance: rfd-critic emits `Verdict: READY` with no critical
+issues. Underspec / overengineered / missing notes are fold-in-
+able by a later polish pass.
+"""
+
+target_branch = "rfd-0026-finalize-target"
+
+[defaults]
+fix_loop_max = 30
+push_retry_max = 0
+reviewer = "rfd-critic"
+
+# ─────────────────────────────────────────────────────────────────
+# M1 — Iterate RFD 0026 to READY
+# ─────────────────────────────────────────────────────────────────
+[[milestones]]
+id = "iterate-to-ready"
+branch = "rfd-0026-finalize-iter"
+implementer = "halo-implementer"   # opus-4.7 1M
+reviewer    = "rfd-critic"          # gpt-5.4 xhigh
+fix_loop_max = 30
+
+assignment = """
+You are revising RFD 0026 — Remote Sandbox Transports.
+Path: `rfd/0026-sandbox-remote.md`.
+
+Current state: 199-line stub from 2026-05-02, status
+"Discussion (v0.2 — stub)". The stub explicitly defers substance
+until RFD 0023's MicroVmLauncher trait + pi-sandbox-protocol
+crate + pi-sandbox-worker binary land — those are NOW SHIPPED on
+main (RFD 0023 reached READY at v0.42; Commit G + the contextfs
+RW + Cedar broker integration + tests_only profile dogfood are
+all in main as of pi-rs commits b98e06c / 441aa85). The
+dependency is cleared. Time to pin the design.
+
+## Loop shape
+
+Each turn:
+
+1. Read `rfd/0026-sandbox-remote.md` end-to-end.
+2. Read the most recent rfd-critic verdict (the previous review's
+   output appended to the conversation; on the FIRST turn there
+   is no prior verdict — read the RFD as-is and address obvious
+   own-goals).
+3. Apply concrete deltas that close every issue the critic flagged
+   as **Critical** AND every **Underspecified** item that has a
+   clear fix. **Overengineered** items: cut them. **Missing**:
+   add them. Don't engage with style nits at the cost of
+   substance.
+4. Bump the version line in §"Revision history" with a one-line
+   summary of what changed in this turn.
+5. Commit on `rfd-0026-finalize-iter` with message
+   `rfd: 0026 v0.N — <delta summary>`.
+6. Hand off to rfd-critic.
+
+## What's known to need filling
+
+Read your way through these — each is a likely critical hit:
+
+- **Vendor table TBDs.** Sprites + Daytona rows are TBD; E2B has
+  partial numbers. Either fill them or move Sprites/Daytona out
+  of v1 and into a "future vendors" section so v1 has a
+  defensible "we picked E2B because X" story.
+- **Transport.** Local microVM uses vsock; remote vendors don't
+  expose vsock to the embedder. Pin the transport: TLS + HTTPS,
+  WebSocket-over-TLS, vendor-provided proxy, or some hybrid.
+  The stub hand-waves this — the critic will not let it.
+- **Worker-into-remote-sandbox.** The stub says "the cleanest
+  design likely ships the same `pi-sandbox-worker` into the
+  remote vendor's sandbox". Lock that decision OR pick the
+  alternative (vendor-API-direct, no shared worker). Specify the
+  upload mechanism (vendor SDK file-upload? base64-in-bootscript?
+  a downloaded URL?) and the bootstrap protocol.
+- **Trait surface.** Local: `MicroVmLauncher` per-OS. Remote:
+  same trait? A new `RemoteSandboxLauncher`? A `SandboxProvider`
+  alternative that bypasses the launcher abstraction entirely?
+  The right answer depends on whether remote backends share
+  enough with local to reuse the launcher's lifecycle (probe →
+  acquire → execute → release → warm pool); decide explicitly.
+- **Cost telemetry.** The stub mentions cost_usd. Specify how
+  the per-second compute cost flows from the vendor's billing
+  signal into pi-rs's `SandboxAction` rows. (Some vendors
+  expose live cost; some only invoice.)
+- **Auth + key management.** Each vendor uses an API key.
+  Where do they live? `~/.pi/agent/auth.json` per RFD 0027
+  AuthStorage? Env var? Both? Spell it out.
+- **Failure modes.** Network errors, rate limits, vendor
+  downtime, region-down, billing exceeded. The stub lists these
+  but doesn't say how the SandboxProvider impl maps them to
+  `SandboxError` variants and what the runtime does in response
+  (retry? fail open? fail closed?).
+- **Integration with contextfs /work.** Local microVM runs
+  contextfs daemon in-guest; the remote-fs backend bridges UDS
+  ↔ vsock. Remote vendors: is contextfs even relevant? Or do we
+  use the vendor's native filesystem upload/sync API? What's
+  the per-vendor story?
+- **Security boundary.** Local microVM is a hardware boundary
+  (KVM/HVF/WHPX). Remote: the vendor IS the boundary (we trust
+  them). Document this trust assumption explicitly. Discuss
+  multi-tenant risk if multiple pi sessions land in the same
+  vendor account.
+- **Per-vendor implementation plan.** The stub claims "each
+  vendor integration is a self-contained 400-800 LoC commit".
+  Sketch what those commits look like — module layout, public
+  API, test strategy, gating env vars for CI.
+
+## Anchor primitives the critic will hammer
+
+The critic has seen RFD 0023 land with READY verdicts at v0.31,
+v0.38, v0.41, v0.42 (final in tree). Expect it to:
+
+- Cross-check every cited file:line against the live tree
+  (citation rot is the #1 critic pet peeve). Run `find` /
+  `grep` to confirm any path or symbol you reference exists.
+- Probe whether existing primitives already do the job — RFD
+  0023 (MicroVmLauncher), RFD 0027 (pi_sdk SandboxProvider),
+  RFD 0022 (LocalProcessProvider). If you propose a new trait
+  and the existing one would suffice, the critic will demand
+  you delete the new one.
+- Stress-test the security claims with a concrete adversarial
+  example. (E.g. the vendor's API returns success but the
+  sandbox actually crashed — how does the agent know? Does
+  pi-rs verify return values?)
+- Question whether the wire shape is composable with RFD 0027's
+  pi-sdk surface. Is a remote backend a SandboxProvider, or
+  something exposed at a different layer?
+- Demand at least one wire-shape example for a non-trivial op
+  (acquire, execute_tool with a file write, release).
+
+## Hard constraints
+
+- **Don't reinvent.** If the critic flags reinvention of an
+  existing primitive, cite the primitive and either delete the
+  reinventing section or explicitly justify why the new one is
+  needed.
+- **Don't grow scope.** "Out of scope / deferred" exists for a
+  reason — push features there instead of inflating v1.
+- **Cite real, current files.** When pointing at code that
+  exists today, use `path:line` and verify with `grep` or `find`
+  before each commit. The critic checks every citation.
+- **Pin one vendor as the v1 reference.** E2B has the most
+  public docs and the best-filled-in row in the table; making it
+  the reference vendor and treating Sprites/Daytona as
+  "next-up" is fine and probably right.
+
+## Acceptance
+
+The campaign loops until rfd-critic's verdict line reads
+`Verdict: READY` (no critical issues). When that happens, the
+RFD has shipped to a state where the v1 implementation can
+start without further design ambiguity.
+"""

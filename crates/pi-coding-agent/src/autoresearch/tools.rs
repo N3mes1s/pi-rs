@@ -515,6 +515,12 @@ impl Tool for LogExperimentTool {
             confidence,
             iteration_tokens,
             asi,
+            // RAO (RFD 0032): optional recursive-delegation fields.
+            // Not exposed in log_experiment's schema (callers set these via
+            // `asi`); kept None here so the log stays backward-compatible.
+            depth: None,
+            delegation_bonus: None,
+            child_run_ids: Vec::new(),
         };
         log.append_run(&entry).map_err(ToolError::Io)?;
 
@@ -556,6 +562,324 @@ impl Tool for LogExperimentTool {
                 "working_dir": working_dir.display().to_string(),
             })),
             is_error: false,
+        })
+    }
+}
+
+// ── run_experiment_recursive ─────────────────────────────────────────────────
+//
+// RAO (RFD 0032): fan out N benchmark commands to parallel child runs,
+// aggregate results with a delegation bonus, and return a composite metric
+// that the caller passes to `log_experiment`.
+//
+// The tool does NOT spawn agent sub-agents (it's not `task`) — it runs the
+// supplied benchmark commands in parallel subprocesses (same machine, same
+// working_dir) and computes a RAO-style reward:
+//
+//   composite = parent_metric − direction_sign × (λ × mean_child_improvement) × scale
+//
+// where `mean_child_improvement` is the mean signed improvement of each child
+// benchmark relative to its own `baseline` value supplied by the caller.
+//
+// This is deliberately lightweight: no new agent sessions are spun up, and
+// the child commands are just shell commands (typically `./autoresearch.sh
+// VARIANT=foo`).  The caller already knows what variants to try; this tool
+// parallelises the measurement.
+
+pub struct RunExperimentRecursiveTool;
+
+#[async_trait]
+impl Tool for RunExperimentRecursiveTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "run_experiment_recursive".into(),
+            description:
+                "RAO (RFD 0032): run multiple benchmark variants in parallel and aggregate results \
+                 with a delegation bonus. Each entry in `sub_experiments` is an independent shell \
+                 command; all run concurrently up to `max_concurrency`. Returns a composite metric \
+                 = parent_metric adjusted by λ × mean(child_improvements). Pass `composite_metric` \
+                 and `child_run_ids` to `log_experiment` so the JSONL log tracks the recursion \
+                 structure. Does NOT write to autoresearch.jsonl — call log_experiment afterward."
+                    .into(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["parent_command", "parent_baseline", "sub_experiments"],
+                "properties": {
+                    "parent_command": {
+                        "type": "string",
+                        "description": "The primary benchmark command (same as run_experiment's `command`)."
+                    },
+                    "parent_baseline": {
+                        "type": "number",
+                        "description": "The baseline metric value for the parent (e.g. last kept run's metric)."
+                    },
+                    "sub_experiments": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "List of sub-experiment commands to run in parallel.",
+                        "items": {
+                            "type": "object",
+                            "required": ["id", "command", "baseline"],
+                            "properties": {
+                                "id":       { "type": "string", "description": "Short identifier for this sub-experiment (e.g. 'variant-a')." },
+                                "command":  { "type": "string", "description": "Shell command for this sub-experiment." },
+                                "baseline": { "type": "number", "description": "Baseline metric value for this sub-experiment." }
+                            }
+                        }
+                    },
+                    "lambda": {
+                        "type": "number",
+                        "description": "Delegation bonus weight λ (default 0.4). Set 0 to disable bonus."
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["lower", "higher"],
+                        "description": "Whether lower or higher metric values are improvements (default 'lower')."
+                    },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "description": "Per-command timeout in seconds (default 600)."
+                    },
+                    "max_concurrency": {
+                        "type": "integer",
+                        "description": "Max parallel sub-commands (default 4)."
+                    },
+                    "working_dir": {
+                        "type": "string",
+                        "description": "Working directory for all commands. Defaults to cwd."
+                    }
+                }
+            }),
+        }
+    }
+
+    fn read_only(&self) -> bool {
+        false
+    }
+
+    async fn invoke(
+        &self,
+        ctx: &ToolContext,
+        call_id: &str,
+        input: Value,
+    ) -> Result<ToolResult, ToolError> {
+        // ── parse inputs ─────────────────────────────────────────────────────
+        let parent_command = input
+            .get("parent_command")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidInput("missing `parent_command`".into()))?
+            .to_string();
+        let parent_baseline = input
+            .get("parent_baseline")
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| ToolError::InvalidInput("missing `parent_baseline`".into()))?;
+        let sub_experiments_v = input
+            .get("sub_experiments")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| ToolError::InvalidInput("missing `sub_experiments` array".into()))?;
+
+        let lambda = input
+            .get("lambda")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.4)
+            .clamp(0.0, 1.0);
+        let direction_lower = input
+            .get("direction")
+            .and_then(|v| v.as_str())
+            .map(|s| s != "higher")
+            .unwrap_or(true);
+        let timeout_s = input
+            .get("timeout_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_RUN_TIMEOUT_S);
+        let max_conc = input
+            .get("max_concurrency")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(4)
+            .max(1) as usize;
+        let working_dir = resolve_working_dir(ctx, &input);
+
+        // Parse sub-experiment specs.
+        #[derive(Clone)]
+        struct SubSpec {
+            id: String,
+            command: String,
+            baseline: f64,
+        }
+        let mut sub_specs: Vec<SubSpec> = Vec::new();
+        for (i, s) in sub_experiments_v.iter().enumerate() {
+            let id = s
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::InvalidInput(format!("sub_experiments[{i}].id missing")))?
+                .to_string();
+            let command = s
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::InvalidInput(format!("sub_experiments[{i}].command missing")))?
+                .to_string();
+            let baseline = s
+                .get("baseline")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| ToolError::InvalidInput(format!("sub_experiments[{i}].baseline missing")))?;
+            sub_specs.push(SubSpec { id, command, baseline });
+        }
+
+        // ── run parent + children concurrently ───────────────────────────────
+        let commit = git_head_short(&working_dir);
+        let deadline = Duration::from_secs(timeout_s);
+
+        // We run parent + all children as a flat list, then split by index.
+        // Index 0 = parent, indices 1..N = children.
+        let all_commands: Vec<(String, f64)> = {
+            let mut v = vec![(parent_command.clone(), parent_baseline)];
+            for s in &sub_specs {
+                v.push((s.command.clone(), s.baseline));
+            }
+            v
+        };
+        let all_ids: Vec<String> = {
+            let mut v = vec!["parent".to_string()];
+            for s in &sub_specs {
+                v.push(s.id.clone());
+            }
+            v
+        };
+
+        // Run with limited concurrency using a semaphore-style approach.
+        use futures::stream::{self, StreamExt};
+        let wdir = working_dir.clone();
+        let results: Vec<(String, Option<f64>, bool, u64, String)> =
+            stream::iter(all_commands.into_iter().zip(all_ids))
+                .map(|((cmd, _baseline), id)| {
+                    let wdir2 = wdir.clone();
+                    let cmd2 = cmd.clone();
+                    async move {
+                        let t0 = Instant::now();
+                        match run_with_timeout(&cmd2, &wdir2, deadline).await {
+                            Ok((out, code, timed_out, crashed)) => {
+                                let passed = !timed_out && !crashed && code == 0;
+                                let (ordered, _map) = parse_metric_lines(&out);
+                                let metric = ordered.first().map(|(_, v)| *v);
+                                let duration_ms = t0.elapsed().as_millis() as u64;
+                                let tail = truncate_tail(&out, RUN_OUTPUT_MAX_BYTES, 5);
+                                (id, metric, passed, duration_ms, tail)
+                            }
+                            Err(e) => (id, None, false, 0, format!("io error: {e}")),
+                        }
+                    }
+                })
+                .buffer_unordered(max_conc + 1) // +1 for parent slot
+                .collect()
+                .await;
+
+        // ── split parent vs children ─────────────────────────────────────────
+        // Order is not guaranteed by buffer_unordered; match by id.
+        let find_result = |target_id: &str| -> Option<(f64, bool, u64, String)> {
+            results.iter().find(|(id, ..)| id == target_id).and_then(
+                |(_, metric, passed, dur, tail)| {
+                    metric.map(|m| (m, *passed, *dur, tail.clone()))
+                },
+            )
+        };
+
+        let (parent_metric, parent_passed, parent_dur_ms, parent_tail) = find_result("parent")
+            .map(|(m, p, d, t)| (m, p, d, t))
+            .unwrap_or((0.0, false, 0, "no METRIC line".to_string()));
+
+        // ── compute delegation bonus ─────────────────────────────────────────
+        // child_success = 1.0 if child improved over its baseline, else 0.0
+        let mut child_outcomes: Vec<serde_json::Value> = Vec::new();
+        let mut child_successes: Vec<f64> = Vec::new();
+
+        for spec in &sub_specs {
+            let (child_metric, child_passed, child_dur_ms, child_tail) =
+                find_result(&spec.id).unwrap_or((0.0, false, 0, "no METRIC line".to_string()));
+            let improvement = if direction_lower {
+                spec.baseline - child_metric // positive = improved
+            } else {
+                child_metric - spec.baseline
+            };
+            let success = if child_passed && improvement > 0.0 {
+                1.0_f64
+            } else {
+                0.0_f64
+            };
+            child_successes.push(success);
+            child_outcomes.push(json!({
+                "id": spec.id,
+                "metric": child_metric,
+                "baseline": spec.baseline,
+                "improvement": improvement,
+                "passed": child_passed,
+                "success_score": success,
+                "duration_ms": child_dur_ms,
+                "tail": child_tail,
+            }));
+        }
+
+        let mean_success = if child_successes.is_empty() {
+            0.0
+        } else {
+            child_successes.iter().sum::<f64>() / child_successes.len() as f64
+        };
+        let delegation_bonus = lambda * mean_success;
+
+        // Apply the bonus: the composite metric is the parent metric, adjusted
+        // by the bonus in the direction of improvement.
+        // If direction=lower: bonus lowers the composite (bonus acts as a reward
+        // that reduces the "cost").
+        // If direction=higher: bonus raises the composite.
+        let composite_metric = if direction_lower {
+            parent_metric - delegation_bonus * (parent_baseline - parent_metric).abs().max(1.0)
+        } else {
+            parent_metric + delegation_bonus * (parent_metric - parent_baseline).abs().max(1.0)
+        };
+
+        // ── build summary ────────────────────────────────────────────────────
+        let n_children = child_successes.len();
+        let n_succeeded = child_successes.iter().filter(|&&s| s > 0.0).count();
+
+        let mut summary = format!(
+            "run_experiment_recursive: commit={commit} parent_metric={parent_metric:.4} \
+             parent_passed={parent_passed} parent_dur={parent_dur_ms}ms\n\
+             children: {n_succeeded}/{n_children} improved (λ={lambda:.2} bonus={delegation_bonus:.4})\n\
+             composite_metric={composite_metric:.4} (direction={})\n",
+            if direction_lower { "lower" } else { "higher" }
+        );
+        summary.push_str("parent output (tail):\n");
+        summary.push_str(&parent_tail);
+        summary.push('\n');
+        summary.push_str("child outcomes:\n");
+        for co in &child_outcomes {
+            summary.push_str(&format!(
+                "  [{id}] metric={metric:.4} success={success} improvement={impr:.4}\n",
+                id = co["id"].as_str().unwrap_or("?"),
+                metric = co["metric"].as_f64().unwrap_or(0.0),
+                success = co["success_score"].as_f64().unwrap_or(0.0),
+                impr = co["improvement"].as_f64().unwrap_or(0.0),
+            ));
+        }
+
+        Ok(ToolResult {
+            tool_use_id: call_id.into(),
+            model_output: summary,
+            display: Some(json!({
+                "kind": "autoresearch_recursive_run",
+                "commit_before": commit,
+                "parent_metric": parent_metric,
+                "parent_passed": parent_passed,
+                "parent_duration_ms": parent_dur_ms,
+                "parent_baseline": parent_baseline,
+                "lambda": lambda,
+                "delegation_bonus": delegation_bonus,
+                "mean_child_success": mean_success,
+                "composite_metric": composite_metric,
+                "direction": if direction_lower { "lower" } else { "higher" },
+                "child_outcomes": child_outcomes,
+                "working_dir": working_dir.display().to_string(),
+            })),
+            is_error: !parent_passed,
         })
     }
 }

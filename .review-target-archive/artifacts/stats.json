@@ -1,0 +1,47 @@
+{
+  "overall": {
+    "total_requests": 17,
+    "total_input_tokens": 135226,
+    "total_output_tokens": 2080,
+    "total_cache_read_tokens": 0,
+    "total_cost": 0.7281299999999999,
+    "avg_duration_ms": 0.0,
+    "avg_ttft_ms": 0.0,
+    "error_count": 0
+  },
+  "by_model": [
+    {
+      "model": "claude-opus-4-7",
+      "provider": "anthropic",
+      "requests": 17,
+      "input_tokens": 135226,
+      "output_tokens": 2080,
+      "cache_read_tokens": 0,
+      "cost": 0.7281299999999999
+    }
+  ],
+  "by_folder": [
+    {
+      "folder": "/home/user/quartet/validate",
+      "requests": 17,
+      "cost": 0.7281299999999999,
+      "input_tokens": 135226,
+      "output_tokens": 2080
+    }
+  ],
+  "time_series": [
+    {
+      "bucket_ms": 1777359600000,
+      "requests": 17,
+      "cost": 0.7281299999999999,
+      "input_tokens": 135226,
+      "output_tokens": 2080
+    }
+  ],
+  "approvals": {
+    "total": 0,
+    "allow": 0,
+    "ask": 0,
+    "deny": 0
+  }
+}

@@ -1,0 +1,13 @@
+[package]
+name = "pi-search-proto"
+version.workspace = true
+edition.workspace = true
+description = "Wire types for the host↔guest web_search vsock channel (RFD 0023 §'web_search via vsock proxy')."
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }

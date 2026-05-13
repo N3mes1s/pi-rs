@@ -302,7 +302,8 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
             ext_roots.push(e.clone());
         }
     }
-    // Register autoresearch tools (init_experiment, run_experiment, log_experiment).
+    // Register autoresearch tools (init_experiment, run_experiment, log_experiment,
+    // run_experiment_recursive).
     if !settings.no_tools {
         use std::sync::Arc;
         tools
@@ -314,6 +315,12 @@ pub async fn assemble(cli: Cli) -> anyhow::Result<Startup> {
         tools
             .register(Arc::new(crate::autoresearch::tools::LogExperimentTool))
             .expect("startup: log_experiment tool name unique");
+        // RAO (RFD 0032): recursive experiment fan-out with delegation bonus.
+        tools
+            .register(Arc::new(
+                crate::autoresearch::tools::RunExperimentRecursiveTool,
+            ))
+            .expect("startup: run_experiment_recursive tool name unique");
         // Native todo tool (B2). Persists to <cwd>/.pi/todo.json.
         tools
             .register(Arc::new(crate::native::todo::TodoTool))

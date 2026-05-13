@@ -12,6 +12,7 @@ Autonomous experiment loop: try ideas, keep what works, discard what doesn't, ne
 - **`init_experiment`** — configure session (name, metric, unit, direction). Call again to re-initialize with a new baseline when the optimization target changes.
 - **`run_experiment`** — runs command, times it, captures output.
 - **`log_experiment`** — records result. `keep` auto-commits. `discard`/`crash`/`checks_failed` auto-reverts code changes (autoresearch files preserved). Always include secondary `metrics` dict. Dashboard: ctrl+shift+t.
+- **`run_experiment_recursive`** — RAO (RFD 0032): runs multiple benchmark variants in parallel and returns a composite metric with delegation bonus. Use when you have independent variants to compare and benchmarks take ≥ 10 s each.
 
 ## Setup
 
@@ -138,6 +139,73 @@ pnpm typecheck 2>&1 | grep -i error || true
 When you discover complex but promising optimizations that you won't pursue right now, **append them as bullets to `autoresearch.ideas.md`**. Don't let good ideas get lost.
 
 On resume (context limit, crash), check `autoresearch.ideas.md` — prune stale/tried entries, experiment with the rest. When all paths are exhausted, delete the file and write a final summary.
+
+## RAO: Recursive Experiment Fan-Out (RFD 0032)
+
+Inspired by [Recursive Agent Optimization](https://apga.github.io/RAO/). When you have **multiple independent variants** to benchmark simultaneously, use `run_experiment_recursive` instead of (or alongside) `run_experiment`.
+
+### When to use recursive fan-out
+
+✅ Use `run_experiment_recursive` when:
+- You have 2–8 independent code variants to compare (e.g. different compiler flags, different algorithm implementations, different config values)
+- Each benchmark takes ≥ 10 s (parallelism pays; < 5 s is noise-dominated anyway)
+- The variants are independent (no shared mutable state, no build conflicts)
+
+❌ Do NOT use it when:
+- Benchmarks are fast (< 5 s each) — just run them sequentially
+- Sub-experiments depend on each other's output
+- You only have one variant to try — use `run_experiment`
+- The benchmark is already running N parallel processes internally
+
+### How to use it
+
+```python
+# 1. Run the parent benchmark + N variants in parallel
+result = run_experiment_recursive(
+    parent_command="./autoresearch.sh",
+    parent_baseline=1620.0,          # last kept metric value
+    sub_experiments=[
+        {"id": "opt-a", "command": "VARIANT=a ./autoresearch.sh", "baseline": 1620.0},
+        {"id": "opt-b", "command": "VARIANT=b ./autoresearch.sh", "baseline": 1620.0},
+        {"id": "opt-c", "command": "VARIANT=c ./autoresearch.sh", "baseline": 1620.0},
+    ],
+    lambda=0.4,        # delegation bonus weight (default 0.4)
+    direction="lower", # or "higher"
+    max_concurrency=4,
+)
+
+# 2. Log using the composite metric (parent + bonus).
+# Use the commit_before from result.display.
+log_experiment(
+    commit=<commit_before from result>,
+    metric=result.composite_metric,   # the adjusted value
+    status="keep" if improved else "discard",
+    description="...",
+    metrics={"delegation_bonus": result.delegation_bonus, "parent_metric": result.parent_metric},
+    asi={
+        "child_outcomes": result.child_outcomes,  # which variants improved
+        "mean_child_success": result.mean_child_success,
+    }
+)
+```
+
+### The delegation bonus formula
+
+```
+composite = parent_metric − λ × mean(child_success) × scale
+```
+
+- `child_success = 1.0` if that child's metric improved over its baseline, else `0.0`
+- `mean(child_success)` = fraction of children that improved
+- `λ = 0.4` by default (matches RAO paper best setting)
+- `scale` = |parent_baseline − parent_metric| (keeps the bonus proportional)
+- For direction=higher: `composite = parent_metric + bonus`
+
+**Why it works**: if most variants improved, the composite is better than the raw parent metric, so the agent is rewarded for good delegation. If most variants failed, the bonus is small, and the composite accurately reflects the parent's standalone result.
+
+### Depth tracking
+
+`log_experiment` accepts `depth` (default 0 = top-level) in its `asi` dict to record recursion depth. Top-level experiments use `depth=0`; experiments that are themselves running sub-experiments set `depth=1`. The JSONL log records `delegationBonus` and `childRunIds` for post-hoc analysis.
 
 ## User Messages During Experiments
 

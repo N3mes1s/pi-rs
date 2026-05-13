@@ -52,3 +52,4 @@ crosses crate boundaries.
 | 0018 | OpenAI device-flow login (and what it can / can't do) | Discussion  |
 | 0019 | OpenAI Responses API support                      | Implemented |
 | 0020 | Autonomous model router                           | Discussion  |
+| 0032 | RAO: Recursive Agent Optimization for autoresearch | Accepted   |
