@@ -173,6 +173,10 @@ pub struct View {
     /// Slash-command names available for autocomplete. Populated from the
     /// live `Startup::slash_registry` so extension commands appear too.
     pub slash_registry_names: Vec<String>,
+    /// Mirrors the names of installed themes; populated at startup so
+    /// `/theme <Tab>` can complete without threading a registry
+    /// through every keypress handler.
+    pub installed_themes: Vec<String>,
     /// Active route mode shown in the footer powerline.
     pub route_mode: RouteMode,
     /// Accepted slash-autocomplete candidates for repeated Tab / Shift-Tab
@@ -246,6 +250,7 @@ impl View {
             context_window: None,
             current_theme_name: String::new(),
             slash_registry_names: SlashRegistry::new().names(),
+            installed_themes: Vec::new(),
             route_mode: RouteMode::Static,
             slash_ac_cycle_suggestions: Vec::new(),
             slash_ac_cycle_index: 0,
@@ -1072,9 +1077,18 @@ fn cycle_slash_arg_completion(view: &mut View, forward: bool) -> bool {
         Some(i) => (&rest[..i], &rest[i + 1..]),
         None => return false, // no space yet — still completing the cmd name
     };
-    let options: &[&str] = match cmd {
-        "route" => &["off", "static", "auto", "learned"],
-        "thinking" => &["off", "low", "medium", "high", "xhigh"],
+    // Owned strings for /theme so the dynamic list lives long enough.
+    let theme_owned: Vec<String>;
+    let options: Vec<&str> = match cmd {
+        "route" => vec!["off", "static", "auto", "learned"],
+        "thinking" => vec!["off", "low", "medium", "high", "xhigh"],
+        "theme" => {
+            if view.installed_themes.is_empty() {
+                return false;
+            }
+            theme_owned = view.installed_themes.clone();
+            theme_owned.iter().map(|s| s.as_str()).collect()
+        }
         _ => return false,
     };
     // The "arg prefix" is whatever's between the space and the cursor.
@@ -2136,6 +2150,7 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
 
     let mut view = View::new(startup.keymap.clone(), startup.settings.thinking);
     sync_slash_registry(&mut view, &slash);
+    view.installed_themes = startup.themes.names();
     view.current_theme_name = theme.name.clone();
     view.route_mode = startup.settings.route;
     view.scoped_models = startup.settings.scoped_models;
@@ -5490,6 +5505,21 @@ mod tests {
         // "m" only matches "medium".
         handle_key(&mut v, &ke(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(v.editor.text, "/thinking medium");
+    }
+
+    #[test]
+    fn tab_cycles_theme_arg_options() {
+        let mut v = fresh_view();
+        // Populate the installed themes list the way startup does.
+        v.installed_themes = vec!["dark".into(), "light".into(), "solarized".into()];
+        v.editor.text = "/theme ".into();
+        v.editor.cursor = v.editor.text.len();
+        handle_key(&mut v, &ke(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(v.editor.text, "/theme dark");
+        handle_key(&mut v, &ke(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(v.editor.text, "/theme light");
+        handle_key(&mut v, &ke(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(v.editor.text, "/theme solarized");
     }
 
     #[test]
