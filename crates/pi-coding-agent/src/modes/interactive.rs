@@ -398,10 +398,20 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
         return KeyOutcome::None;
     }
 
-    // Ctrl+D: quit when buffer is empty.
+    // Ctrl+D: quit on empty buffer, otherwise readline-style
+    // forward-delete (matches bash/zsh).
     if ev.code == KeyCode::Char('d') && ev.modifiers.contains(KeyModifiers::CONTROL) {
         if view.editor.text.is_empty() {
             return KeyOutcome::Quit;
+        }
+        clear_slash_autocomplete_state(view);
+        if view.editor.cursor < view.editor.text.len() {
+            let mut end = view.editor.cursor + 1;
+            while end < view.editor.text.len() && !view.editor.text.is_char_boundary(end) {
+                end += 1;
+            }
+            view.editor.text.replace_range(view.editor.cursor..end, "");
+            view.dirty = true;
         }
         return KeyOutcome::None;
     }
@@ -3873,12 +3883,13 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_d_with_empty_buffer_quits_and_with_text_is_noop() {
+    fn ctrl_d_with_empty_buffer_quits_otherwise_forward_deletes() {
+        // Empty buffer → Quit (bash/zsh convention).
         let mut v = fresh_view();
-        // Empty buffer → Quit.
         let r = handle_key(&mut v, &ke(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert_eq!(r, KeyOutcome::Quit);
-        // With text → no-op (does not delete the buffer).
+
+        // Cursor at end of "abc", Ctrl+D is a no-op (nothing to delete).
         let mut v2 = fresh_view();
         for c in "abc".chars() {
             handle_key(&mut v2, &ke(KeyCode::Char(c), KeyModifiers::NONE));
@@ -3886,6 +3897,15 @@ mod tests {
         let r = handle_key(&mut v2, &ke(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert_eq!(r, KeyOutcome::None);
         assert_eq!(v2.editor.text, "abc");
+
+        // Cursor mid-buffer, Ctrl+D forward-deletes (readline-style).
+        let mut v3 = fresh_view();
+        v3.editor.text = "abc".into();
+        v3.editor.cursor = 0;
+        let r = handle_key(&mut v3, &ke(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(r, KeyOutcome::None);
+        assert_eq!(v3.editor.text, "bc");
+        assert_eq!(v3.editor.cursor, 0);
     }
 
     #[test]
