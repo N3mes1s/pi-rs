@@ -936,6 +936,17 @@ fn try_handle_slash_autocomplete_key(view: &mut View, ev: &KeyEvent) -> bool {
                 // command, but Down/Down/Enter picks the third menu item.
                 return accept_highlighted_slash_menu(view);
             }
+            KeyCode::Esc if !ev.modifiers.contains(KeyModifiers::SHIFT) => {
+                // Esc with slash dropdown visible hides the dropdown but
+                // keeps the typed text intact — lets the user dismiss
+                // the overlay and continue editing. They can re-trigger
+                // the dropdown by typing or pressing Backspace.
+                view.slash_ac_hidden_until_char = true;
+                view.slash_menu_selected = 0;
+                view.slash_menu_navigated = false;
+                view.dirty = true;
+                return true;
+            }
             _ => {}
         }
     }
@@ -5107,6 +5118,25 @@ mod tests {
             dump.iter().any(|l| l == "        line three"),
             "third error line missing or unindented; got:\n{dump:?}"
         );
+    }
+
+    #[test]
+    fn esc_dismisses_slash_dropdown_but_keeps_text() {
+        let mut v = fresh_view();
+        // Sync a tiny registry so suggestions exist for "/he".
+        let mut reg = SlashRegistry::new();
+        // SlashRegistry::new() already has /help; the menu should match.
+        sync_slash_registry(&mut v, &reg);
+        v.editor.text = "/he".to_string();
+        v.editor.cursor = v.editor.text.len();
+        // Confirm the menu would render (autocomplete suggestions exist).
+        assert!(!slash_command_suggestions_for(&v).is_empty());
+        // Now hit Esc — the dropdown should hide but text stays.
+        handle_key(&mut v, &ke(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(v.editor.text, "/he");
+        assert!(v.slash_ac_hidden_until_char);
+        // Suppress unused warning if reg is not consumed further.
+        let _ = &mut reg;
     }
 
     #[test]
