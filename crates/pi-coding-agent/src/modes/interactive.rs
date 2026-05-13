@@ -142,6 +142,11 @@ pub struct View {
     /// Quit lands within ~1s, we exit; otherwise we just clear.
     pub last_quit: Option<Instant>,
     pub turn_in_progress: bool,
+    /// Free-running animation counter, incremented by the TUI tick
+    /// loop while a turn is in progress. Drives the spinner glyph in
+    /// the empty-editor placeholder so the user sees a visible pulse,
+    /// not just static text.
+    pub spinner_tick: u64,
     pub dirty: bool,
     /// True while the `@`-filename completion picker is active.
     pub at_active: bool,
@@ -230,6 +235,7 @@ impl View {
             scoped_previous_model: None,
             last_quit: None,
             turn_in_progress: false,
+            spinner_tick: 0,
             dirty: true,
             at_active: false,
             at_query_start: None,
@@ -1374,7 +1380,7 @@ pub(crate) fn build_frame(
         // account for it pushes the footer off-screen.
         let placeholder_owned;
         let displayed: &str = if view.editor.text.is_empty() {
-            placeholder_owned = editor_placeholder(view).to_string();
+            placeholder_owned = editor_placeholder(view);
             placeholder_owned.as_str()
         } else {
             view.editor.text.as_str()
@@ -1535,7 +1541,7 @@ pub(crate) fn build_frame(
         let editor_start_line = frame.lines.len();
         let is_empty = view.editor.text.is_empty();
         let text_for_display = if is_empty {
-            editor_placeholder(view).to_string()
+            editor_placeholder(view)
         } else {
             view.editor.text.clone()
         };
@@ -1859,15 +1865,27 @@ fn thinking_to_runtime(t: ThinkingSetting) -> pi_ai::ThinkingLevel {
 /// must walk char-by-char and accumulate widths, otherwise multi-byte
 /// chars (é, 中, 🎉) cause the cursor to land off by one or more
 /// cells.
-/// Placeholder text shown inside the editor pane when the buffer is
-/// empty. Used both for rendering and (importantly) for chrome-height
+/// Spinner glyphs cycled by the busy placeholder. Braille phase
+/// pattern — visually clear in any monospace font, single cell wide.
+const SPINNER_FRAMES: &[&str] = &[
+    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+];
+
+/// Placeholder shown inside the editor pane when the buffer is empty.
+/// Used both for rendering and (importantly) for chrome-height
 /// accounting so the footer doesn't get pushed off-screen on narrow
-/// terminals.
-fn editor_placeholder(view: &View) -> &'static str {
+/// terminals. While `turn_in_progress`, prepends a spinner glyph
+/// driven by `view.spinner_tick` so the user sees animated progress
+/// rather than static text. Returns owned String because the spinner
+/// frame varies.
+fn editor_placeholder(view: &View) -> String {
     if view.turn_in_progress {
-        "agent is working… (Esc to cancel, Alt+Enter to queue)"
+        // Advance the visible frame every 2 ticks (~100ms at 50ms tick).
+        let frame_idx = (view.spinner_tick / 2) as usize % SPINNER_FRAMES.len();
+        let glyph = SPINNER_FRAMES[frame_idx];
+        format!("{glyph} agent is working… (Esc to cancel, Alt+Enter to queue)")
     } else {
-        "type a message  (/help, /quit)"
+        "type a message  (/help, /quit)".to_string()
     }
 }
 
@@ -2264,6 +2282,17 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                 view.dirty = true;
             }
             _ = tick.tick() => {
+                // Advance the spinner only while a turn is in flight,
+                // and only mark dirty when the *visible* frame would
+                // change (every 2 ticks ≈ 100ms) so we don't burn CPU
+                // re-rendering the whole frame every 50ms for an
+                // unchanged spinner glyph.
+                if view.turn_in_progress {
+                    view.spinner_tick = view.spinner_tick.wrapping_add(1);
+                    if view.spinner_tick % 2 == 0 && view.editor.text.is_empty() {
+                        view.dirty = true;
+                    }
+                }
                 // Poll for hot-reloaded theme on every tick; also
                 // re-apply if /theme was just dispatched (settings.theme changed).
                 let new_theme_name = &startup.settings.theme;
