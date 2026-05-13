@@ -1763,6 +1763,19 @@ pub(crate) fn build_frame(
         view.context_window,
         Some(available_color_count()),
     );
+    // When the agent is mid-turn and the user has typed text (so the
+    // empty-editor busy placeholder is hidden), surface the spinner
+    // glyph in the footer instead so the busy state stays visible.
+    if view.turn_in_progress && !view.editor.text.is_empty() {
+        let frame_idx = (view.spinner_tick / 2) as usize % SPINNER_FRAMES.len();
+        let glyph = SPINNER_FRAMES[frame_idx];
+        // Prepend to the muted spans so it lands near the right side
+        // where status info lives — accent colour so the eye finds it.
+        footer.spans.push(Span::coloured(
+            format!("  {glyph} working"),
+            theme.accent.to_crossterm(),
+        ));
+    }
     if view.scoped_models {
         // Highlight that model changes will only apply to the next message.
         footer.spans.push(Span::coloured(
@@ -2375,7 +2388,10 @@ async fn run_tui(mut startup: Startup) -> anyhow::Result<()> {
                 // unchanged spinner glyph.
                 if view.turn_in_progress {
                     view.spinner_tick = view.spinner_tick.wrapping_add(1);
-                    if view.spinner_tick % 2 == 0 && view.editor.text.is_empty() {
+                    // Re-render every 2 ticks (~100ms) so either the
+                    // editor placeholder spinner or the footer
+                    // spinner advances to the next frame.
+                    if view.spinner_tick % 2 == 0 {
                         view.dirty = true;
                     }
                 }
