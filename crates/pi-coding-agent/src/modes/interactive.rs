@@ -1419,7 +1419,13 @@ pub(crate) fn build_frame(
         let editor_start_line = frame.lines.len();
         let is_empty = view.editor.text.is_empty();
         let text_for_display = if is_empty {
-            "type a message  (/help, /quit)".to_string()
+            // While a turn is mid-flight, the placeholder doubles as
+            // the busy indicator and tells the user how to bail out.
+            if view.turn_in_progress {
+                "agent is working… (Esc to cancel, Alt+Enter to queue)".to_string()
+            } else {
+                "type a message  (/help, /quit)".to_string()
+            }
         } else {
             view.editor.text.clone()
         };
@@ -4918,6 +4924,53 @@ mod tests {
         assert!(
             dump.contains("END") && dump.contains("to follow"),
             "scroll badge missing from frame; got:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn placeholder_swaps_in_busy_message_while_turn_in_progress() {
+        let mut v = fresh_view();
+        // Editor empty, no turn — default placeholder.
+        let theme = theme_for_test();
+        let frame = build_frame(
+            &v,
+            &theme,
+            120,
+            12,
+            "anthropic/sonnet",
+            std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
+        );
+        let dump = |f: &Frame| -> String {
+            f.lines
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let d = dump(&frame);
+        assert!(d.contains("type a message"), "default placeholder missing");
+        assert!(!d.contains("agent is working"));
+
+        // Flip turn_in_progress — placeholder swaps to busy message.
+        v.turn_in_progress = true;
+        let frame = build_frame(
+            &v,
+            &theme,
+            120,
+            12,
+            "anthropic/sonnet",
+            std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
+        );
+        let d = dump(&frame);
+        assert!(
+            d.contains("agent is working"),
+            "busy placeholder missing while turn_in_progress; got:\n{d}"
+        );
+        assert!(
+            d.contains("Esc to cancel"),
+            "abort hint missing; got:\n{d}"
         );
     }
 
