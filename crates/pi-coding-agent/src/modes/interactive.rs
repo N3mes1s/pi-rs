@@ -1032,13 +1032,99 @@ fn try_handle_slash_autocomplete_key(view: &mut View, ev: &KeyEvent) -> bool {
     }
 
     match ev.code {
-        KeyCode::Tab => cycle_or_accept_slash_autocomplete(view, true),
-        KeyCode::BackTab => cycle_or_accept_slash_autocomplete(view, false),
+        KeyCode::Tab => {
+            // First try the normal command-name autocomplete (matching
+            // `/<prefix>`). If that returns no suggestions, fall back
+            // to known arg-value completion for /route, /thinking, etc.
+            cycle_or_accept_slash_autocomplete(view, true)
+                || cycle_slash_arg_completion(view, true)
+        }
+        KeyCode::BackTab => {
+            cycle_or_accept_slash_autocomplete(view, false)
+                || cycle_slash_arg_completion(view, false)
+        }
         KeyCode::Right if cursor_at_current_line_end(&view.editor.text, view.editor.cursor) => {
             accept_top_slash_autocomplete(view)
         }
         _ => false,
     }
+}
+
+/// Arg-value completion for slash commands whose valid args are a known
+/// small enum (e.g. `/route off|static|auto|learned`). When the editor
+/// matches "/<cmd> <prefix>" and Tab is pressed, cycle through args
+/// whose name starts with `<prefix>`. Returns true if it handled the
+/// key (an arg was inserted).
+fn cycle_slash_arg_completion(view: &mut View, forward: bool) -> bool {
+    let text = view.editor.text.clone();
+    // Strip leading "/" and split at first whitespace.
+    let rest = match text.strip_prefix('/') {
+        Some(r) => r,
+        None => return false,
+    };
+    // Bail unless the cursor is on the same logical line as the cmd —
+    // multi-line input where the user is editing further down should
+    // not trigger arg completion.
+    if text[..view.editor.cursor].contains('\n') {
+        return false;
+    }
+    let (cmd, after_cmd) = match rest.find(char::is_whitespace) {
+        Some(i) => (&rest[..i], &rest[i + 1..]),
+        None => return false, // no space yet — still completing the cmd name
+    };
+    let options: &[&str] = match cmd {
+        "route" => &["off", "static", "auto", "learned"],
+        "thinking" => &["off", "low", "medium", "high", "xhigh"],
+        _ => return false,
+    };
+    // The "arg prefix" is whatever's between the space and the cursor.
+    // We replace from (start of arg) to cursor.
+    let cmd_start = 1; // after "/"
+    let space_pos = cmd_start + cmd.len();
+    let arg_start = space_pos + 1;
+    // Note: after_cmd might begin with extra spaces; treat as empty arg.
+    let arg_prefix = after_cmd.trim_start_matches(' ');
+    let prefix_lower = arg_prefix.to_ascii_lowercase();
+
+    // If the user has typed an exact full match for one of the args,
+    // Tab cycles through the FULL option set (not just prefix-matches),
+    // so they can pop through all valid values. If they've only typed
+    // a partial prefix, Tab filters to prefix-matches only.
+    let full_match_idx = options.iter().position(|opt| *opt == arg_prefix);
+    let candidates: Vec<&str> = if full_match_idx.is_some() {
+        options.iter().copied().collect()
+    } else {
+        options
+            .iter()
+            .copied()
+            .filter(|opt| opt.starts_with(prefix_lower.as_str()))
+            .collect()
+    };
+    if candidates.is_empty() {
+        return false;
+    }
+    let current_idx = candidates
+        .iter()
+        .position(|c| c == &arg_prefix)
+        .unwrap_or(usize::MAX);
+    let next_idx = if current_idx == usize::MAX {
+        if forward { 0 } else { candidates.len() - 1 }
+    } else if forward {
+        (current_idx + 1) % candidates.len()
+    } else {
+        (current_idx + candidates.len() - 1) % candidates.len()
+    };
+    let chosen = candidates[next_idx];
+    // Replace [arg_start..cursor] with chosen. If there were extra
+    // spaces between the cmd and prefix, preserve a single space.
+    let new_text = format!("/{cmd} {chosen}");
+    view.editor.text = new_text;
+    view.editor.cursor = view.editor.text.len();
+    view.dirty = true;
+    // Mark so the dropdown stays hidden — the user just accepted.
+    view.slash_ac_hidden_until_char = true;
+    let _ = arg_start; // suppress unused-warning if future code needs it
+    true
 }
 
 fn accept_top_slash_autocomplete(view: &mut View) -> bool {
@@ -5348,6 +5434,43 @@ mod tests {
             continuation.starts_with("  "),
             "continuation line lost the 2-space indent; got {continuation:?}\nall: {lines:?}"
         );
+    }
+
+    #[test]
+    fn tab_cycles_route_arg_options() {
+        let mut v = fresh_view();
+        v.editor.text = "/route ".into();
+        v.editor.cursor = v.editor.text.len();
+        // First Tab → "off" (first in [off, static, auto, learned]).
+        handle_key(&mut v, &ke(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(v.editor.text, "/route off");
+        // Next Tab → "static".
+        handle_key(&mut v, &ke(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(v.editor.text, "/route static");
+        // Backtab → "off".
+        handle_key(&mut v, &ke(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(v.editor.text, "/route off");
+    }
+
+    #[test]
+    fn tab_completes_thinking_arg_with_prefix() {
+        let mut v = fresh_view();
+        v.editor.text = "/thinking m".into();
+        v.editor.cursor = v.editor.text.len();
+        // "m" only matches "medium".
+        handle_key(&mut v, &ke(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(v.editor.text, "/thinking medium");
+    }
+
+    #[test]
+    fn tab_does_nothing_for_unknown_command_args() {
+        let mut v = fresh_view();
+        v.editor.text = "/help foo".into();
+        v.editor.cursor = v.editor.text.len();
+        let before = v.editor.text.clone();
+        handle_key(&mut v, &ke(KeyCode::Tab, KeyModifiers::NONE));
+        // /help has no fixed arg set — Tab is a no-op.
+        assert_eq!(v.editor.text, before);
     }
 
     #[test]
