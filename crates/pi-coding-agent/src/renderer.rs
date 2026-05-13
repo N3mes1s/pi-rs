@@ -260,21 +260,25 @@ impl Transcript {
                     }
                 }
                 Block::Error(m) => {
-                    // Multi-line errors (stack traces, formatted
-                    // messages) must split into one Line per logical
-                    // newline — pi-tui's renderer hard-wraps on cell
-                    // width but doesn't honour '\n' inside a span's
-                    // text, so a flat `[error] a\nb` would render as
-                    // a single glitched row.
-                    for (i, ln) in m.split('\n').enumerate() {
-                        let text = if i == 0 {
-                            format!("[error] {ln}")
-                        } else {
-                            format!("        {ln}")
-                        };
-                        lines.push(Line {
-                            spans: vec![Span::coloured(text, theme.error.to_crossterm())],
-                        });
+                    // Multi-line errors split on '\n' into separate Lines;
+                    // each piece is then word-wrapped to cols so long
+                    // single-line errors don't hit pi-tui's char-level
+                    // hard-wrap (which breaks mid-word).
+                    let inner_w = (viewport_cols as usize).saturating_sub(8).max(1);
+                    let mut first = true;
+                    for ln in m.split('\n') {
+                        let wrapped = wrap_line(ln, inner_w);
+                        for piece in wrapped {
+                            let text = if first {
+                                format!("[error] {piece}")
+                            } else {
+                                format!("        {piece}")
+                            };
+                            first = false;
+                            lines.push(Line {
+                                spans: vec![Span::coloured(text, theme.error.to_crossterm())],
+                            });
+                        }
                     }
                 }
                 Block::Compact {
@@ -296,17 +300,20 @@ impl Transcript {
                 }),
                 Block::Note(m) => {
                     // Note bodies are multi-line strings (e.g. /help output).
-                    // The differential renderer expects one logical line per
-                    // `Line`; embedding `\n` inside a single Line cascades
-                    // diagonally because raw-mode output doesn't reset the
-                    // cursor column on bare LF.
+                    // Split on '\n' so each logical row is its own Line, and
+                    // word-wrap each one to viewport width so pi-tui's
+                    // char-level hard-wrap doesn't slice mid-word.
+                    let inner_w = (viewport_cols as usize).max(1);
                     for piece in m.split('\n') {
-                        lines.push(Line {
-                            spans: vec![Span::coloured(
-                                piece.to_string(),
-                                theme.muted.to_crossterm(),
-                            )],
-                        });
+                        let wrapped = wrap_line(piece, inner_w);
+                        for line_text in wrapped {
+                            lines.push(Line {
+                                spans: vec![Span::coloured(
+                                    line_text,
+                                    theme.muted.to_crossterm(),
+                                )],
+                            });
+                        }
                     }
                 }
             }
