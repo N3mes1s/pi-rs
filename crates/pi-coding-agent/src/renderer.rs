@@ -308,15 +308,25 @@ impl Transcript {
                 Block::Note(m) => {
                     // Note bodies are multi-line strings (e.g. /help output).
                     // Split on '\n' so each logical row is its own Line, and
-                    // word-wrap each one to viewport width so pi-tui's
-                    // char-level hard-wrap doesn't slice mid-word.
+                    // word-wrap each one to viewport width. When the input
+                    // line has a leading indent (e.g. "  /help" in command
+                    // listings), apply it as `subsequent_indent` too so
+                    // continuation lines visually align under the first
+                    // word instead of falling to column 0.
                     let inner_w = (viewport_cols as usize).max(1);
                     for piece in m.split('\n') {
-                        let wrapped = wrap_line(piece, inner_w);
-                        for line_text in wrapped {
+                        let lead: String = piece
+                            .chars()
+                            .take_while(|c| *c == ' ')
+                            .collect();
+                        let opts = textwrap::Options::new(inner_w)
+                            .word_separator(textwrap::WordSeparator::UnicodeBreakProperties)
+                            .word_splitter(textwrap::WordSplitter::HyphenSplitter)
+                            .subsequent_indent(&lead);
+                        for line_text in textwrap::wrap(piece, &opts) {
                             lines.push(Line {
                                 spans: vec![Span::coloured(
-                                    line_text,
+                                    line_text.into_owned(),
                                     theme.muted.to_crossterm(),
                                 )],
                             });

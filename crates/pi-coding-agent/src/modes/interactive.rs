@@ -5116,6 +5116,57 @@ mod tests {
     }
 
     #[test]
+    fn help_lines_preserve_two_space_indent_when_wrapping() {
+        // Block::Note word-wrap must NOT eat the leading "  " indent
+        // that /help uses to align command names. If textwrap trims
+        // them, the menu becomes a left-flushed mess at narrow widths.
+        use crate::renderer::{Block, Transcript};
+        let mut t = Transcript::default();
+        t.push_block(Block::Note(
+            "  /theme         Switch the active theme to a long-named entry that wraps".into(),
+        ));
+        let theme = theme_for_test();
+        let frame = t.render(&theme, 60);
+        // Collect rendered text per Line.
+        let lines: Vec<String> = frame
+            .lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.text.clone())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect();
+        // First emitted line for our block should keep the two-space
+        // prefix. Find the first line containing "/theme".
+        let theme_line = lines
+            .iter()
+            .find(|l| l.contains("/theme"))
+            .unwrap_or_else(|| panic!("expected /theme line; got {lines:?}"));
+        assert!(
+            theme_line.starts_with("  "),
+            "/help line lost its 2-space indent on wrap; got {theme_line:?}\nall: {lines:?}"
+        );
+        // Continuation lines from the same logical entry should ALSO
+        // start with the same 2-space indent so the help table stays
+        // visually aligned.
+        let theme_idx = lines.iter().position(|l| l.contains("/theme")).unwrap();
+        // The next non-empty line after the first /theme row is the
+        // wrap continuation. It must inherit the leading indent.
+        let continuation = lines
+            .iter()
+            .skip(theme_idx + 1)
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or_else(|| panic!("expected wrap continuation; got {lines:?}"));
+        assert!(
+            continuation.starts_with("  "),
+            "continuation line lost the 2-space indent; got {continuation:?}\nall: {lines:?}"
+        );
+    }
+
+    #[test]
     fn multi_line_error_renders_as_separate_lines() {
         use crate::renderer::{Block, Transcript};
         let mut t = Transcript::default();
