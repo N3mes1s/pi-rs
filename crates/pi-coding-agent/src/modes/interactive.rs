@@ -1440,8 +1440,140 @@ pub(crate) fn build_frame(
             theme.error.to_crossterm(),
         ));
     }
+    let footer = shrink_footer_to_width(footer, cols);
     frame.lines.push(footer);
     frame
+}
+
+/// Trim a footer Line so its visible width fits in `cols`. Powerline /
+/// fallback footers can otherwise wrap when the git branch name or the
+/// suffix segments (queued, thinking) push the total past the
+/// terminal width — which at 70-80 cols was visibly cluttered. The
+/// strategy: progressively truncate the *longest text-bearing span*
+/// with an ellipsis until the line fits. This usually hits the long
+/// branch name first while leaving short status segments
+/// ("route:auto", "ctx:0%", "thinking:high") intact.
+fn shrink_footer_to_width(mut footer: Line, cols: u16) -> Line {
+    use unicode_width::UnicodeWidthChar;
+
+    fn span_width(text: &str) -> usize {
+        text.chars().map(|c| c.width().unwrap_or(0)).sum()
+    }
+    fn line_width(line: &Line) -> usize {
+        line.spans.iter().map(|s| span_width(&s.text)).sum()
+    }
+
+    let cols = cols as usize;
+    // Adaptive floor: divide the budget across the long, text-bearing
+    // spans (≥ 3 chars). Short separators ("  ", " ▶ ", powerline
+    // arrows) are ignored. Clamped to [3, 12] so a tiny terminal
+    // doesn't refuse to truncate, and a wide terminal doesn't shrink
+    // a 14-char model name to "model…" unnecessarily.
+    let n_text_spans = footer
+        .spans
+        .iter()
+        .filter(|s| s.text.chars().count() >= 3)
+        .count()
+        .max(1);
+    let min_keep = (cols.saturating_sub(2) / n_text_spans)
+        .max(3)
+        .min(12);
+
+    for _ in 0..6 {
+        let total = line_width(&footer);
+        if total <= cols {
+            break;
+        }
+        let deficit = total - cols;
+        let mut longest_idx = 0usize;
+        let mut longest_w = 0usize;
+        for (i, s) in footer.spans.iter().enumerate() {
+            let w = span_width(&s.text);
+            if w > longest_w {
+                longest_w = w;
+                longest_idx = i;
+            }
+        }
+        // Stop once even the longest remaining span is at/under the
+        // floor — further shrinking would just truncate readable
+        // labels.
+        if longest_w <= min_keep {
+            break;
+        }
+        let target = longest_w
+            .saturating_sub(deficit)
+            .saturating_sub(1)
+            .max(min_keep);
+        if target >= longest_w {
+            break;
+        }
+        let old = std::mem::take(&mut footer.spans[longest_idx].text);
+        let mut acc = 0usize;
+        let mut new_text = String::with_capacity(old.len());
+        for c in old.chars() {
+            let cw = c.width().unwrap_or(0);
+            if acc + cw > target {
+                break;
+            }
+            new_text.push(c);
+            acc += cw;
+        }
+        new_text.push('…');
+        footer.spans[longest_idx].text = new_text;
+    }
+
+    // Final fallback: if we still overflow (very narrow terminal),
+    // hard-clip the line so it never wraps. Walk spans left-to-right,
+    // truncating mid-span when the running width hits cols. Anything
+    // beyond is dropped entirely — accepted lossy behaviour at
+    // pathological widths.
+    if line_width(&footer) > cols {
+        let mut budget = cols.saturating_sub(1); // leave room for ellipsis
+        let mut out: Vec<Span> = Vec::with_capacity(footer.spans.len());
+        let mut clipped = false;
+        for span in footer.spans.drain(..) {
+            let w = span_width(&span.text);
+            if budget == 0 {
+                clipped = true;
+                break;
+            }
+            if w <= budget {
+                budget -= w;
+                out.push(span);
+                continue;
+            }
+            // Partial fit.
+            let mut acc = 0usize;
+            let mut buf = String::new();
+            for c in span.text.chars() {
+                let cw = c.width().unwrap_or(0);
+                if acc + cw > budget {
+                    break;
+                }
+                buf.push(c);
+                acc += cw;
+            }
+            out.push(Span {
+                text: buf,
+                color: span.color,
+                style: span.style,
+            });
+            clipped = true;
+            break;
+        }
+        if clipped {
+            // Append a small "…" indicator using the last span's style.
+            let style = out.last().and_then(|s| s.style);
+            let color = out.last().and_then(|s| s.color);
+            out.push(Span {
+                text: "…".to_string(),
+                color,
+                style,
+            });
+        }
+        footer.spans = out;
+    }
+    footer
 }
 
 fn thinking_label(t: ThinkingSetting) -> &'static str {
@@ -3707,10 +3839,13 @@ mod tests {
     fn build_frame_emits_separator_editor_and_footer_lines() {
         let v = fresh_view();
         let theme = theme_for_test();
+        // 120 cols — wide enough that the width-aware footer fitter
+        // doesn't drop the queued/thinking suffix. The fitter
+        // intentionally clips status segments when there's no room.
         let frame = build_frame(
             &v,
             &theme,
-            40,
+            120,
             12,
             "anthropic/sonnet",
             std::path::Path::new("/tmp"),
@@ -3740,10 +3875,12 @@ mod tests {
         // doesn't fire.
         v.editor.text = "hello".into();
         let theme = theme_for_test();
+        // 120 cols — see the comment on the analogous fixture above
+        // for why we don't test footer truncation here.
         let frame = build_frame(
             &v,
             &theme,
-            40,
+            120,
             12,
             "openai/gpt-4o",
             std::path::Path::new("/tmp"),
