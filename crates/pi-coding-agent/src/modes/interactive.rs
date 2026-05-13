@@ -1275,7 +1275,18 @@ pub(crate) fn build_frame(
     // Clamp out-of-range offsets (e.g. usize::MAX from Ctrl+Home).
     let editor_lines = std::cmp::max(1, view.editor.text.lines().count()) as u16;
     let dash_lines = dashboard_lines.len() as u16;
-    let chrome = editor_lines + 2 + dash_lines; // separator + footer + dashboard
+    // When a picker is open, it REPLACES the editor pane below the
+    // separator. Count its rows (title + visible items, capped by
+    // `picker.limit` and the available height) instead of editor_lines.
+    let bottom_lines = if let Some(overlay) = &view.picker {
+        let candidates = overlay.picker.ranked().len() as u16;
+        // Leave at least 4 rows for transcript + footer + separator.
+        let cap = rows.saturating_sub(4 + dash_lines).max(2);
+        1 + candidates.min(cap) // 1 for the title
+    } else {
+        editor_lines
+    };
+    let chrome = bottom_lines + 2 + dash_lines; // separator + footer + dashboard
     let max_transcript = rows.saturating_sub(chrome) as usize;
     let total = frame.lines.len();
     if total > max_transcript {
@@ -1350,8 +1361,33 @@ pub(crate) fn build_frame(
                 Span::coloured(overlay.picker.query.clone(), theme.fg.to_crossterm()),
             ],
         });
-        for (i, (_score, item)) in overlay.picker.ranked().iter().enumerate() {
-            if i == overlay.picker.selected {
+
+        // Window the picker so the *selected* item is always visible.
+        // Without this, navigating past the bottom of a long picker
+        // would silently move selection off-screen.
+        let ranked = overlay.picker.ranked();
+        let total = ranked.len();
+        // Subtract 1 (title) from bottom_lines for the item budget; if
+        // we'll need an overflow badge ("… N above/below"), reserve one
+        // more row for it.
+        let item_budget_full = bottom_lines.saturating_sub(1) as usize;
+        let needs_badge = total > item_budget_full;
+        let visible = if needs_badge {
+            item_budget_full.saturating_sub(1)
+        } else {
+            item_budget_full
+        }
+        .min(total);
+        let sel = overlay.picker.selected.min(total.saturating_sub(1));
+        let start = if total <= visible || sel < visible {
+            0
+        } else {
+            (sel + 1).saturating_sub(visible)
+        };
+        let end = (start + visible).min(total);
+
+        for (i_abs, (_score, item)) in ranked.iter().enumerate().take(end).skip(start) {
+            if i_abs == sel {
                 frame.lines.push(Line {
                     spans: vec![
                         Span::coloured("▸ ".to_string(), copper_bright),
@@ -1366,6 +1402,18 @@ pub(crate) fn build_frame(
                     ],
                 });
             }
+        }
+        if needs_badge {
+            let above = start;
+            let below = total - end;
+            let badge = match (above, below) {
+                (0, n) => format!("  … {n} below"),
+                (n, 0) => format!("  … {n} above"),
+                (a, b) => format!("  … {a} above · {b} below"),
+            };
+            frame.lines.push(Line {
+                spans: vec![Span::coloured(badge, theme.muted.to_crossterm())],
+            });
         }
     } else {
         let editor_start_line = frame.lines.len();
@@ -4040,6 +4088,58 @@ mod tests {
         assert!(dump.contains("▸ "));
         assert!(dump.contains("first"));
         assert!(dump.contains("second"));
+    }
+
+    #[test]
+    fn build_frame_picker_window_keeps_selected_visible_with_overflow_badge() {
+        // 20-item picker with selected=15 in a narrow 12-row terminal.
+        // The window should slide so item 15 is visible, and an
+        // overflow badge ("… N above" or "… N below") must appear.
+        let mut v = fresh_view();
+        let items: Vec<PickItem<String>> = (0..20)
+            .map(|i| PickItem {
+                label: format!("model-{i}"),
+                value: format!("model-{i}"),
+            })
+            .collect();
+        let mut picker = Picker::new(items);
+        for _ in 0..15 {
+            picker.move_down();
+        }
+        v.picker = Some(PickerOverlay {
+            kind: PickerKind::Model,
+            picker,
+            title: "model".into(),
+        });
+        let theme = theme_for_test();
+        let frame = build_frame(
+            &v,
+            &theme,
+            80,
+            12,
+            "anthropic/sonnet",
+            std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
+        );
+        let dump: String = frame
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            dump.contains("model-15"),
+            "selected model-15 must be visible; got:\n{dump}"
+        );
+        assert!(
+            dump.contains("above") || dump.contains("below"),
+            "overflow badge missing; got:\n{dump}"
+        );
+        // Footer must still render — i.e. the picker didn't push it off.
+        assert!(
+            dump.contains("queued:") || dump.contains("thinking:"),
+            "footer pushed off-screen by picker overflow; got:\n{dump}"
+        );
     }
 
     #[test]
