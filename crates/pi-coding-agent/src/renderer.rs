@@ -209,7 +209,10 @@ impl Transcript {
                     } else {
                         lines.push(Line {
                             spans: vec![Span::coloured(
-                                format!("[thinking collapsed: {} chars]", t.len()),
+                                format!(
+                                    "[thinking collapsed: {} chars · Ctrl+T to expand]",
+                                    t.len()
+                                ),
                                 theme.muted.to_crossterm(),
                             )],
                         });
@@ -244,7 +247,7 @@ impl Transcript {
                     if self.tool_collapsed {
                         lines.push(Line {
                             spans: vec![Span::coloured(
-                                format!("  [tool output: {} lines]", count),
+                                format!("  [tool output: {} lines · Ctrl+O to expand]", count),
                                 color,
                             )],
                         });
@@ -259,7 +262,10 @@ impl Transcript {
                         if *count > 20 {
                             lines.push(Line {
                                 spans: vec![Span::coloured(
-                                    format!("  … (+{} lines)", *count - 20),
+                                    format!(
+                                        "  … (+{} lines · Ctrl+O to collapse all tool output)",
+                                        *count - 20
+                                    ),
                                     color,
                                 )],
                             });
