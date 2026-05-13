@@ -259,12 +259,24 @@ impl Transcript {
                         }
                     }
                 }
-                Block::Error(m) => lines.push(Line {
-                    spans: vec![Span::coloured(
-                        format!("[error] {}", m),
-                        theme.error.to_crossterm(),
-                    )],
-                }),
+                Block::Error(m) => {
+                    // Multi-line errors (stack traces, formatted
+                    // messages) must split into one Line per logical
+                    // newline — pi-tui's renderer hard-wraps on cell
+                    // width but doesn't honour '\n' inside a span's
+                    // text, so a flat `[error] a\nb` would render as
+                    // a single glitched row.
+                    for (i, ln) in m.split('\n').enumerate() {
+                        let text = if i == 0 {
+                            format!("[error] {ln}")
+                        } else {
+                            format!("        {ln}")
+                        };
+                        lines.push(Line {
+                            spans: vec![Span::coloured(text, theme.error.to_crossterm())],
+                        });
+                    }
+                }
                 Block::Compact {
                     summary,
                     freed_tokens,

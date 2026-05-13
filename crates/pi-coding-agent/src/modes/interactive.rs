@@ -4922,6 +4922,42 @@ mod tests {
     }
 
     #[test]
+    fn multi_line_error_renders_as_separate_lines() {
+        use crate::renderer::{Block, Transcript};
+        let mut t = Transcript::default();
+        t.push_block(Block::Error("line one\nline two\nline three".into()));
+        let theme = theme_for_test();
+        let frame = t.render(&theme, 80);
+        // Expect 3 lines for the error; trailing empty separator may
+        // also be present.
+        let dump: Vec<String> = frame
+            .lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.text.clone())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect();
+        // First error line has the "[error] " prefix; continuations are
+        // indented to align under the first content char.
+        assert!(
+            dump.iter().any(|l| l == "[error] line one"),
+            "first error line missing; got:\n{dump:?}"
+        );
+        assert!(
+            dump.iter().any(|l| l == "        line two"),
+            "second error line missing or unindented; got:\n{dump:?}"
+        );
+        assert!(
+            dump.iter().any(|l| l == "        line three"),
+            "third error line missing or unindented; got:\n{dump:?}"
+        );
+    }
+
+    #[test]
     fn ctrl_a_moves_cursor_to_line_start() {
         let mut v = fresh_view();
         v.editor.text = "hello world".into();
