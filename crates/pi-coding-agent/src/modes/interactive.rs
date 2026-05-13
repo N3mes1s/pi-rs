@@ -578,6 +578,24 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
         view.transcript.tool_collapsed = !view.transcript.tool_collapsed;
         return KeyOutcome::None;
     }
+    // Ctrl+U: readline-style "kill to start of line" — delete everything
+    // between the start of the current visual line and the cursor. The
+    // UX critique flagged this as a low-priority paper cut: pi accepts
+    // text input but rejects the canonical "throw it away" shortcut.
+    if ev.code == KeyCode::Char('u') && ev.modifiers.contains(KeyModifiers::CONTROL) {
+        let cursor = view.editor.cursor;
+        let line_start = view.editor.text[..cursor]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if cursor > line_start {
+            view.editor.text.replace_range(line_start..cursor, "");
+            view.editor.cursor = line_start;
+            view.dirty = true;
+            clear_slash_autocomplete_state(view);
+        }
+        return KeyOutcome::None;
+    }
 
     // Scrollback navigation. The transcript is unbounded — until now,
     // PageUp/PageDown were no-ops and content scrolled off the top was
@@ -903,10 +921,10 @@ fn slash_command_suggestions_for(view: &View) -> Vec<String> {
     let Some(query) = token.strip_prefix('/') else {
         return Vec::new();
     };
+    let q = query.to_ascii_lowercase();
     view.slash_registry_names
         .iter()
-        .filter(|name| name.starts_with(query))
-        .take(5)
+        .filter(|name| name.to_ascii_lowercase().starts_with(&q))
         .cloned()
         .collect()
 }
@@ -921,11 +939,11 @@ fn slash_command_suggestions_for_with_registry(
     let Some(query) = token.strip_prefix('/') else {
         return Vec::new();
     };
+    let q = query.to_ascii_lowercase();
     slash_registry
         .iter()
-        .filter(|cmd| cmd.name.starts_with(query))
+        .filter(|cmd| cmd.name.to_ascii_lowercase().starts_with(&q))
         .map(|cmd| cmd.name.clone())
-        .take(5)
         .collect::<Vec<_>>()
 }
 
@@ -2000,6 +2018,12 @@ async fn handle_slash(
     view: &mut View,
     current_model: &mut String,
 ) -> SlashOutcome {
+    // Case-insensitive dispatch — `/HELP`, `/Help`, and `/help` all
+    // route to the same handler. Matches the case-fold the slash-menu
+    // filter does. Slash command names are a closed set; there's no
+    // reason for the match to be case-sensitive.
+    let folded = name.to_ascii_lowercase();
+    let name = folded.as_str();
     match name {
         "quit" | "exit" => SlashOutcome::Quit,
         "help" => {
@@ -2059,6 +2083,59 @@ async fn handle_slash(
                         .blocks
                         .push(crate::renderer::Block::Error(body));
                 }
+            }
+            SlashOutcome::Continue
+        }
+        "thinking" => {
+            // Set the reasoning depth at runtime. CLI exposes
+            // --thinking low|medium|high|xhigh, status bar shows the
+            // current value, but until now there was no in-TUI way
+            // to flip it. Sister to /route.
+            let arg = args.trim().to_ascii_lowercase();
+            let new = match arg.as_str() {
+                "" => None,
+                "off" | "none" => Some(ThinkingSetting::Off),
+                "low" => Some(ThinkingSetting::Low),
+                "medium" | "med" => Some(ThinkingSetting::Medium),
+                "high" => Some(ThinkingSetting::High),
+                "xhigh" | "x-high" | "max" => Some(ThinkingSetting::XHigh),
+                _ => {
+                    view.transcript
+                        .blocks
+                        .push(crate::renderer::Block::Error(format!(
+                            "unknown thinking depth '{arg}' — expected one of: off, low, medium, high, xhigh",
+                        )));
+                    return SlashOutcome::Continue;
+                }
+            };
+            if let Some(level) = new {
+                view.thinking = level;
+                startup.settings.thinking = level;
+                let path = crate::context::settings_paths().0;
+                let _ = startup.settings.save(&path);
+                view.dirty = true;
+                view.transcript
+                    .blocks
+                    .push(crate::renderer::Block::Note(format!(
+                        "[thinking set to {}]",
+                        thinking_label(level),
+                    )));
+            } else {
+                view.transcript
+                    .blocks
+                    .push(crate::renderer::Block::Note(format!(
+                        "Current thinking depth: {}\n\
+                         \n\
+                         Levels:\n  \
+                         off      — no extended thinking\n  \
+                         low      — quick analysis (~minimal token spend)\n  \
+                         medium   — balanced default\n  \
+                         high     — recommended floor for intelligence-sensitive work\n  \
+                         xhigh    — best for coding and agentic loops (Opus 4.7 default in Claude Code)\n\
+                         \n\
+                         Switch with /thinking <level>.",
+                        thinking_label(view.thinking),
+                    )));
             }
             SlashOutcome::Continue
         }

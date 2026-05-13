@@ -62,6 +62,10 @@ impl SlashRegistry {
                 "Switch model-routing mode: /route off|static|auto|learned (or /route to show current)",
             ),
             (
+                "thinking",
+                "Set thinking depth: /thinking off|low|medium|high|xhigh (or /thinking to show current)",
+            ),
+            (
                 "autoresearch",
                 "Autonomous experiment loop (off | clear | export | <text>)",
             ),
