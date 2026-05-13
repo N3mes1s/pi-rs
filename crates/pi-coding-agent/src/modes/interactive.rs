@@ -3349,14 +3349,66 @@ async fn handle_slash(
                     SlashKind::Builtin => {}
                 }
             }
+            // Try to suggest a near-match — useful for typos like
+            // `/qiut` instead of `/quit`. We pick the registered name
+            // with the lowest Levenshtein distance, but cap distance
+            // ≤ 3 so we don't suggest something wildly unrelated.
+            let suggestion = nearest_slash_name(other, slash);
+            let msg = match suggestion {
+                Some(name) => format!("unknown command: /{other} — did you mean /{name}?"),
+                None => format!("unknown command: /{other}"),
+            };
             view.transcript
                 .blocks
-                .push(crate::renderer::Block::Error(format!(
-                    "unknown command: /{other}"
-                )));
+                .push(crate::renderer::Block::Error(msg));
             SlashOutcome::Continue
         }
     }
+}
+
+/// Tiny iterative-DP Levenshtein for short strings. Allocates one row
+/// vector. Used only on unknown-slash error paths so the cost is
+/// negligible.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let ac: Vec<char> = a.chars().collect();
+    let bc: Vec<char> = b.chars().collect();
+    let (n, m) = (ac.len(), bc.len());
+    if n == 0 {
+        return m;
+    }
+    if m == 0 {
+        return n;
+    }
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut cur: Vec<usize> = vec![0; m + 1];
+    for i in 1..=n {
+        cur[0] = i;
+        for j in 1..=m {
+            let cost = if ac[i - 1] == bc[j - 1] { 0 } else { 1 };
+            cur[j] = std::cmp::min(
+                std::cmp::min(cur[j - 1] + 1, prev[j] + 1),
+                prev[j - 1] + cost,
+            );
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m]
+}
+
+fn nearest_slash_name(typed: &str, slash: &SlashRegistry) -> Option<String> {
+    let typed = typed.to_ascii_lowercase();
+    let mut best: Option<(usize, String)> = None;
+    for cmd in slash.iter() {
+        let d = levenshtein(&typed, &cmd.name.to_ascii_lowercase());
+        if d > 3 {
+            continue;
+        }
+        match &best {
+            Some((cur_d, _)) if d >= *cur_d => {}
+            _ => best = Some((d, cmd.name.clone())),
+        }
+    }
+    best.map(|(_, name)| name)
 }
 
 fn reqwest_client() -> reqwest::Client {
@@ -5296,6 +5348,35 @@ mod tests {
             continuation.starts_with("  "),
             "continuation line lost the 2-space indent; got {continuation:?}\nall: {lines:?}"
         );
+    }
+
+    #[test]
+    fn nearest_slash_name_suggests_typo_fixes() {
+        let reg = SlashRegistry::new();
+        assert_eq!(
+            nearest_slash_name("qiut", &reg).as_deref(),
+            Some("quit"),
+            "expected /quit suggested for /qiut"
+        );
+        assert_eq!(
+            nearest_slash_name("themee", &reg).as_deref(),
+            Some("theme")
+        );
+        assert_eq!(
+            nearest_slash_name("hlep", &reg).as_deref(),
+            Some("help"),
+            "expected /help suggested for /hlep"
+        );
+        // Way too distant — no suggestion.
+        assert!(nearest_slash_name("xyzzyplugh", &reg).is_none());
+    }
+
+    #[test]
+    fn levenshtein_handles_edge_cases() {
+        assert_eq!(levenshtein("", ""), 0);
+        assert_eq!(levenshtein("abc", ""), 3);
+        assert_eq!(levenshtein("", "xyz"), 3);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
     }
 
     #[test]
