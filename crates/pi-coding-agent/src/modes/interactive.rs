@@ -604,6 +604,92 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
         return KeyOutcome::None;
     }
 
+    // Readline-style cursor shortcuts. These are universal in shell
+    // input — pi without them feels broken to anyone with muscle
+    // memory from bash/zsh. We dispatch BEFORE the chord/keymap
+    // lookup catches the bare letter and turns it into typed text.
+    //
+    // Ctrl+A / Ctrl+E — start / end of current visual line.
+    // Ctrl+B / Ctrl+F — backward / forward one char.
+    // Ctrl+W       — delete previous word (whitespace-separated).
+    if ev.modifiers.contains(KeyModifiers::CONTROL) {
+        match ev.code {
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                clear_slash_autocomplete_state(view);
+                let cur = view.editor.cursor;
+                let line_start = view.editor.text[..cur]
+                    .rfind('\n')
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                view.editor.cursor = line_start;
+                view.dirty = true;
+                return KeyOutcome::None;
+            }
+            KeyCode::Char('e') | KeyCode::Char('E') => {
+                clear_slash_autocomplete_state(view);
+                let cur = view.editor.cursor;
+                let nl = view.editor.text[cur..]
+                    .find('\n')
+                    .map(|i| cur + i)
+                    .unwrap_or(view.editor.text.len());
+                view.editor.cursor = nl;
+                view.dirty = true;
+                return KeyOutcome::None;
+            }
+            KeyCode::Char('b') | KeyCode::Char('B') => {
+                clear_slash_autocomplete_state(view);
+                if view.editor.cursor > 0 {
+                    let mut new = view.editor.cursor - 1;
+                    while new > 0 && !view.editor.text.is_char_boundary(new) {
+                        new -= 1;
+                    }
+                    view.editor.cursor = new;
+                    view.dirty = true;
+                }
+                return KeyOutcome::None;
+            }
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                clear_slash_autocomplete_state(view);
+                if view.editor.cursor < view.editor.text.len() {
+                    let mut new = view.editor.cursor + 1;
+                    while new < view.editor.text.len()
+                        && !view.editor.text.is_char_boundary(new)
+                    {
+                        new += 1;
+                    }
+                    view.editor.cursor = new;
+                    view.dirty = true;
+                }
+                return KeyOutcome::None;
+            }
+            KeyCode::Char('w') | KeyCode::Char('W') => {
+                // Delete word before cursor: walk back through any
+                // trailing whitespace, then through the preceding
+                // non-whitespace, and remove the resulting span.
+                clear_slash_autocomplete_state(view);
+                let cur = view.editor.cursor;
+                if cur == 0 {
+                    return KeyOutcome::None;
+                }
+                let bytes = view.editor.text.as_bytes();
+                let mut i = cur;
+                while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+                    i -= 1;
+                }
+                while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+                    i -= 1;
+                }
+                if i < cur {
+                    view.editor.text.replace_range(i..cur, "");
+                    view.editor.cursor = i;
+                    view.dirty = true;
+                }
+                return KeyOutcome::None;
+            }
+            _ => {}
+        }
+    }
+
     // Scrollback navigation. These keys mutate `view.scroll_offset`
     // (rows above the tail) which the renderer applies as a window
     // shift. Clamping happens at render time. Mouse wheel events
@@ -4715,6 +4801,64 @@ mod tests {
             dump.contains("END") && dump.contains("to follow"),
             "scroll badge missing from frame; got:\n{dump}"
         );
+    }
+
+    #[test]
+    fn ctrl_a_moves_cursor_to_line_start() {
+        let mut v = fresh_view();
+        v.editor.text = "hello world".into();
+        v.editor.cursor = 5;
+        handle_key(&mut v, &ke(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(v.editor.cursor, 0);
+        // Multi-line: cursor should go to start of CURRENT line, not buffer.
+        v.editor.text = "abc\ndefghi".into();
+        v.editor.cursor = 7; // inside "defghi"
+        handle_key(&mut v, &ke(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(v.editor.cursor, 4); // start of "defghi"
+    }
+
+    #[test]
+    fn ctrl_e_moves_cursor_to_line_end() {
+        let mut v = fresh_view();
+        v.editor.text = "hello world".into();
+        v.editor.cursor = 0;
+        handle_key(&mut v, &ke(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(v.editor.cursor, 11);
+        v.editor.text = "abc\ndefghi".into();
+        v.editor.cursor = 0;
+        handle_key(&mut v, &ke(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(v.editor.cursor, 3); // newline position
+    }
+
+    #[test]
+    fn ctrl_b_and_ctrl_f_move_one_char_left_and_right() {
+        let mut v = fresh_view();
+        v.editor.text = "abc".into();
+        v.editor.cursor = 1;
+        handle_key(&mut v, &ke(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert_eq!(v.editor.cursor, 0);
+        handle_key(&mut v, &ke(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(v.editor.cursor, 1);
+        handle_key(&mut v, &ke(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        handle_key(&mut v, &ke(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(v.editor.cursor, 3);
+        // No overshoot.
+        handle_key(&mut v, &ke(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(v.editor.cursor, 3);
+    }
+
+    #[test]
+    fn ctrl_w_deletes_previous_word_and_trailing_spaces() {
+        let mut v = fresh_view();
+        v.editor.text = "hello world".into();
+        v.editor.cursor = 11;
+        handle_key(&mut v, &ke(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(v.editor.text, "hello ");
+        assert_eq!(v.editor.cursor, 6);
+        // Run again — eats the trailing space + "hello".
+        handle_key(&mut v, &ke(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(v.editor.text, "");
+        assert_eq!(v.editor.cursor, 0);
     }
 
     #[test]
