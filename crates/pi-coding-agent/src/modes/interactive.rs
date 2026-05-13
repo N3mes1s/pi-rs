@@ -1976,6 +1976,24 @@ fn render_hotkeys_body(km: &crate::keymap::Keymap) -> String {
     body.push_str("  /<cmd> [args]      run a slash command (e.g. /help, /model)\n");
     body.push_str("  @<query>           open file-completion picker\n");
     body.push_str("  ! <shell command>  run a shell command and stay in pi\n");
+    body.push_str("\nreadline-style editor shortcuts (always active):\n");
+    body.push_str("  Ctrl+A             cursor to line start\n");
+    body.push_str("  Ctrl+E             cursor to line end\n");
+    body.push_str("  Ctrl+B / Ctrl+F    move cursor one char back / forward\n");
+    body.push_str("  Alt+B / Alt+F      jump cursor one word back / forward\n");
+    body.push_str("  Ctrl+W             delete previous word\n");
+    body.push_str("  Alt+D              forward delete-word\n");
+    body.push_str("  Ctrl+U             kill from cursor to start of line\n");
+    body.push_str("  Ctrl+D             forward-delete char (or quit if buffer empty)\n");
+    body.push_str("\nscrollback:\n");
+    body.push_str("  PageUp / PageDown  scroll transcript ± 10 rows\n");
+    body.push_str("  Shift+Up / Down    fine-grained scroll (1 row)\n");
+    body.push_str("  Ctrl+Home / End    jump to top / bottom of transcript\n");
+    body.push_str("  mouse wheel        scroll (hold Shift to bypass and select text)\n");
+    body.push_str("\nother widgets:\n");
+    body.push_str("  Ctrl+Shift+T       cycle autoresearch dashboard (inline → expanded → hidden)\n");
+    body.push_str("  Ctrl+O             toggle collapse for tool output\n");
+    body.push_str("  Ctrl+T             toggle collapse for thinking output\n");
     body
 }
 
