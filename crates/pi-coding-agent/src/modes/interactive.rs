@@ -1293,9 +1293,21 @@ pub(crate) fn build_frame(
         use unicode_width::UnicodeWidthChar;
         let prefix_w = 2usize; // "› " or "  "
         let avail = (cols as usize).saturating_sub(prefix_w).max(1);
+        // Use whatever string will *actually* render — the editor text
+        // when non-empty, otherwise the placeholder (which may also
+        // wrap on narrow terminals). The busy placeholder is ~55
+        // chars and wraps to 3 rows in a 20-col pane, so failing to
+        // account for it pushes the footer off-screen.
+        let placeholder_owned;
+        let displayed: &str = if view.editor.text.is_empty() {
+            placeholder_owned = editor_placeholder(view).to_string();
+            placeholder_owned.as_str()
+        } else {
+            view.editor.text.as_str()
+        };
         let mut rows: u16 = 0;
         let mut logical_count: u16 = 0;
-        for line in view.editor.text.split('\n') {
+        for line in displayed.split('\n') {
             logical_count += 1;
             let cells: usize = line.chars().map(|c| c.width().unwrap_or(0)).sum();
             // ceil(cells / avail), minimum 1
@@ -1449,13 +1461,7 @@ pub(crate) fn build_frame(
         let editor_start_line = frame.lines.len();
         let is_empty = view.editor.text.is_empty();
         let text_for_display = if is_empty {
-            // While a turn is mid-flight, the placeholder doubles as
-            // the busy indicator and tells the user how to bail out.
-            if view.turn_in_progress {
-                "agent is working… (Esc to cancel, Alt+Enter to queue)".to_string()
-            } else {
-                "type a message  (/help, /quit)".to_string()
-            }
+            editor_placeholder(view).to_string()
         } else {
             view.editor.text.clone()
         };
@@ -1779,6 +1785,18 @@ fn thinking_to_runtime(t: ThinkingSetting) -> pi_ai::ThinkingLevel {
 /// must walk char-by-char and accumulate widths, otherwise multi-byte
 /// chars (é, 中, 🎉) cause the cursor to land off by one or more
 /// cells.
+/// Placeholder text shown inside the editor pane when the buffer is
+/// empty. Used both for rendering and (importantly) for chrome-height
+/// accounting so the footer doesn't get pushed off-screen on narrow
+/// terminals.
+fn editor_placeholder(view: &View) -> &'static str {
+    if view.turn_in_progress {
+        "agent is working… (Esc to cancel, Alt+Enter to queue)"
+    } else {
+        "type a message  (/help, /quit)"
+    }
+}
+
 fn byte_cursor_to_visual(text: &str, cursor: usize) -> (usize, usize) {
     use unicode_width::UnicodeWidthChar;
     let cursor = cursor.min(text.len());
