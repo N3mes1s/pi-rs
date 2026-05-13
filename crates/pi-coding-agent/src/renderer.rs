@@ -110,6 +110,13 @@ impl Transcript {
                     freed_tokens: *freed_tokens,
                 });
             }
+            AgentEventKind::Aborted => {
+                // Make abort visible in the transcript — without this,
+                // pressing Esc just silently flips the busy indicator
+                // off and the user has no record of what happened.
+                self.blocks
+                    .push(Block::Note("[aborted]".to_string()));
+            }
             AgentEventKind::AssistantMessage { message } => {
                 // We've already drained text/thinking via deltas; just record
                 // tool-use blocks here if we missed them.

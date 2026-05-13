@@ -4266,6 +4266,19 @@ mod tests {
         let mut current = "anthropic/sonnet".to_string();
         ingest_event(&mut v, &agent_event(AgentEventKind::Aborted), &mut current);
         assert!(!v.turn_in_progress);
+        // Abort must leave a visible "[aborted]" marker in the
+        // transcript so the user has a record of the cancel.
+        let dump: String = v
+            .transcript
+            .blocks
+            .iter()
+            .map(|b| format!("{b:?}"))
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(
+            dump.contains("[aborted]"),
+            "abort marker missing from transcript; got:\n{dump}"
+        );
     }
 
     #[test]
