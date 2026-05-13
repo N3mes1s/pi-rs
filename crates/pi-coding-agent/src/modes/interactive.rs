@@ -2368,6 +2368,15 @@ async fn handle_slash(
     let name = folded.as_str();
     match name {
         "quit" | "exit" => SlashOutcome::Quit,
+        "clear" => {
+            // Wipe the *visible* transcript. The agent's underlying
+            // session/history is unaffected — this just clears the
+            // scrollback to give the user a clean slate without
+            // resetting context.
+            view.transcript.blocks.clear();
+            view.scroll_offset = 0;
+            SlashOutcome::Continue
+        }
         "help" => {
             // Show command names *with* descriptions, aligned. Previously
             // we just dumped names which left users guessing what each

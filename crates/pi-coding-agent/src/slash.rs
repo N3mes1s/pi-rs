@@ -55,6 +55,7 @@ impl SlashRegistry {
             ("share", "Upload session as a GitHub gist"),
             ("hotkeys", "Show all keyboard shortcuts"),
             ("help", "Show help"),
+            ("clear", "Wipe the visible transcript (session unaffected)"),
             ("quit", "Exit pi"),
             ("theme", "Switch the active theme; e.g. /theme dark, /theme light, or any installed theme name"),
             (
