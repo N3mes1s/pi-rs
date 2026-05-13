@@ -2665,13 +2665,15 @@ async fn handle_slash(
         }
         "version" => {
             // Identifying which build the user is running is the first
-            // step when triaging a bug — show crate version + git rev
-            // (captured at build time by env! in Cargo).
+            // step when triaging a bug — show crate version captured
+            // at build time via env!. The repo URL is read from the
+            // crate's Cargo manifest so it can't drift from reality.
             let pkg_version = env!("CARGO_PKG_VERSION");
-            let body = format!(
-                "pi-rs version {pkg_version}\n\
-                 — repo: https://github.com/anthropics/pi-rs"
-            );
+            let pkg_repo = option_env!("CARGO_PKG_REPOSITORY").unwrap_or("");
+            let mut body = format!("pi-rs version {pkg_version}");
+            if !pkg_repo.is_empty() {
+                body.push_str(&format!("\n— repo: {pkg_repo}"));
+            }
             view.transcript
                 .blocks
                 .push(crate::renderer::Block::Note(body));
