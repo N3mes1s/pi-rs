@@ -167,6 +167,13 @@ pub struct View {
     /// Suppress the autocomplete dropdown until the user types another
     /// character or pastes text.
     pub slash_ac_hidden_until_char: bool,
+    /// Index of the currently-highlighted entry in the inline slash-command
+    /// dropdown. Distinct from `slash_ac_cycle_index` (which tracks Tab
+    /// cycle state): this drives Down/Up navigation in the menu *before*
+    /// any Tab has been pressed, and Enter accepts whatever it points at.
+    /// Reset to 0 whenever the slash token text changes; clamped to the
+    /// visible window at render time.
+    pub slash_menu_selected: usize,
 }
 
 /// How the autoresearch dashboard should be rendered above the editor.
@@ -216,6 +223,7 @@ impl View {
             slash_ac_cycle_index: 0,
             slash_ac_accepted_range: None,
             slash_ac_hidden_until_char: false,
+            slash_menu_selected: 0,
         }
     }
 }
@@ -676,9 +684,83 @@ fn history_next(view: &mut View) {
     clear_slash_autocomplete_state(view);
 }
 
+/// True when the inline slash-command dropdown is currently visible —
+/// i.e. the user has typed a `/<prefix>` at the cursor, suggestions
+/// exist, and the menu hasn't been suppressed by a prior accept. This
+/// is the gating predicate for Down / Up / Enter routing in the
+/// menu before any Tab has been pressed.
+fn slash_menu_active(view: &View) -> bool {
+    if view.picker.is_some() {
+        return false;
+    }
+    if view.slash_ac_hidden_until_char {
+        return false;
+    }
+    if view.slash_ac_accepted_range.is_some() {
+        return false;
+    }
+    !slash_command_suggestions_for(view).is_empty()
+}
+
+/// Move the slash-dropdown highlight by `delta`, clamped to the
+/// suggestion list length. Returns true if the menu was visible (i.e.
+/// the key was handled here and should NOT propagate to history /
+/// editor / picker).
+fn move_slash_menu_selection(view: &mut View, delta: i32) -> bool {
+    let suggestions = slash_command_suggestions_for(view);
+    if suggestions.is_empty() {
+        return false;
+    }
+    let len = suggestions.len() as i32;
+    let cur = view.slash_menu_selected as i32;
+    let next = (cur + delta).rem_euclid(len);
+    view.slash_menu_selected = next as usize;
+    view.dirty = true;
+    true
+}
+
+/// Accept the currently-highlighted slash-menu suggestion (i.e. the one
+/// the user navigated to with Down/Up). Returns true if something was
+/// accepted; false if the menu isn't visible.
+fn accept_highlighted_slash_menu(view: &mut View) -> bool {
+    let suggestions = slash_command_suggestions_for(view);
+    if suggestions.is_empty() {
+        return false;
+    }
+    let idx = view.slash_menu_selected.min(suggestions.len() - 1);
+    view.slash_ac_cycle_suggestions = suggestions.clone();
+    view.slash_ac_cycle_index = idx;
+    apply_slash_autocomplete_accept(view, &suggestions[idx]);
+    true
+}
+
 fn try_handle_slash_autocomplete_key(view: &mut View, ev: &KeyEvent) -> bool {
     if view.picker.is_some() {
         return false;
+    }
+
+    // Inline-dropdown navigation: when the menu is visible, hijack
+    // Down/Up/Enter so the user can pick anything beyond the first
+    // match. Down arrow was previously a no-op here (the menu always
+    // highlighted index 0), so the alphabetically-first command was
+    // the ONLY one reachable via the menu. Critical D1 from the UX
+    // critique.
+    if slash_menu_active(view) {
+        match ev.code {
+            KeyCode::Down => return move_slash_menu_selection(view, 1),
+            KeyCode::Up => return move_slash_menu_selection(view, -1),
+            KeyCode::Enter
+                if !ev.modifiers.contains(KeyModifiers::SHIFT)
+                    && !ev.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                // Accept the highlighted suggestion. We deliberately do
+                // NOT submit on the same Enter — accept first, let the
+                // user review the populated args (or press Enter again
+                // to send). This matches the @file picker UX.
+                return accept_highlighted_slash_menu(view);
+            }
+            _ => {}
+        }
     }
 
     match ev.code {
@@ -721,8 +803,14 @@ fn cycle_or_accept_slash_autocomplete(view: &mut View, forward: bool) -> bool {
 
     if view.slash_ac_accepted_range.is_none() || view.slash_ac_cycle_suggestions != suggestions {
         view.slash_ac_cycle_suggestions = suggestions.clone();
+        // Start the Tab cycle at whatever the user already navigated to
+        // in the inline menu (Down/Up arrows). If they haven't moved the
+        // highlight, this is index 0 — the previous always-start-at-0
+        // behavior. If they have, Tab respects their choice instead of
+        // jumping back to the first match.
+        let anchor = view.slash_menu_selected.min(suggestions.len() - 1);
         view.slash_ac_cycle_index = if forward || suggestions.len() == 1 {
-            0
+            anchor
         } else {
             suggestions.len() - 1
         };
@@ -873,6 +961,7 @@ fn clear_slash_autocomplete_state(view: &mut View) {
     view.slash_ac_cycle_suggestions.clear();
     view.slash_ac_cycle_index = 0;
     view.slash_ac_accepted_range = None;
+    view.slash_menu_selected = 0;
 }
 
 fn reset_slash_autocomplete_after_typed_char(view: &mut View) {
@@ -1118,19 +1207,38 @@ pub(crate) fn build_frame(
                 })
                 .unwrap_or(false);
             if !view.slash_ac_hidden_until_char && !accepted_same_token {
-                let matches: Vec<_> =
+                let full_matches: Vec<_> =
                     slash_command_suggestions_for_with_registry(view, slash_registry)
                         .into_iter()
-                        .take(5)
                         .collect();
-                if !matches.is_empty() {
+                if !full_matches.is_empty() {
+                    // Scroll the 5-item viewport so `slash_menu_selected`
+                    // is always visible (D4 in the UX critique: previously
+                    // the menu always showed items 0..5, hiding anything
+                    // past index 4 forever).
+                    const WINDOW: usize = 5;
+                    let total = full_matches.len();
+                    let selected = view.slash_menu_selected.min(total.saturating_sub(1));
+                    let start = if total <= WINDOW {
+                        0
+                    } else if selected < WINDOW / 2 {
+                        0
+                    } else if selected + WINDOW / 2 >= total {
+                        total - WINDOW
+                    } else {
+                        selected - WINDOW / 2
+                    };
+                    let end = (start + WINDOW).min(total);
+                    let visible = &full_matches[start..end];
                     frame.lines.push(Line::default());
-                    for (i, name) in matches.iter().enumerate() {
+                    for (offset, name) in visible.iter().enumerate() {
+                        let absolute_idx = start + offset;
                         let Some(cmd) = slash_registry.get(name) else {
                             continue;
                         };
-                        let prefix = if i == 0 { "▸ " } else { "  " };
-                        let name_color = if i == 0 {
+                        let is_selected = absolute_idx == selected;
+                        let prefix = if is_selected { "▸ " } else { "  " };
+                        let name_color = if is_selected {
                             theme.accent.to_crossterm()
                         } else {
                             theme.muted.to_crossterm()
@@ -1142,6 +1250,26 @@ pub(crate) fn build_frame(
                                 Span::coloured("  ".to_string(), theme.muted.to_crossterm()),
                                 Span::coloured(cmd.description.clone(), theme.muted.to_crossterm()),
                             ],
+                        });
+                    }
+                    // Overflow indicator — D4 (hidden commands have no
+                    // discoverability cue): show "N more" when the
+                    // viewport is truncated.
+                    if total > WINDOW {
+                        let above = start;
+                        let below = total - end;
+                        let mut hints: Vec<String> = Vec::with_capacity(2);
+                        if above > 0 {
+                            hints.push(format!("↑{above}"));
+                        }
+                        if below > 0 {
+                            hints.push(format!("↓{below}"));
+                        }
+                        frame.lines.push(Line {
+                            spans: vec![Span::coloured(
+                                format!("  ({}/{total}, {})", selected + 1, hints.join(" ")),
+                                theme.muted.to_crossterm(),
+                            )],
                         });
                     }
                 }
