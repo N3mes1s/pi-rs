@@ -700,6 +700,70 @@ pub fn handle_key(view: &mut View, ev: &KeyEvent) -> KeyOutcome {
         }
     }
 
+    // Alt/Meta + b/f/d — word-granular cursor moves and forward
+    // delete-word (bash/zsh convention). Implemented inline so the
+    // letter doesn't get re-emitted into the buffer.
+    if ev.modifiers.contains(KeyModifiers::ALT) {
+        match ev.code {
+            KeyCode::Char('b') | KeyCode::Char('B') => {
+                clear_slash_autocomplete_state(view);
+                let cur = view.editor.cursor;
+                let bytes = view.editor.text.as_bytes();
+                let mut i = cur;
+                while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+                    i -= 1;
+                }
+                while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+                    i -= 1;
+                }
+                view.editor.cursor = i;
+                view.dirty = true;
+                return KeyOutcome::None;
+            }
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                clear_slash_autocomplete_state(view);
+                let cur = view.editor.cursor;
+                let bytes = view.editor.text.as_bytes();
+                let len = bytes.len();
+                let mut i = cur;
+                while i < len && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                while i < len && !bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                view.editor.cursor = i;
+                view.dirty = true;
+                return KeyOutcome::None;
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                clear_slash_autocomplete_state(view);
+                let cur = view.editor.cursor;
+                let len = view.editor.text.len();
+                if cur >= len {
+                    return KeyOutcome::None;
+                }
+                let end = {
+                    let bytes = view.editor.text.as_bytes();
+                    let mut i = cur;
+                    while i < len && bytes[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                    while i < len && !bytes[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                    i
+                };
+                if end > cur {
+                    view.editor.text.replace_range(cur..end, "");
+                    view.dirty = true;
+                }
+                return KeyOutcome::None;
+            }
+            _ => {}
+        }
+    }
+
     // Scrollback navigation. These keys mutate `view.scroll_offset`
     // (rows above the tail) which the renderer applies as a window
     // shift. Clamping happens at render time. Mouse wheel events
@@ -2455,9 +2519,10 @@ async fn handle_slash(
                     desc_first_line = desc_first_line
                 ));
             }
-            body.push_str("\nshortcuts: Ctrl+A/E/B/F/W (cursor), Ctrl+U/K (kill), \
-                          PageUp/PageDown (scrollback), Ctrl+Home/End (top/bottom), \
-                          @<file> (file pick), !<cmd> (run shell)\n");
+            body.push_str("\nshortcuts: Ctrl+A/E/B/F (cursor), Alt+B/F (jump word), \
+                          Ctrl+W / Alt+D (delete word), Ctrl+U/K (kill line), \
+                          Ctrl+D (forward delete or exit), PageUp/PageDown (scrollback), \
+                          Ctrl+Home/End (top/bottom), @<file> (file pick), !<cmd> (run shell)\n");
             view.transcript
                 .blocks
                 .push(crate::renderer::Block::Note(body));
@@ -5283,6 +5348,52 @@ mod tests {
         // No overshoot.
         handle_key(&mut v, &ke(KeyCode::Char('f'), KeyModifiers::CONTROL));
         assert_eq!(v.editor.cursor, 3);
+    }
+
+    #[test]
+    fn alt_b_jumps_back_one_word() {
+        let mut v = fresh_view();
+        v.editor.text = "hello world foo".into();
+        v.editor.cursor = v.editor.text.len();
+        handle_key(&mut v, &ke(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(v.editor.cursor, 12); // start of "foo"
+        handle_key(&mut v, &ke(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(v.editor.cursor, 6); // start of "world"
+        handle_key(&mut v, &ke(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(v.editor.cursor, 0); // start of "hello"
+        // No underflow at start.
+        handle_key(&mut v, &ke(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(v.editor.cursor, 0);
+    }
+
+    #[test]
+    fn alt_f_jumps_forward_one_word() {
+        let mut v = fresh_view();
+        v.editor.text = "hello world foo".into();
+        v.editor.cursor = 0;
+        handle_key(&mut v, &ke(KeyCode::Char('f'), KeyModifiers::ALT));
+        assert_eq!(v.editor.cursor, 5); // end of "hello"
+        handle_key(&mut v, &ke(KeyCode::Char('f'), KeyModifiers::ALT));
+        assert_eq!(v.editor.cursor, 11); // end of "world"
+        handle_key(&mut v, &ke(KeyCode::Char('f'), KeyModifiers::ALT));
+        assert_eq!(v.editor.cursor, 15); // end of "foo"
+        // No overshoot at end.
+        handle_key(&mut v, &ke(KeyCode::Char('f'), KeyModifiers::ALT));
+        assert_eq!(v.editor.cursor, 15);
+    }
+
+    #[test]
+    fn alt_d_deletes_next_word() {
+        let mut v = fresh_view();
+        v.editor.text = "hello world foo".into();
+        v.editor.cursor = 0;
+        handle_key(&mut v, &ke(KeyCode::Char('d'), KeyModifiers::ALT));
+        assert_eq!(v.editor.text, " world foo");
+        assert_eq!(v.editor.cursor, 0);
+        // Again — eats the leading space + "world".
+        handle_key(&mut v, &ke(KeyCode::Char('d'), KeyModifiers::ALT));
+        assert_eq!(v.editor.text, " foo");
+        assert_eq!(v.editor.cursor, 0);
     }
 
     #[test]
