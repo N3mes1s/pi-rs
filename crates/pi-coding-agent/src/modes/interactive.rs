@@ -1273,7 +1273,26 @@ pub(crate) fn build_frame(
     // older lines. Chrome (editor + footer + separator + dashboard)
     // stays pinned because it's appended *after* this window step.
     // Clamp out-of-range offsets (e.g. usize::MAX from Ctrl+Home).
-    let editor_lines = std::cmp::max(1, view.editor.text.lines().count()) as u16;
+    // Count VISUAL editor rows, not logical \n-separated lines. A
+    // typed line longer than `cols - 2` (after the "› " prefix) wraps
+    // in pi-tui's renderer and consumes more than one row, so the
+    // chrome budget below must reserve space for it — otherwise the
+    // transcript gets squeezed and its top scrolls off-screen.
+    let editor_lines = {
+        use unicode_width::UnicodeWidthChar;
+        let prefix_w = 2usize; // "› " or "  "
+        let avail = (cols as usize).saturating_sub(prefix_w).max(1);
+        let mut rows: u16 = 0;
+        let mut logical_count: u16 = 0;
+        for line in view.editor.text.split('\n') {
+            logical_count += 1;
+            let cells: usize = line.chars().map(|c| c.width().unwrap_or(0)).sum();
+            // ceil(cells / avail), minimum 1
+            let r = ((cells + avail - 1) / avail).max(1) as u16;
+            rows += r;
+        }
+        rows.max(logical_count).max(1)
+    };
     let dash_lines = dashboard_lines.len() as u16;
     // When a picker is open, it REPLACES the editor pane below the
     // separator. Count its rows (title + visible items, capped by
@@ -4951,6 +4970,36 @@ mod tests {
         assert!(
             dump.contains("END") && dump.contains("to follow"),
             "scroll badge missing from frame; got:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn build_frame_long_input_does_not_push_footer_off_screen() {
+        // Type a 300-char single-line message in an 80-col, 20-row
+        // terminal. At cols=80 (avail=78 after prefix), 300 chars
+        // wraps to 4 visual rows. The footer must still render.
+        let mut v = fresh_view();
+        v.editor.text = "x".repeat(300);
+        v.editor.cursor = v.editor.text.len();
+        let theme = theme_for_test();
+        let frame = build_frame(
+            &v,
+            &theme,
+            80,
+            20,
+            "anthropic/sonnet",
+            std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
+        );
+        let dump: String = frame
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            dump.contains("queued:") || dump.contains("thinking:"),
+            "footer pushed off-screen by wrapped editor input; got:\n{dump}"
         );
     }
 
