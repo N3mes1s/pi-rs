@@ -4585,4 +4585,165 @@ mod tests {
         assert_eq!(outcome, KeyOutcome::None);
         assert_eq!(v.editor.text, "/deploy ");
     }
+
+    // ─── Scrollback regression tests ────────────────────────────────────
+    //
+    // The scrollback viewport went through several rewrites — most
+    // recently moving the windowing from pi-tui's renderer into
+    // build_frame so that the editor/footer chrome stays pinned. These
+    // tests guard against re-introducing the "PageUp scrolls editor
+    // off-screen" or "scroll buffer never shows older content" bugs.
+
+    #[test]
+    fn page_up_increases_scroll_offset_and_page_down_decreases() {
+        let mut v = fresh_view();
+        assert_eq!(v.scroll_offset, 0);
+        handle_key(&mut v, &ke(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(v.scroll_offset, 10);
+        handle_key(&mut v, &ke(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(v.scroll_offset, 20);
+        handle_key(&mut v, &ke(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(v.scroll_offset, 10);
+    }
+
+    #[test]
+    fn shift_up_and_shift_down_fine_grained_scroll() {
+        let mut v = fresh_view();
+        handle_key(&mut v, &ke(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(v.scroll_offset, 1);
+        handle_key(&mut v, &ke(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(v.scroll_offset, 2);
+        handle_key(&mut v, &ke(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(v.scroll_offset, 1);
+    }
+
+    #[test]
+    fn ctrl_home_jumps_to_top_ctrl_end_jumps_to_bottom() {
+        let mut v = fresh_view();
+        handle_key(&mut v, &ke(KeyCode::Home, KeyModifiers::CONTROL));
+        assert_eq!(v.scroll_offset, usize::MAX);
+        handle_key(&mut v, &ke(KeyCode::End, KeyModifiers::CONTROL));
+        assert_eq!(v.scroll_offset, 0);
+    }
+
+    #[test]
+    fn page_down_saturates_at_zero() {
+        let mut v = fresh_view();
+        // No underflow: scroll_offset already 0, PageDown stays at 0.
+        handle_key(&mut v, &ke(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(v.scroll_offset, 0);
+    }
+
+    #[test]
+    fn build_frame_windows_transcript_above_scroll_offset() {
+        use crate::renderer::Block;
+
+        let mut v = fresh_view();
+        // Push 30 user-message blocks so the transcript clearly
+        // exceeds the per-frame budget at rows=20.
+        for i in 0..30 {
+            v.transcript.push_block(Block::User(format!("line-marker-{i}")));
+        }
+        let theme = theme_for_test();
+        let render = |v: &View| -> String {
+            let frame = build_frame(
+                v,
+                &theme,
+                100,
+                20,
+                "anthropic/sonnet",
+                std::path::Path::new("/tmp"),
+                &SlashRegistry::new(),
+            );
+            frame
+                .lines
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // Tail-pinned view: newest line must be present.
+        let tail_dump = render(&v);
+        assert!(
+            tail_dump.contains("line-marker-29"),
+            "tail-pinned view must include newest line; got:\n{tail_dump}"
+        );
+
+        // Scroll back enough that the newest line drops out of the
+        // window but mid-history is now visible.
+        v.scroll_offset = 15;
+        let scrolled_dump = render(&v);
+        assert!(
+            !scrolled_dump.contains("line-marker-29"),
+            "scrolled-back view must NOT include newest line; got:\n{scrolled_dump}"
+        );
+        assert!(
+            scrolled_dump.contains("line-marker-10")
+                || scrolled_dump.contains("line-marker-12"),
+            "scrolled-back view must include mid-history; got:\n{scrolled_dump}"
+        );
+    }
+
+    #[test]
+    fn build_frame_scroll_badge_appears_when_scrolled() {
+        use crate::renderer::Block;
+        let mut v = fresh_view();
+        for i in 0..30 {
+            v.transcript.push_block(Block::User(format!("line {i}")));
+        }
+        v.scroll_offset = 5;
+        let theme = theme_for_test();
+        let frame = build_frame(
+            &v,
+            &theme,
+            100,
+            12,
+            "anthropic/sonnet",
+            std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
+        );
+        let dump: String = frame
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Badge text from shrink_footer_to_width's sibling on the
+        // separator line.
+        assert!(
+            dump.contains("END") && dump.contains("to follow"),
+            "scroll badge missing from frame; got:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn build_frame_no_scroll_badge_when_at_bottom() {
+        use crate::renderer::Block;
+        let mut v = fresh_view();
+        for i in 0..30 {
+            v.transcript.push_block(Block::User(format!("line {i}")));
+        }
+        assert_eq!(v.scroll_offset, 0);
+        let theme = theme_for_test();
+        let frame = build_frame(
+            &v,
+            &theme,
+            100,
+            12,
+            "anthropic/sonnet",
+            std::path::Path::new("/tmp"),
+            &SlashRegistry::new(),
+        );
+        let dump: String = frame
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !dump.contains("to follow"),
+            "scroll badge must not appear at bottom; got:\n{dump}"
+        );
+    }
 }
