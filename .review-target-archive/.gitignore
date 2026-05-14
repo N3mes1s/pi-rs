@@ -1,7 +1,0 @@
-target/
-Cargo.lock
-*.swp
-.DS_Store
-
-# Per-cwd agent state (sessions, todo, settings) lives here. Never tracked.
-.pi/

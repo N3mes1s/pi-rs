@@ -1,8 +1,0 @@
-{
-  "name": "pi-rs-r3-pgo",
-  "metric": "score",
-  "unit": "µs+KiB",
-  "direction": "lower",
-  "max_iterations": 7,
-  "working_dir": "/home/user/Playground/pi-rs"
-}

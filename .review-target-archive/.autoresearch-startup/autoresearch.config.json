@@ -1,7 +1,0 @@
-{
-  "name": "pi-rs-startup",
-  "metric": "startup_us",
-  "unit": "µs",
-  "direction": "lower",
-  "max_iterations": 8
-}

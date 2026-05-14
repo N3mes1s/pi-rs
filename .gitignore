@@ -5,3 +5,15 @@ Cargo.lock
 
 # Per-cwd agent state (sessions, todo, settings) lives here. Never tracked.
 .pi/
+
+# Ad-hoc scratch / probe / review-mirror dirs that have accidentally
+# been committed in the past (see RFD 0032 cleanup). Keep these
+# patterns to prevent recurrence.
+.tmp-*/
+.fuse-probe-*/
+.probe-*/
+.review-target-archive/
+.review-restore-race/
+.review-proto-check.*/
+.fuse-probe-*
+.probe-*
