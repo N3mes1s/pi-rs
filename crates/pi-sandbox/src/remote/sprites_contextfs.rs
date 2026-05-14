@@ -443,10 +443,13 @@ async fn launch_receive_uds(
     }
 
     // Now launch receive-uds. cfs-mesh receive-uds blocks until SIGTERM;
-    // we nohup it and capture pid for the teardown path.
+    // we nohup it and capture pid for the teardown path. Export
+    // CFS_MESH_BIN to the SAME binary path so that the receive_uds SDK
+    // (which spawns a child `cfs-mesh agora-listen` for Agora transport)
+    // can locate it inside the sprite where it is not on PATH.
     let launch = format!(
         "rm -f {uds}; \
-         nohup {bin} receive-uds --uds {uds} --blob @{blob_file} \
+         CFS_MESH_BIN={bin} nohup {bin} receive-uds --uds {uds} --blob @{blob_file} \
            >{log} 2>&1 < /dev/null & \
          echo $! > {pid}",
         bin = CFS_MESH_SANDBOX_PATH,

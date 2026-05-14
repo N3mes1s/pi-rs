@@ -65,6 +65,7 @@ tempfile.workspace = true
 tokio-test.workspace = true
 wiremock.workspace = true
 toml = "0.8"
+anyhow = "1"
 
 # The sprites host-orchestration integration tests call `_test_open_host_side_only`,
 # which is gated on `feature = "test-helpers"` so it is not compiled into normal
