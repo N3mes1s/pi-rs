@@ -5,11 +5,13 @@
 - **Created:** 2026-05-02
 - **Implemented:**
   - **v1 baseline** — 2026-05 (commits `ccc2675` E2B provider, `9ed9e45`/`35e4c60`/`ed8a960` Sprites provider, `02e8aa6` SmartSync flushback demo). Both providers ship the `SmartSync upload + per-tool inline flushback` model. Acceptance: `crates/pi-sandbox/tests/remote_e2b_smoke.rs` + `sprites_host_orchestration.rs` + `scripts/dogfood-{e2b,sprites}-remote-sandbox.sh`.
-  - **v2 contextfs RW /work on Sprites** — partial:
+  - **v2 contextfs RW /work on Sprites** — heavily progressed; one upstream bug remaining:
     - Phase A (host-side helper reuse) and M1 host-side contextfs orchestration landed (`63a000d`).
-    - **Phase C1** (config knob): `SpritesConfig::work_mount: SpritesWorkMount {SmartSync, Contextfs}` lands the explicit mode switch (`bb75548`). SmartSync upload + per-tool flushback now gate on `work_mount == SmartSync`; the contextfs host-side daemons gate on `Contextfs`. Resolves from `PI_SPRITES_WORK_MOUNT=contextfs|smartsync` or legacy `PI_SPRITES_CONTEXTFS=1` alias.
-    - **Phase C2/C3** (sandbox-side mount cutover) still open: upload `contextfsd` musl-static + a `cfs-mesh agora-listen` peer into the sprite, run them via `wromm exec`, wait for `/work` mount marker. Requires `SPRITES_TOKEN`-bound verification; not landable as speculative offline code.
-    - **Phase D** (productionisation): dogfood with `--mount-mode=contextfs`, 100 MB integration test gated on `SPRITES_TOKEN`, default-flip commit. Same requirement.
+    - **Phase C1** (config knob): `SpritesConfig::work_mount: SpritesWorkMount {SmartSync, Contextfs}` lands the explicit mode switch (`bb75548`). SmartSync upload + per-tool flushback now gate on `work_mount == SmartSync`. Resolves from `PI_SPRITES_WORK_MOUNT=contextfs|smartsync` or legacy `PI_SPRITES_CONTEXTFS=1`.
+    - **Phase C2** (sandbox-side bootstrap): `pi_sandbox::remote::sprites_contextfs::bootstrap_contextfs` (`670ecf1`, refactored `369c5e7`) drives uploads + `apt install fuse3` + tenant secret + cedar policy + `contextfsd.toml` write + `cfs-mesh receive-uds` × 2 + contextfsd launch + mount poll. Transport-agnostic — takes two `contextfs_mesh::ConnectionBlob`s as inputs.
+    - **Phase C2 transport plumbing**: integrates RFD 0029's `contextfs_mesh::{expose_uds, receive_uds}` SDK directly. `Transport::Loopback` end-to-end regression test `contextfs_loopback_rw_mount.rs` (`369c5e7`) validates the call shape + ConnectionBlob serde round-trip + FUSE mount RW invariants in 0.57 s without any agora relay or Sprites credentials.
+    - **Phase C3** (Sprites/Agora e2e): integration test `sprites_contextfs_e2e.rs` (`8b48b04`) provisions a real Sprite, runs the full bootstrap with `Transport::Agora`. Currently surfaces an upstream bug in `cfs-mesh receive-uds` CLI (`into_child()` consumes the `ListenerHandle`, dropping the agora identity `TempDir` before the still-running listener subprocess reads `rooms.json`). Fix pending on contextfs branch `rfd/0029`; test goes green when it lands.
+    - **Phase D** (productionisation): dogfood `--mount-mode=contextfs`, 100 MB integration test, default-flip commit. Unblocks after Phase C3 e2e is green.
 
 ## Summary
 
