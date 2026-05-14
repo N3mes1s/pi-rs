@@ -5,7 +5,11 @@
 - **Created:** 2026-05-02
 - **Implemented:**
   - **v1 baseline** — 2026-05 (commits `ccc2675` E2B provider, `9ed9e45`/`35e4c60`/`ed8a960` Sprites provider, `02e8aa6` SmartSync flushback demo). Both providers ship the `SmartSync upload + per-tool inline flushback` model. Acceptance: `crates/pi-sandbox/tests/remote_e2b_smoke.rs` + `sprites_host_orchestration.rs` + `scripts/dogfood-{e2b,sprites}-remote-sandbox.sh`.
-  - **v2 contextfs RW /work on Sprites** — partial: Phase A (host-side helper reuse) and M1 host-side contextfs orchestration landed (`63a000d`); Phase C3 cutover (drop SmartSync, worker reads/writes `/work` directly via FUSE) and Phase D productionisation (dogfood with `--mount-mode=contextfs`, 100 MB integration test gated on `SPRITES_TOKEN`, default-flip commit) are open. The current `SpritesProvider` header (`crates/pi-sandbox/src/remote/sprites.rs:31-37`) explicitly notes the contextfs+agora mount layer "ships in the follow-up".
+  - **v2 contextfs RW /work on Sprites** — partial:
+    - Phase A (host-side helper reuse) and M1 host-side contextfs orchestration landed (`63a000d`).
+    - **Phase C1** (config knob): `SpritesConfig::work_mount: SpritesWorkMount {SmartSync, Contextfs}` lands the explicit mode switch (`bb75548`). SmartSync upload + per-tool flushback now gate on `work_mount == SmartSync`; the contextfs host-side daemons gate on `Contextfs`. Resolves from `PI_SPRITES_WORK_MOUNT=contextfs|smartsync` or legacy `PI_SPRITES_CONTEXTFS=1` alias.
+    - **Phase C2/C3** (sandbox-side mount cutover) still open: upload `contextfsd` musl-static + a `cfs-mesh agora-listen` peer into the sprite, run them via `wromm exec`, wait for `/work` mount marker. Requires `SPRITES_TOKEN`-bound verification; not landable as speculative offline code.
+    - **Phase D** (productionisation): dogfood with `--mount-mode=contextfs`, 100 MB integration test gated on `SPRITES_TOKEN`, default-flip commit. Same requirement.
 
 ## Summary
 
