@@ -3,6 +3,10 @@
 # Runs on every PR + every push to main. Required-to-merge for any
 # change touching the pi-sdk public surface.
 #
+# REQUIRES: repo secret `CONTEXTFS_TOKEN` = fine-grained GitHub PAT
+# with read access to N3mes1s/contextfs (private path-dep). Without
+# it every job hard-fails at the clone step.
+#
 # Three jobs:
 #   - audit:           cargo-audit against the resolved lockfile.
 #   - deny:            cargo-deny check (bans + licenses + sources).
@@ -35,6 +39,20 @@ on:
       - '.github/workflows/pi-sdk-supply-chain.yml'
   push:
     branches: [main]
+    paths:
+      - 'crates/pi-sdk/**'
+      - 'crates/pi-sdk-canary/**'
+      - 'crates/pi-tool-types/**'
+      - 'crates/pi-ai/**'
+      - 'crates/pi-tools-core/**'
+      - 'crates/pi-tools-net/**'
+      - 'crates/pi-tools/**'
+      - 'crates/pi-sandbox/**'
+      - 'crates/pi-agent-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'deny.toml'
+      - '.github/workflows/pi-sdk-supply-chain.yml'
 
 permissions:
   contents: read
@@ -54,8 +72,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Clone contextfs as sibling repo
+        env:
+          CONTEXTFS_TOKEN: ${{ secrets.CONTEXTFS_TOKEN }}
         run: |
-          git clone https://github.com/N3mes1s/contextfs.git ../contextfs
+          # contextfs is private; clone needs a PAT. Set CONTEXTFS_TOKEN
+          # as a repo secret (fine-grained PAT, read access to
+          # N3mes1s/contextfs) to enable this workflow.
+          if [[ -z "${CONTEXTFS_TOKEN}" ]]; then
+            echo "::error::CONTEXTFS_TOKEN secret not set — cannot clone private contextfs sibling repo. See workflow header for setup."
+            exit 1
+          fi
+          git clone "https://x-access-token:${CONTEXTFS_TOKEN}@github.com/N3mes1s/contextfs.git" ../contextfs
           git -C ../contextfs checkout 6c15a0ae784e72660e2536efc604f0db8ddba0c4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-audit
@@ -69,8 +96,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Clone contextfs as sibling repo
+        env:
+          CONTEXTFS_TOKEN: ${{ secrets.CONTEXTFS_TOKEN }}
         run: |
-          git clone https://github.com/N3mes1s/contextfs.git ../contextfs
+          # contextfs is private; clone needs a PAT. Set CONTEXTFS_TOKEN
+          # as a repo secret (fine-grained PAT, read access to
+          # N3mes1s/contextfs) to enable this workflow.
+          if [[ -z "${CONTEXTFS_TOKEN}" ]]; then
+            echo "::error::CONTEXTFS_TOKEN secret not set — cannot clone private contextfs sibling repo. See workflow header for setup."
+            exit 1
+          fi
+          git clone "https://x-access-token:${CONTEXTFS_TOKEN}@github.com/N3mes1s/contextfs.git" ../contextfs
           git -C ../contextfs checkout 6c15a0ae784e72660e2536efc604f0db8ddba0c4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-deny
@@ -87,8 +123,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Clone contextfs as sibling repo
+        env:
+          CONTEXTFS_TOKEN: ${{ secrets.CONTEXTFS_TOKEN }}
         run: |
-          git clone https://github.com/N3mes1s/contextfs.git ../contextfs
+          # contextfs is private; clone needs a PAT. Set CONTEXTFS_TOKEN
+          # as a repo secret (fine-grained PAT, read access to
+          # N3mes1s/contextfs) to enable this workflow.
+          if [[ -z "${CONTEXTFS_TOKEN}" ]]; then
+            echo "::error::CONTEXTFS_TOKEN secret not set — cannot clone private contextfs sibling repo. See workflow header for setup."
+            exit 1
+          fi
+          git clone "https://x-access-token:${CONTEXTFS_TOKEN}@github.com/N3mes1s/contextfs.git" ../contextfs
           git -C ../contextfs checkout 6c15a0ae784e72660e2536efc604f0db8ddba0c4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-semver-checks
@@ -102,8 +147,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Clone contextfs as sibling repo
+        env:
+          CONTEXTFS_TOKEN: ${{ secrets.CONTEXTFS_TOKEN }}
         run: |
-          git clone https://github.com/N3mes1s/contextfs.git ../contextfs
+          # contextfs is private; clone needs a PAT. Set CONTEXTFS_TOKEN
+          # as a repo secret (fine-grained PAT, read access to
+          # N3mes1s/contextfs) to enable this workflow.
+          if [[ -z "${CONTEXTFS_TOKEN}" ]]; then
+            echo "::error::CONTEXTFS_TOKEN secret not set — cannot clone private contextfs sibling repo. See workflow header for setup."
+            exit 1
+          fi
+          git clone "https://x-access-token:${CONTEXTFS_TOKEN}@github.com/N3mes1s/contextfs.git" ../contextfs
           git -C ../contextfs checkout 6c15a0ae784e72660e2536efc604f0db8ddba0c4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build + test canary
@@ -115,8 +169,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Clone contextfs as sibling repo
+        env:
+          CONTEXTFS_TOKEN: ${{ secrets.CONTEXTFS_TOKEN }}
         run: |
-          git clone https://github.com/N3mes1s/contextfs.git ../contextfs
+          # contextfs is private; clone needs a PAT. Set CONTEXTFS_TOKEN
+          # as a repo secret (fine-grained PAT, read access to
+          # N3mes1s/contextfs) to enable this workflow.
+          if [[ -z "${CONTEXTFS_TOKEN}" ]]; then
+            echo "::error::CONTEXTFS_TOKEN secret not set — cannot clone private contextfs sibling repo. See workflow header for setup."
+            exit 1
+          fi
+          git clone "https://x-access-token:${CONTEXTFS_TOKEN}@github.com/N3mes1s/contextfs.git" ../contextfs
           git -C ../contextfs checkout 6c15a0ae784e72660e2536efc604f0db8ddba0c4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build all examples
@@ -128,8 +191,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Clone contextfs as sibling repo
+        env:
+          CONTEXTFS_TOKEN: ${{ secrets.CONTEXTFS_TOKEN }}
         run: |
-          git clone https://github.com/N3mes1s/contextfs.git ../contextfs
+          # contextfs is private; clone needs a PAT. Set CONTEXTFS_TOKEN
+          # as a repo secret (fine-grained PAT, read access to
+          # N3mes1s/contextfs) to enable this workflow.
+          if [[ -z "${CONTEXTFS_TOKEN}" ]]; then
+            echo "::error::CONTEXTFS_TOKEN secret not set — cannot clone private contextfs sibling repo. See workflow header for setup."
+            exit 1
+          fi
+          git clone "https://x-access-token:${CONTEXTFS_TOKEN}@github.com/N3mes1s/contextfs.git" ../contextfs
           git -C ../contextfs checkout 6c15a0ae784e72660e2536efc604f0db8ddba0c4
       - uses: dtolnay/rust-toolchain@stable
       - name: Doc-tests
