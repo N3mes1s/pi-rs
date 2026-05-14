@@ -1,9 +1,11 @@
 # RFD 0026 — Remote Sandbox Transports (E2B v1 reference, Sprites/Daytona deferred)
 
-- **Status:** Discussion (v0.24)
+- **Status:** Partially shipped — v1 (E2B + Sprites SmartSync) complete; v2 (contextfs RW /work on Sprites) in flight
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
-- **Implemented:** (pending)
+- **Implemented:**
+  - **v1 baseline** — 2026-05 (commits `ccc2675` E2B provider, `9ed9e45`/`35e4c60`/`ed8a960` Sprites provider, `02e8aa6` SmartSync flushback demo). Both providers ship the `SmartSync upload + per-tool inline flushback` model. Acceptance: `crates/pi-sandbox/tests/remote_e2b_smoke.rs` + `sprites_host_orchestration.rs` + `scripts/dogfood-{e2b,sprites}-remote-sandbox.sh`.
+  - **v2 contextfs RW /work on Sprites** — partial: Phase A (host-side helper reuse) and M1 host-side contextfs orchestration landed (`63a000d`); Phase C3 cutover (drop SmartSync, worker reads/writes `/work` directly via FUSE) and Phase D productionisation (dogfood with `--mount-mode=contextfs`, 100 MB integration test gated on `SPRITES_TOKEN`, default-flip commit) are open. The current `SpritesProvider` header (`crates/pi-sandbox/src/remote/sprites.rs:31-37`) explicitly notes the contextfs+agora mount layer "ships in the follow-up".
 
 ## Summary
 
