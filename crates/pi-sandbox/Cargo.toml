@@ -56,6 +56,9 @@ contextfsd = { workspace = true }
 # command execution via typed Rust API (RFD 0026 v2 Phase C2). Linux-
 # only because Sprites itself is Linux-only.
 wromm = { workspace = true }
+# contextfs-mesh — transport-agnostic UDS expose/receive (RFD 0029).
+# Linux-only because the underlying cfs-mesh tunnel uses Linux UDSes.
+contextfs-mesh = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

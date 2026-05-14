@@ -123,6 +123,14 @@ contextfsd = { path = "../contextfs/crates/contextfsd", default-features = false
 # sibling repo on dev hosts + CI gated until token-auth is configured.
 wromm = { path = "../wromm" }
 
+# Transport-agnostic UDS expose/receive primitives (RFD 0029, contextfs).
+# `expose_uds` + `receive_uds` (+ `_with_seed` variants) replace the host-
+# side `agora create` + `cfs-mesh agora-bridge` glue that pi-rs used to
+# inline in `crates/pi-sandbox/src/remote/sprites.rs`. Same path-dep
+# rationale as contextfsd: pinned-by-sibling-checkout until contextfs
+# publishes.
+contextfs-mesh = { path = "../contextfs/crates/contextfs-mesh" }
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
