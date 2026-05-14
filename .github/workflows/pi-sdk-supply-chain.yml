@@ -53,6 +53,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clone contextfs as sibling repo
+        run: |
+          git clone https://github.com/N3mes1s/contextfs.git ../contextfs
+          git -C ../contextfs checkout 6c15a0ae784e72660e2536efc604f0db8ddba0c4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
@@ -64,6 +68,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clone contextfs as sibling repo
+        run: |
+          git clone https://github.com/N3mes1s/contextfs.git ../contextfs
+          git -C ../contextfs checkout 6c15a0ae784e72660e2536efc604f0db8ddba0c4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
@@ -78,6 +86,10 @@ jobs:
     if: false
     steps:
       - uses: actions/checkout@v4
+      - name: Clone contextfs as sibling repo
+        run: |
+          git clone https://github.com/N3mes1s/contextfs.git ../contextfs
+          git -C ../contextfs checkout 6c15a0ae784e72660e2536efc604f0db8ddba0c4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-semver-checks
         run: cargo install cargo-semver-checks --locked
@@ -89,6 +101,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clone contextfs as sibling repo
+        run: |
+          git clone https://github.com/N3mes1s/contextfs.git ../contextfs
+          git -C ../contextfs checkout 6c15a0ae784e72660e2536efc604f0db8ddba0c4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build + test canary
         run: cargo test -p pi-sdk-canary
@@ -98,6 +114,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clone contextfs as sibling repo
+        run: |
+          git clone https://github.com/N3mes1s/contextfs.git ../contextfs
+          git -C ../contextfs checkout 6c15a0ae784e72660e2536efc604f0db8ddba0c4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build all examples
         run: cargo build --examples -p pi-sdk --features mocks
@@ -107,6 +127,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Clone contextfs as sibling repo
+        run: |
+          git clone https://github.com/N3mes1s/contextfs.git ../contextfs
+          git -C ../contextfs checkout 6c15a0ae784e72660e2536efc604f0db8ddba0c4
       - uses: dtolnay/rust-toolchain@stable
       - name: Doc-tests
         run: cargo test -p pi-sdk --doc --features mocks
