@@ -53,4 +53,4 @@ crosses crate boundaries.
 | 0019 | OpenAI Responses API support                      | Implemented |
 | 0020 | Autonomous model router                           | Discussion  |
 | 0027 | Pi-rs as a self-contained Rust SDK                | Implemented |
-| 0032 | RAO: Recursive Agent Optimization for autoresearch | Accepted   |
+| 0032 | RAO: Recursive Agent Optimization for autoresearch | Implemented |

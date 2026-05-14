@@ -1,9 +1,9 @@
 # RFD 0032 — RAO: Recursive Agent Optimization for autoresearch
 
-- **Status:** Accepted
+- **Status:** Implemented
 - **Author:** pi-rs maintainers (drafter: claude-opus-4-5, autoresearch session)
 - **Created:** 2026-05-13
-- **Implemented:** _pending_
+- **Implemented:** 2026-05-13 (commit `23ecc06`) — all seven implementation-plan rows landed; `crates/pi-coding-agent/tests/autoresearch_recursive.rs` covers the delegation-bonus formula + RunEntry schema with 9 passing tests. NOTE: `23ecc06` also accidentally bundled ~125k lines of unrelated cruft (`.review-target-archive/`, `.tmp-*`, `.fuse-probe-*`, `.probe-*` dirs); a separate cleanup commit should strip those — RAO source itself is correct and isolated under `crates/pi-coding-agent/src/autoresearch/`.
 - **References:**
   - [RAO paper](https://apga.github.io/RAO/) — Gandhi et al., arXiv 2605.06639
   - RFD 0005 — Subagents and the `task` tool
