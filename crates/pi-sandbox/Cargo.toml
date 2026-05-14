@@ -52,6 +52,10 @@ libc = "0.2"
 # see Cargo.toml's `contextfsd = { git = …, rev = … }` entry.
 # Linux-only because the daemon binds FUSE mounts.
 contextfsd = { workspace = true }
+# Wromm SDK — drives Sprites + E2B sandbox provisioning, file uploads,
+# command execution via typed Rust API (RFD 0026 v2 Phase C2). Linux-
+# only because Sprites itself is Linux-only.
+wromm = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

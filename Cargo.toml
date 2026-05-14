@@ -118,6 +118,11 @@ pi-build = { path = "crates/pi-build", version = "0.1.0" }
 # a new contextfs feature; do NOT relax to "branch = main".
 contextfsd = { path = "../contextfs/crates/contextfsd", default-features = false, features = ["local", "remote-fs"] }
 
+# Wromm sandbox-orchestration SDK (RFD 0026 v2 Phase C2). Same path-dep
+# rationale as contextfsd: not yet on a public registry; pin by being a
+# sibling repo on dev hosts + CI gated until token-auth is configured.
+wromm = { path = "../wromm" }
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

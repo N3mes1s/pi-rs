@@ -8,3 +8,4 @@
 
 pub mod e2b;
 pub mod sprites;
+pub mod sprites_contextfs;
