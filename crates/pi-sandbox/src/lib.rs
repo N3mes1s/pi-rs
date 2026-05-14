@@ -9,6 +9,7 @@
 pub mod cache;
 #[cfg(target_os = "linux")]
 pub mod contextfs;
+pub mod contextfs_embedder;
 pub mod local;
 pub mod microvm;
 pub mod provider;

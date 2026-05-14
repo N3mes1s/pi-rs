@@ -39,6 +39,8 @@ use std::time::{Duration, Instant};
 
 use tokio::process::{Child, Command};
 
+use pi_sandbox::contextfs_embedder::{EmbedderTomlSpec, FuseAcl};
+
 fn skip(reason: &str) -> bool {
     eprintln!("SKIP: contextfs_local_rw_mount: {reason}");
     true
@@ -106,47 +108,6 @@ permit (principal, action == Action::"rename",     resource);
 permit (principal, action == Action::"commit",     resource);
 "#;
 
-/// Build the canonical embedder contextfsd.toml as a String. Same shape
-/// the Sprites contextfs orchestration will produce; factor into a helper
-/// in `pi_sandbox` once the API stabilises.
-fn embedder_toml(
-    tenant_secret: &Path,
-    audit_log: &Path,
-    cedar: &Path,
-    broker_sock: &Path,
-    mount_name: &str,
-    mountpoint: &Path,
-    cache_dir: &Path,
-    fs_target_uds: &Path,
-    fuse_acl: &str,
-) -> String {
-    format!(
-        r#"tenant_secret_path = {tenant_secret:?}
-audit_log_path = {audit_log:?}
-
-[pdp]
-policy_path = {cedar:?}
-default_principal = 'Agent::"pi-spike"'
-
-[broker]
-socket_path = {broker_sock:?}
-
-[[mount]]
-name = {mount_name:?}
-mountpoint = {mountpoint:?}
-backend = "remote-fs"
-cache_dir = {cache_dir:?}
-caller_uid_passthrough = true
-fuse_acl = {fuse_acl:?}
-auto_unmount = true
-read_only = false
-
-[mount.remote_fs]
-target_uds = {fs_target_uds:?}
-"#
-    )
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_contextfs_rw_mount_round_trip() {
     if !require_env("PI_SANDBOX_CONTEXTFS_LOCAL") {
@@ -195,23 +156,22 @@ async fn local_contextfs_rw_mount_round_trip() {
     let broker_sock = run.join("broker.sock");
     let audit_log = run.join("audit.ndjson");
     let daemon_toml = run.join("contextfsd.toml");
-    std::fs::write(
-        &daemon_toml,
-        embedder_toml(
-            &tenant_secret,
-            &audit_log,
-            &cedar,
-            &broker_sock,
-            "work",
-            &mnt,
-            &cache,
-            &fs_sock,
-            // local non-root daemon → SessionACL::Owner under "auto"; mounting
-            // UID is the only allowed accessor, which is what this test wants.
-            "auto",
-        ),
-    )
-    .unwrap();
+    let spec = EmbedderTomlSpec {
+        tenant_secret_path: tenant_secret.clone(),
+        audit_log_path: audit_log.clone(),
+        cedar_policy_path: cedar.clone(),
+        principal: r#"Agent::"pi-spike""#.into(),
+        broker_socket_path: broker_sock.clone(),
+        mount_name: "work".into(),
+        mountpoint: mnt.clone(),
+        cache_dir: cache.clone(),
+        remote_fs_target_uds: fs_sock.clone(),
+        // local non-root daemon → SessionACL::Owner under "auto"; mounting
+        // UID is the only allowed accessor, which is what this test wants.
+        fuse_acl: FuseAcl::Auto,
+        read_only: false,
+    };
+    std::fs::write(&daemon_toml, spec.render()).unwrap();
 
     // ── start cfs-fs-server ──
     let _ = std::fs::remove_file(&fs_sock);
