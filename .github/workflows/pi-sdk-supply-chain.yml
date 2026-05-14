@@ -3,9 +3,13 @@
 # Runs on every PR + every push to main. Required-to-merge for any
 # change touching the pi-sdk public surface.
 #
-# REQUIRES: repo secret `CONTEXTFS_TOKEN` = fine-grained GitHub PAT
-# with read access to N3mes1s/contextfs (private path-dep). Without
-# it every job hard-fails at the clone step.
+# CURRENTLY DISABLED: contextfs is a private path-dep and every job
+# that touches the workspace fails at metadata resolution. Five jobs
+# (audit, deny, canary, examples, doctests) are gated `if: false`
+# until CONTEXTFS_TOKEN repo secret is added (fine-grained PAT with
+# read access to N3mes1s/contextfs). Only `matrix-up-to-date` (bash-
+# only, no cargo) runs today. Remove the `if: false` gates after the
+# secret is configured.
 #
 # Three jobs:
 #   - audit:           cargo-audit against the resolved lockfile.
@@ -69,6 +73,8 @@ jobs:
   audit:
     name: cargo-audit
     runs-on: ubuntu-latest
+    # Disabled until CONTEXTFS_TOKEN secret is configured (private contextfs path-dep).
+    if: false
     steps:
       - uses: actions/checkout@v4
       - name: Clone contextfs as sibling repo
@@ -93,6 +99,8 @@ jobs:
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
+    # Disabled until CONTEXTFS_TOKEN secret is configured (private contextfs path-dep).
+    if: false
     steps:
       - uses: actions/checkout@v4
       - name: Clone contextfs as sibling repo
@@ -144,6 +152,8 @@ jobs:
   canary:
     name: pi-sdk-canary
     runs-on: ubuntu-latest
+    # Disabled until CONTEXTFS_TOKEN secret is configured (private contextfs path-dep).
+    if: false
     steps:
       - uses: actions/checkout@v4
       - name: Clone contextfs as sibling repo
@@ -166,6 +176,8 @@ jobs:
   examples:
     name: pi-sdk examples build
     runs-on: ubuntu-latest
+    # Disabled until CONTEXTFS_TOKEN secret is configured (private contextfs path-dep).
+    if: false
     steps:
       - uses: actions/checkout@v4
       - name: Clone contextfs as sibling repo
@@ -188,6 +200,8 @@ jobs:
   doctests:
     name: pi-sdk doctests
     runs-on: ubuntu-latest
+    # Disabled until CONTEXTFS_TOKEN secret is configured (private contextfs path-dep).
+    if: false
     steps:
       - uses: actions/checkout@v4
       - name: Clone contextfs as sibling repo
