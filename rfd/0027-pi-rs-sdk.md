@@ -1,9 +1,9 @@
 # RFD 0027 — Pi-rs as a Self-Contained Rust SDK
 
-- **Status:** Discussion (v0.7)
+- **Status:** Implemented (v0.7)
 - **Author:** pi-rs maintainers
 - **Created:** 2026-05-02
-- **Implemented:** (pending)
+- **Implemented:** 2026-05-14 — Commits A–K (Track 1–3) merged on main; pre-crates.io polish trail in `crates/pi-sdk/CHANGELOG.md` [Unreleased]. Publication of `pi-sdk 0.1.0` to crates.io + enabling `cargo-semver-checks` CI gate remain as the release step.
 
 ## Summary
 
