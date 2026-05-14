@@ -35,11 +35,23 @@
 //! `wromm cp`, tool dispatch via `wromm exec`, `wromm rm` on `cleanup()`.
 //! /work in v1 is whatever wromm sets up by default (project file sync at
 //! `wromm up`); the contextfs+agora mount layer ships in the follow-up
-//! commit, gated on `PI_SPRITES_CONTEXTFS=1` until dogfooded.
+//! commit, gated behind `SpritesConfig.work_mount = Contextfs`
+//! (legacy alias `PI_SPRITES_CONTEXTFS=1`) until dogfooded.
 //!
-//! ## contextfs host-side daemons (PI_SPRITES_CONTEXTFS=1)
+//! ## SmartSync vs Contextfs (SpritesConfig::work_mount)
 //!
-//! When `PI_SPRITES_CONTEXTFS=1` is set, `ensure_session_open` additionally
+//! `SpritesWorkMount::SmartSync` (default) — `wromm cp` the project tree
+//! on session-open, apply `file_writes` back to host after each tool call.
+//! Works without contextfs. The historical v1 model.
+//!
+//! `SpritesWorkMount::Contextfs` — FUSE-mounted live host dir at /work.
+//! No upload, no flushback. Phase C+ of RFD 0026 v2. The runtime resolves
+//! the default from `PI_SPRITES_WORK_MOUNT=contextfs|smartsync` (explicit)
+//! or `PI_SPRITES_CONTEXTFS=1` (legacy alias).
+//!
+//! ## contextfs host-side daemons (work_mount == Contextfs)
+//!
+//! When `work_mount == Contextfs`, `ensure_session_open` additionally
 //! spawns three host-side children and stores their room IDs in `SessionState`
 //! for the M2 sprite-side bootstrap:
 //!
@@ -255,6 +267,27 @@ const PROVIDER_NAME: &str = "sprites";
 /// unprivileged sprite user (uid=1001) can chmod +x.
 const WORKER_REMOTE_PATH: &str = "/home/sprite/pi-sandbox-worker";
 
+/// How the host project directory is exposed inside the sprite at `/work`
+/// (RFD 0026 v2). The historical default is `SmartSync`; `Contextfs` is the
+/// Phase C cutover that drops the upload-then-flushback model in favour of a
+/// FUSE-mounted live host directory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SpritesWorkMount {
+    /// Walk cwd, `wromm cp` each file into the sprite at session-open;
+    /// apply the worker's `file_writes` back to the host after each tool
+    /// call. The v1 production model — works without contextfs.
+    #[default]
+    SmartSync,
+    /// Mount the host project dir at `/work` via contextfs FUSE bridged
+    /// from the host. No upload, no flushback; writes are live on the
+    /// host as soon as the worker completes the write syscall.
+    ///
+    /// Requires: host-side `cfs-fs-server` + `contextfs-broker` + the
+    /// agora/wromm transport to the sprite, and `contextfsd` mounted
+    /// inside the sprite at `/work`. Phase C of RFD 0026 v2.
+    Contextfs,
+}
+
 /// Configuration for [`SpritesProvider`].
 #[derive(Clone, Debug)]
 pub struct SpritesConfig {
@@ -269,6 +302,10 @@ pub struct SpritesConfig {
     pub label: String,
     /// Per-call exec timeout in seconds. Default 600.
     pub exec_timeout_secs: u32,
+    /// How `/work` is exposed inside the sprite. Defaults to `SmartSync`
+    /// for back-compat; flip to `Contextfs` to use the FUSE-mounted host
+    /// dir (RFD 0026 v2 Phase C+).
+    pub work_mount: SpritesWorkMount,
 }
 
 impl SpritesConfig {
@@ -278,6 +315,24 @@ impl SpritesConfig {
             return PathBuf::from(p);
         }
         which::which("wromm").unwrap_or_else(|_| PathBuf::from("wromm"))
+    }
+
+    /// Resolve the default work-mount from environment.
+    ///   1. `PI_SPRITES_WORK_MOUNT=contextfs|smartsync` (explicit)
+    ///   2. `PI_SPRITES_CONTEXTFS=1` → Contextfs (legacy alias)
+    ///   3. SmartSync (default)
+    fn resolve_work_mount() -> SpritesWorkMount {
+        if let Ok(v) = std::env::var("PI_SPRITES_WORK_MOUNT") {
+            match v.trim().to_ascii_lowercase().as_str() {
+                "contextfs" => return SpritesWorkMount::Contextfs,
+                "smartsync" => return SpritesWorkMount::SmartSync,
+                _ => {}
+            }
+        }
+        if std::env::var("PI_SPRITES_CONTEXTFS").as_deref() == Ok("1") {
+            return SpritesWorkMount::Contextfs;
+        }
+        SpritesWorkMount::SmartSync
     }
 
     fn default_label() -> String {
@@ -345,6 +400,7 @@ impl SpritesProvider {
             wromm_bin: SpritesConfig::resolve_wromm_bin(),
             label: SpritesConfig::default_label(),
             exec_timeout_secs: 600,
+            work_mount: SpritesConfig::resolve_work_mount(),
         })
     }
 
@@ -381,6 +437,7 @@ impl SpritesProvider {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(600),
+            work_mount: SpritesConfig::resolve_work_mount(),
         }))
     }
 
@@ -528,12 +585,18 @@ impl SpritesProvider {
         //    We mirror the E2B SmartSync model: walk the host cwd, filter
         //    out node_modules / target / large binaries, `wromm cp` each
         //    file into the sprite at /home/sprite/work/<rel-path>.
-        if let Err(e) = self.smart_sync_to_sprite(&sprite_id, cwd).await {
-            self.try_destroy_sprite(&sprite_id).await;
-            return Err(e);
+        //
+        //    Skipped when `work_mount == Contextfs` — the host dir is
+        //    FUSE-mounted live at /work; uploading would just bloat the
+        //    sprite filesystem with stale copies.
+        if self.config.work_mount == SpritesWorkMount::SmartSync {
+            if let Err(e) = self.smart_sync_to_sprite(&sprite_id, cwd).await {
+                self.try_destroy_sprite(&sprite_id).await;
+                return Err(e);
+            }
         }
 
-        // ── contextfs host-side daemons (PI_SPRITES_CONTEXTFS=1) ────────
+        // ── contextfs host-side daemons (work_mount == Contextfs) ───────
         // Linux-only: contextfs uses Linux-specific FUSE + UDS infra.
         //
         // IMPORTANT: any failure inside this block must call
@@ -543,7 +606,7 @@ impl SpritesProvider {
         // timeout fires. We collect the result of an inner async block and
         // map errors through cleanup to enforce this invariant.
         #[cfg(target_os = "linux")]
-        if std::env::var("PI_SPRITES_CONTEXTFS").as_deref() == Ok("1") {
+        if self.config.work_mount == SpritesWorkMount::Contextfs {
             let contextfs_result: Result<(), SandboxError> = async {
                 let run_dir = sprites_run_dir(&self.config.label);
                 std::fs::create_dir_all(&run_dir).map_err(|e| {
@@ -929,11 +992,13 @@ impl SpritesProvider {
             })?;
 
         // Flushback: apply file_writes to the host cwd. Mirrors the E2B
-        // path. With contextfs RW /work this becomes a no-op (writes are
-        // already live on host) but for the wromm-only sync path it's
-        // essential — without it, write/edit tool changes never reach the
-        // operator's filesystem.
-        if !parsed.file_writes.is_empty() {
+        // path. Essential under `work_mount == SmartSync` — without it,
+        // write/edit tool changes never reach the operator's filesystem.
+        // No-op under `Contextfs` — the worker writes directly to the
+        // FUSE-mounted host dir at /work and there is nothing to flush.
+        if self.config.work_mount == SpritesWorkMount::SmartSync
+            && !parsed.file_writes.is_empty()
+        {
             apply_file_writes_to_host(&parsed.file_writes, cwd).await?;
         }
 
@@ -954,7 +1019,8 @@ impl SpritesProvider {
     /// to a real sprite. Used by integration tests that mock the child
     /// binaries and verify argv + process liveness.
     ///
-    /// When `PI_SPRITES_CONTEXTFS=1`, this method:
+    /// When `config.work_mount == SpritesWorkMount::Contextfs` (e.g. with
+    /// `PI_SPRITES_CONTEXTFS=1` set before construction), this method:
     ///   - skips the `wromm` lifecycle (no wromm up / cp / chmod)
     ///   - runs only the contextfs host-side spawn path
     ///   - stores a synthetic `sprite_id` so the session looks "ready"
@@ -990,7 +1056,7 @@ impl SpritesProvider {
         }
 
         #[cfg(target_os = "linux")]
-        if std::env::var("PI_SPRITES_CONTEXTFS").as_deref() == Ok("1") {
+        if self.config.work_mount == SpritesWorkMount::Contextfs {
             let run_dir = sprites_run_dir(&self.config.label);
             std::fs::create_dir_all(&run_dir).map_err(|e| {
                 SandboxError::Provider(format!(
