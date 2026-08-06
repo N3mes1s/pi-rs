@@ -223,6 +223,15 @@ pub fn run_cycle_with_ctx(
         return finish_aborted(&ctx, match e { StepError::Aborted(m) | StepError::Failed(m) => m });
     }
 
+    // Gate: refuse to start on a dirty working tree. An uncommitted edit
+    // left behind by a killed or aborted prior cycle would otherwise
+    // survive into this one and poison `git revert` in
+    // step_rollback_if_regress (git_revert_conflict) or the
+    // post-orchestrate checkout (local-changes-would-be-overwritten),
+    // pausing the supervisor. Both failure modes were observed live.
+    if let Err(e) = step_tree_clean_check(&mut ctx) {
+        return finish_aborted(&ctx, match e { StepError::Aborted(m) | StepError::Failed(m) => m });
+    }
 
     // Check signal after each step.
     macro_rules! check_signal {
@@ -437,7 +446,6 @@ pub fn run_cycle_with_ctx(
 
 // ── Step implementations ─────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 fn step_tree_clean_check(ctx: &mut CycleCtx) -> StepResult {
     let out = std::process::Command::new("git")
         .args(["-C", &ctx.repo_root.display().to_string(), "status", "--porcelain"])
