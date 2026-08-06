@@ -366,3 +366,44 @@ fn invalid_fixture_dir_files_each_produce_their_named_error() {
         assert!(matched, "fixture {name} produced unexpected error: {err:?}");
     }
 }
+
+// ── runtime.system_prompt_file (brain file) ───────────────────────
+
+fn brain_manifest(path_line: &str) -> String {
+    format!(
+        r#"schema_version = 1
+agent = {{ name = "x", description = "y", version = "0.1.0" }}
+provider = {{ name = "anthropic", model = "m" }}
+[runtime]
+system_prompt = "fallback"
+{path_line}
+"#
+    )
+}
+
+#[test]
+fn system_prompt_file_relative_path_accepted() {
+    let m = parse(&brain_manifest(r#"system_prompt_file = "brains/x.md""#))
+        .expect("relative brain path should parse");
+    assert_eq!(m.runtime.system_prompt_file.as_deref(), Some("brains/x.md"));
+}
+
+#[test]
+fn system_prompt_file_absolute_path_rejected() {
+    let err = parse(&brain_manifest(r#"system_prompt_file = "/etc/passwd""#))
+        .expect_err("absolute brain path must be rejected");
+    assert!(matches!(err, ManifestError::InvalidSystemPromptFile(_)), "got {err:?}");
+}
+
+#[test]
+fn system_prompt_file_parent_traversal_rejected() {
+    let err = parse(&brain_manifest(r#"system_prompt_file = "../secrets/x.md""#))
+        .expect_err("parent traversal in brain path must be rejected");
+    assert!(matches!(err, ManifestError::InvalidSystemPromptFile(_)), "got {err:?}");
+}
+
+#[test]
+fn system_prompt_file_omitted_is_none() {
+    let m = parse(&brain_manifest("")).expect("no brain line parses");
+    assert_eq!(m.runtime.system_prompt_file, None);
+}
