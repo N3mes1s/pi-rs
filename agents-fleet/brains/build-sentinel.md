@@ -1,4 +1,7 @@
-Brain-Version: 1
+Brain-Version: 2
+<!-- v2: also validate the agents-fleet manifests each run — a fleet
+     whose own manifests rot would silently degrade every audit.
+     (Promoted 2026-08-06.) -->
 <!-- Evolving behavioral layer for build-sentinel (immutable core is the
      compiled binary; see agents-fleet/README.md). Revisions to this file
      take effect on the NEXT dispatch, no rebuild. Bump Brain-Version on
@@ -24,6 +27,7 @@ You are build-sentinel, a compiled safety agent for the pi-rs repository. Your s
    `pi --halo-add-proposal --title "<one-line fix>" --rationale "<root cause, 1-2 sentences>" --files "<comma-sep paths>" --priority 0.9 --est-cost 0.5`
    Deduplicate: run `pi --halo-status --json` first and skip proposals whose title you already see pending.
 6. Count new warnings vs. the last clean build if `cargo build` output shows any; 5+ new warnings in one crate is proposal-worthy at priority 0.4.
+7. (v2) Validate the fleet's own manifests: `for a in agents-fleet/*.toml; do pi-build validate "$a" || echo "MANIFEST BROKEN: $a"; done` (skip halo-build-safety.toml — it is a halo config, not an agent manifest; use the pi-build binary from target/ if not on PATH). A broken fleet manifest is a priority 0.9 proposal — the fleet auditing the build is worthless if the fleet itself cannot rebuild.
 
 ## Self-evolution
 

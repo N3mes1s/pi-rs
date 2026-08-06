@@ -108,7 +108,18 @@ fi
 # ── rebuild profile ──────────────────────────────────────────────────
 [ -f "$MANIFEST" ] || { echo "fleet-run: no manifest $MANIFEST" >&2; exit 66; }
 OUT_DIR="$REPO_ROOT/target/agents-fleet/$NAME-build"
-BIN="$OUT_DIR/target/release/$NAME"
+
+# The binary lands under target/<forced-target>/release when a
+# .cargo/config.toml in an ancestor dir (pi-rs forces musl) sets
+# [build].target, else under target/release.
+resolve_built_bin() {
+  local c
+  for c in "$OUT_DIR"/target/*/release/"$NAME" "$OUT_DIR/target/release/$NAME"; do
+    [ -x "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+BIN="$(resolve_built_bin || true)"
 
 PI_BUILD="${PI_BUILD_BIN:-}"
 if [ -z "$PI_BUILD" ]; then
@@ -126,6 +137,20 @@ if [ -z "$PI_BUILD" ]; then
   [ -n "$PI_BUILD" ] || { echo "fleet-run: pi-build not found after build" >&2; exit 75; }
 fi
 
+# Content-addressed skip: pi-build.lock records the sha256 of the
+# manifest the crate was generated from. When it matches the current
+# manifest, the binary exists, and pi-build itself hasn't been rebuilt
+# since, the core is already up to date — skip codegen AND cargo (a
+# thin-LTO relink costs minutes, and `--force` codegen would dirty
+# mtimes and trigger one). Brain-file changes never come through here:
+# the binary loads the brain at startup, no rebuild involved.
+if [ -n "$BIN" ] \
+  && grep -q "manifest_sha256  = \"$(manifest_sha)\"" "$OUT_DIR/pi-build.lock" 2>/dev/null \
+  && [ "$BIN" -nt "$PI_BUILD" ]; then
+  lineage_append "$BIN" rebuild
+  exec "$BIN" "$@"
+fi
+
 "$PI_BUILD" "$MANIFEST" --out "$OUT_DIR" --force >/dev/null 2>&1 </dev/null \
   || { echo "fleet-run: pi-build codegen failed for $NAME" >&2; exit 75; }
 
@@ -139,7 +164,8 @@ fi
 
 (set -o pipefail; cd "$OUT_DIR" && cargo build --release 2>&1 | sed 's/^/[fleet-build] /' >&2) </dev/null
 st=$?
-[ -x "$BIN" ] || st=1
+BIN="$(resolve_built_bin || true)"
+[ -n "$BIN" ] || st=1
 if [ "$st" -ne 0 ]; then
   echo "fleet-run: cargo build failed for $NAME" >&2
   exit 75
