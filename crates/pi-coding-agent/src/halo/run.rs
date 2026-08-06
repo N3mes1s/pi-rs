@@ -31,6 +31,16 @@ pub fn run_supervisor(repo_root: &Path, config_path: Option<&Path>, max_cycles: 
     let errs = config::validate(&cfg, false); if !errs.is_empty() { bail!("config validation errors: {:?}", errs); }
     let halo_dir = halo_dir_for_repo(repo_root).ok_or_else(|| anyhow::anyhow!("no home dir"))?;
     fs::create_dir_all(&halo_dir)?;
+    // M1 contract: the bundled agents (halo-proposer/-implementer,
+    // code-reviewer, autoresearch-worker) must exist under
+    // <repo>/.pi/agents/ or orchestrate's dispatch cannot resolve the
+    // implementer/reviewer specs on a fresh clone — the first live
+    // supervisor run failed its milestone in 0.5s exactly this way.
+    // Write-if-missing, so operator-managed agent files are untouched.
+    let written = crate::halo::bootstrap_bundled_agents(repo_root)?;
+    if !written.is_empty() {
+        tracing::info!(count = written.len(), "bootstrapped bundled agents into .pi/agents/");
+    }
     if paused_path(&halo_dir).exists() { bail!("halo is paused; run `pi --halo-resume` first"); }
     let sig_any = Arc::new(AtomicBool::new(false)); let sigint = Arc::new(AtomicBool::new(false)); let sigterm = Arc::new(AtomicBool::new(false));
     signal_flag::register(SIGINT, Arc::clone(&sig_any))?; signal_flag::register(SIGTERM, Arc::clone(&sig_any))?; signal_flag::register(SIGINT, Arc::clone(&sigint))?; signal_flag::register(SIGTERM, Arc::clone(&sigterm))?;
@@ -118,13 +128,19 @@ pub fn run_supervisor(repo_root: &Path, config_path: Option<&Path>, max_cycles: 
             // clone.expected_root is unset or empty (covered by
             // validate() which currently requires it set, but
             // belt-and-suspenders).
+            // expected_root is a GLOB in the general case and may be
+            // tilde-prefixed (check_halo_clone_preconditions expands
+            // it the same way); only use it as the dispatch cwd when
+            // it expands to a real directory, else fall back to
+            // repo_root (which IS the validated halo clone).
             let cycle_cwd = cfg
                 .clone_config
                 .expected_root
                 .as_deref()
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
-                .map(std::path::PathBuf::from)
+                .map(|s| std::path::PathBuf::from(shellexpand::tilde(s).to_string()))
+                .filter(|p| p.is_dir())
                 .unwrap_or_else(|| repo_root.to_path_buf());
             let dispatch_inputs = DispatchInputs {
                 specs: &cfg.compiled_agents,

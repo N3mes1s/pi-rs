@@ -1,9 +1,17 @@
 # RFD 0025 — `pi --halo`: continuous self-improvement loop on top of evolve + orchestrate
 
-- **Status:** Discussion (v0.28 — twenty-eighth draft)
+- **Status:** Implemented (design frozen at v0.28; all five open questions closed)
 - **Author:** pi-rs maintainers (drafter: opus-4-7, thinking=high)
 - **Created:** 2026-04-30
-- **Implemented:** _pending_
+- **Implemented:** M1–M4 all landed under `crates/pi-coding-agent/src/halo/`
+  (config/status, cycle executor + signal handling, proposer wiring,
+  guardrails/pause) with the full `--halo*` CLI surface in `cli.rs`/`cmd.rs`;
+  acceptance covered by the `halo_config` / `halo_cycle` / `halo_proposer` /
+  `halo_guardrails` / `halo_spend` test suites (63 tests). The RFD 0028
+  Commit D compiled-agent dispatch loop landed on top
+  (`halo/compiled_agent{,_dispatch}.rs`). History note: the halo tree
+  reached `main` inside squashed merge `63a000d`. The M4-week canary run
+  (§Implementation plan) has not been performed yet.
 - **Supersedes / extends:** builds on RFDs 0011 + 0013 (evolve) and
   RFD 0021 (orchestrate); composes with RFD 0022 (sandbox) and
   RFD 0023 (orchestrate v2 — in flight on a sibling campaign).

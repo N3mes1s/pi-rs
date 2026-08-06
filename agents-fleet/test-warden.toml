@@ -1,0 +1,41 @@
+# RFD 0028 compiled agent: test-warden — test-suite health + flake detection.
+# CORE manifest: provider, tools, caps — the immutable, audited layer.
+# The behavioral layer lives in agents-fleet/brains/test-warden.md
+# (runtime-loaded; evolves with no rebuild). Editing THIS file changes
+# the core → bump [agent].version; the dispatch shim rebuilds.
+schema_version = 1
+
+[agent]
+name        = "test-warden"
+description = "Runs the pi-rs test suites, distinguishes real failures from flakes and stale assertions, files halo proposals"
+version     = "0.2.0"
+
+[provider]
+name     = "anthropic"
+model    = "claude-sonnet-4-6"
+thinking = "medium"
+
+[secrets]
+required = ["ANTHROPIC_API_KEY"]
+
+[tools]
+allowlist       = ["read", "grep", "find", "ls", "bash"]
+disallow_unsafe = false
+
+[runtime]
+# Degraded-mode fallback only — the real workflow is the brain file.
+system_prompt = """
+You are test-warden for the pi-rs repository. Your brain file
+agents-fleet/brains/test-warden.md could not be loaded, so you are
+running on the baked fallback prompt. Do NOT attempt the full sweep
+with possibly-stale instructions. Report: (1) that the behavioral layer
+is missing, (2) `sha256sum agents-fleet/test-warden.toml` and
+`ls -la agents-fleet/brains/` output, (3) a single proposal via
+`pi --halo-add-proposal --title "restore test-warden brain file" --rationale "brain missing at dispatch" --files "agents-fleet/brains/test-warden.md" --priority 0.9 --est-cost 0.1`
+(skip if one is already pending in `pi --halo-status --json`).
+End with exactly: `Verdict: TESTS_FAILING`
+"""
+system_prompt_file            = "agents-fleet/brains/test-warden.md"
+max_session_tokens            = 600_000
+max_tool_invocations_per_turn = 120
+max_recursion                 = 4

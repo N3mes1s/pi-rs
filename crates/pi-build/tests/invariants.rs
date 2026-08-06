@@ -86,9 +86,12 @@ fn invariant_5_codegen_determinism() {
 
 /// Walks the `main.rs` AST and collects every string literal
 /// containing `_API_KEY` or `_TOKEN`, recording whether each
-/// appeared inside a `from_env_explicit(...)` call OR inside
+/// appeared inside a `from_env_explicit(...)` call, inside
 /// a `Settings::builder().{system_prompt, model, provider}(...)`
-/// call. Per B.13 #6, a leak is any other location.
+/// call, OR in the `BAKED_SYSTEM_PROMPT` const initializer (the
+/// operator-authored prompt hoisted for the brain-file fallback —
+/// same trust level as the system_prompt setter it feeds). Per
+/// B.13 #6, a leak is any other location.
 #[derive(Default)]
 struct SecretScanner {
     /// (literal_value, location_kind)
@@ -96,17 +99,23 @@ struct SecretScanner {
     /// Stack of enclosing call-expression names; topmost is the
     /// immediate parent.
     call_stack: Vec<String>,
+    /// Inside `const BAKED_SYSTEM_PROMPT: ... = ...;`
+    in_baked_prompt_const: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SecretLocation {
     InsideFromEnvExplicit,
     InsideSettingsBuilder { setter: String },
+    InsideBakedPromptConst,
     Leak,
 }
 
 impl SecretScanner {
     fn classify(&self) -> SecretLocation {
+        if self.in_baked_prompt_const {
+            return SecretLocation::InsideBakedPromptConst;
+        }
         // Walk the call stack from immediate parent outward.
         for caller in self.call_stack.iter().rev() {
             if caller == "from_env_explicit" {
@@ -123,6 +132,14 @@ impl SecretScanner {
 }
 
 impl<'ast> Visit<'ast> for SecretScanner {
+    fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
+        let is_baked = node.ident == "BAKED_SYSTEM_PROMPT";
+        let prev = self.in_baked_prompt_const;
+        self.in_baked_prompt_const = prev || is_baked;
+        syn::visit::visit_item_const(self, node);
+        self.in_baked_prompt_const = prev;
+    }
+
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         let name = call_name(&node.func);
         self.call_stack.push(name);
@@ -220,10 +237,16 @@ system_prompt = "Set ANTHROPIC_API_KEY before running this tool."
     let in_prompt = scanner
         .sites
         .iter()
-        .filter(|(_, loc)| matches!(loc, SecretLocation::InsideSettingsBuilder { .. }))
+        .filter(|(_, loc)| {
+            matches!(
+                loc,
+                SecretLocation::InsideSettingsBuilder { .. }
+                    | SecretLocation::InsideBakedPromptConst
+            )
+        })
         .count();
     assert_eq!(from_env, 1, "exactly one in from_env_explicit");
-    assert_eq!(in_prompt, 1, "exactly one in Settings::builder().system_prompt");
+    assert_eq!(in_prompt, 1, "exactly one in the baked system-prompt location");
 }
 
 // ── B.13 #8: no-secret manifest produces no env reads ─────────
@@ -272,4 +295,36 @@ runtime = {{ system_prompt = "p" }}
         let main = render(&m, &raw, PI_BUILD_VERSION).main_rs;
         syn::parse_file(&main).unwrap_or_else(|e| panic!("syn parse {tool}: {e}"));
     }
+}
+
+// ── brain-file split: BRAIN_FILE const renders from the manifest ──
+
+#[test]
+fn brain_file_manifest_renders_some_and_default_renders_none() {
+    let with = r#"schema_version = 1
+agent = { name = "x", description = "y", version = "0.1.0" }
+provider = { name = "anthropic", model = "m" }
+[runtime]
+system_prompt = "fallback"
+system_prompt_file = "brains/x.md"
+"#;
+    let m = parse(with).expect("parse");
+    let main = render(&m, with, PI_BUILD_VERSION).main_rs;
+    assert!(
+        main.contains(r#"const BRAIN_FILE: Option<&str> = Some("brains/x.md");"#),
+        "brain manifest must bake Some(path)",
+    );
+    syn::parse_file(&main).expect("generated main.rs with brain file parses");
+
+    let without = r#"schema_version = 1
+agent = { name = "x", description = "y", version = "0.1.0" }
+provider = { name = "anthropic", model = "m" }
+runtime = { system_prompt = "fallback" }
+"#;
+    let m2 = parse(without).expect("parse");
+    let main2 = render(&m2, without, PI_BUILD_VERSION).main_rs;
+    assert!(
+        main2.contains("const BRAIN_FILE: Option<&str> = None;"),
+        "brain-less manifest must bake None",
+    );
 }

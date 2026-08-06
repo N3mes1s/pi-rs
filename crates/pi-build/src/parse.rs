@@ -112,6 +112,20 @@ pub fn validate(m: &mut Manifest) -> Result<(), ManifestError> {
         return Err(ManifestError::InvalidSystemPromptLen { len: slen });
     }
 
+    // runtime.system_prompt_file (brain file): relative, no traversal.
+    // Absolute paths and `..` are rejected so a manifest can't point a
+    // deployed binary at arbitrary host files.
+    if let Some(f) = &m.runtime.system_prompt_file {
+        let bad = f.trim().is_empty()
+            || f.starts_with('/')
+            || std::path::Path::new(f)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir));
+        if bad {
+            return Err(ManifestError::InvalidSystemPromptFile(f.clone()));
+        }
+    }
+
     // runtime.max_session_tokens floor
     if m.runtime.max_session_tokens < MIN_MAX_SESSION_TOKENS {
         return Err(ManifestError::MaxSessionTokensTooLow {

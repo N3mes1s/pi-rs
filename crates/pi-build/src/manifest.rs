@@ -118,6 +118,16 @@ fn default_tool_allowlist() -> Vec<String> {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     pub system_prompt: String,
+    /// Optional runtime-loaded prompt override ("brain file"). When
+    /// set, the generated binary reads this path at startup (relative
+    /// to its cwd) and uses the contents as the system prompt, falling
+    /// back to the baked-in `system_prompt` when the file is missing
+    /// or empty. This splits the agent into an immutable compiled core
+    /// and a mutable behavioral layer that can evolve on hosts with no
+    /// pi-rs toolchain — the RFDs 0011/0013 AGENTS.md pattern applied
+    /// to compiled agents.
+    #[serde(default)]
+    pub system_prompt_file: Option<String>,
     #[serde(default = "default_max_session_tokens")]
     pub max_session_tokens: u64,
     #[serde(default = "default_max_tool_invocations_per_turn")]

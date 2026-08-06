@@ -112,6 +112,10 @@ fn render_main_rs(m: &Manifest, sha: &str, pi_build_version: &str) -> String {
     let model_lit = quote_str(&m.provider.model);
     let thinking_lit = render_thinking_lit(m.provider.thinking);
     let system_prompt_lit = render_raw_string(&m.runtime.system_prompt);
+    let brain_file_lit = match &m.runtime.system_prompt_file {
+        Some(p) => format!("Some({})", quote_str(p)),
+        None => "None".to_string(),
+    };
     let mst = m.runtime.max_session_tokens;
     let mtipt = m.runtime.max_tool_invocations_per_turn;
     let mr = m.runtime.max_recursion;
@@ -135,13 +139,29 @@ fn render_main_rs(m: &Manifest, sha: &str, pi_build_version: &str) -> String {
 
 use pi_sdk::{{
     create_agent_session, AgentEvent, AgentEventKind, AuthStorage, LocalProcessProvider,
-    ModelRegistry, RuntimeConfig, SessionManager, Settings, ThinkingSetting,
+    ModelRegistry, RouteMode, RuntimeConfig, SessionManager, Settings, ThinkingSetting,
     ToolRegistry,
 }};
 use std::sync::Arc;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::process::ExitCode {{
+    // Artifact self-identity: `--version` prints the compiled-in
+    // provenance (agent name/version + the sha256 of the manifest
+    // this binary was generated from) and exits 0. This is how a
+    // deployment host — which has no pi-rs toolchain — verifies
+    // WHICH evolution of the agent it is running.
+    if std::env::args().any(|a| a == "--version") {{
+        match brain_fingerprint() {{
+            Some((fp, len)) => println!(
+                "{agent_name} {agent_version} ({provider_name}/{provider_model}) manifest-sha256:{sha} brain-fnv64:{{fp}} brain-bytes:{{len}}"
+            ),
+            None => println!(
+                "{agent_name} {agent_version} ({provider_name}/{provider_model}) manifest-sha256:{sha} brain:baked"
+            ),
+        }}
+        return std::process::ExitCode::SUCCESS;
+    }}
     let auth = match AuthStorage::{auth_call} {{
         Ok(a) => a,
         Err(_) => return std::process::ExitCode::from(2),
@@ -169,9 +189,16 @@ async fn main() -> std::process::ExitCode {{
                 .provider({provider_lit})
                 .model({model_lit})
                 .thinking({thinking_lit})
+                // A compiled agent's provider/model are part of its
+                // immutable core: the autonomous router (RFD 0020,
+                // RouteMode::Auto is the runtime default) must not
+                // re-route turns to models the manifest never
+                // declared — the exemplar table can pick providers
+                // the deployment has no credentials for.
+                .route(RouteMode::Off)
                 .build(),
         )
-        .system_prompt({system_prompt_lit})
+        .system_prompt(load_system_prompt())
         .with_sandbox_provider(sandbox)
         .with_max_session_tokens({mst}u64)
         .with_max_tool_invocations_per_turn({mtipt}usize)
@@ -233,6 +260,43 @@ async fn main() -> std::process::ExitCode {{
     drop(_runtime);
     let _ = pump.await;
     std::process::ExitCode::from(exit)
+}}
+
+/// Immutable-core / evolving-brain split (RFD 0028 + the RFDs
+/// 0011/0013 AGENTS.md pattern). The baked prompt is the compiled
+/// core's fallback; when `runtime.system_prompt_file` names a brain
+/// file, its contents are loaded fresh at every startup — so the
+/// behavioral layer can evolve on hosts with no build toolchain.
+const BAKED_SYSTEM_PROMPT: &str = {system_prompt_lit};
+const BRAIN_FILE: Option<&str> = {brain_file_lit};
+
+fn load_system_prompt() -> String {{
+    if let Some(p) = BRAIN_FILE {{
+        if let Ok(s) = std::fs::read_to_string(p) {{
+            if !s.trim().is_empty() {{
+                return s;
+            }}
+        }}
+        eprintln!("pi-agent: brain file {{p}} missing or empty; using baked prompt");
+    }}
+    BAKED_SYSTEM_PROMPT.to_owned()
+}}
+
+/// FNV-1a 64 over the brain file, for cheap dependency-free identity
+/// reporting in `--version` (change detection, not cryptography — the
+/// dispatch layer uses sha256 where it matters).
+fn brain_fingerprint() -> Option<(String, usize)> {{
+    let p = BRAIN_FILE?;
+    let s = std::fs::read_to_string(p).ok()?;
+    if s.trim().is_empty() {{
+        return None;
+    }}
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {{
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }}
+    Some((format!("{{h:016x}}"), s.len()))
 }}
 
 fn read_prompt_from_args_or_stdin() -> String {{
@@ -445,6 +509,7 @@ mod tests {
             },
             runtime: RuntimeConfig {
                 system_prompt: "Roll a d20.".into(),
+                system_prompt_file: None,
                 max_session_tokens: 200_000,
                 max_tool_invocations_per_turn: 50,
                 max_recursion: 4,

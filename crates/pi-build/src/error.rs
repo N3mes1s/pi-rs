@@ -45,6 +45,9 @@ pub enum ManifestError {
     #[error("invalid runtime.system_prompt length {len} (must be 1..=65_536 UTF-8 bytes)")]
     InvalidSystemPromptLen { len: usize },
 
+    #[error("invalid runtime.system_prompt_file {0:?}: must be a non-empty relative path (no leading '/', no '..' components)")]
+    InvalidSystemPromptFile(String),
+
     #[error("runtime.max_session_tokens {found} below floor 1_000")]
     MaxSessionTokensTooLow { found: u64 },
 

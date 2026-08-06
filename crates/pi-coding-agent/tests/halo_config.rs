@@ -379,10 +379,10 @@ model_override = "claude-opus-4-7"
 // 10. Bundled agent bootstrap: files get written when absent, not overwritten.
 // --------------------------------------------------------------------------
 #[test]
-fn bootstrap_writes_three_agents() {
+fn bootstrap_writes_four_agents() {
     let dir = tempfile::tempdir().unwrap();
     let written = pi_coding_agent::halo::bootstrap_bundled_agents(dir.path()).unwrap();
-    assert_eq!(written.len(), 3, "should write exactly 3 agent files");
+    assert_eq!(written.len(), 4, "should write exactly 4 agent files");
     // Check that files exist.
     for p in &written {
         assert!(p.is_file(), "agent file should exist: {:?}", p);
@@ -401,8 +401,9 @@ fn bootstrap_does_not_overwrite_existing_files() {
     std::fs::write(agents_dir.join("halo-proposer.md"), custom).unwrap();
 
     let written = pi_coding_agent::halo::bootstrap_bundled_agents(dir.path()).unwrap();
-    // Only 2 files should be written (implementer + reviewer).
-    assert_eq!(written.len(), 2, "should only write missing agents");
+    // Only 3 files should be written (implementer + reviewer +
+    // autoresearch worker); the pre-created proposer is skipped.
+    assert_eq!(written.len(), 3, "should only write missing agents");
 
     // Custom file should be unchanged.
     let content = std::fs::read_to_string(agents_dir.join("halo-proposer.md")).unwrap();

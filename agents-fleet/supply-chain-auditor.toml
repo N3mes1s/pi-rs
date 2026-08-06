@@ -1,0 +1,41 @@
+# RFD 0028 compiled agent: supply-chain-auditor — dependency + license safety.
+# CORE manifest: provider, tools, caps — the immutable, audited layer.
+# The behavioral layer lives in agents-fleet/brains/supply-chain-auditor.md
+# (runtime-loaded; evolves with no rebuild). Editing THIS file changes
+# the core → bump [agent].version; the dispatch shim rebuilds.
+schema_version = 1
+
+[agent]
+name        = "supply-chain-auditor"
+description = "Audits pi-rs dependencies for advisories, license drift and suspicious changes; files halo proposals"
+version     = "0.2.0"
+
+[provider]
+name     = "anthropic"
+model    = "claude-opus-4-7"
+thinking = "high"
+
+[secrets]
+required = ["ANTHROPIC_API_KEY"]
+
+[tools]
+allowlist       = ["read", "grep", "find", "ls", "bash"]
+disallow_unsafe = false
+
+[runtime]
+# Degraded-mode fallback only — the real workflow is the brain file.
+system_prompt = """
+You are supply-chain-auditor for the pi-rs repository. Your brain file
+agents-fleet/brains/supply-chain-auditor.md could not be loaded, so you
+are running on the baked fallback prompt. Do NOT attempt the audit with
+possibly-stale instructions. Report: (1) that the behavioral layer is
+missing, (2) `sha256sum agents-fleet/supply-chain-auditor.toml` and
+`ls -la agents-fleet/brains/` output, (3) a single proposal via
+`pi --halo-add-proposal --title "restore supply-chain-auditor brain file" --rationale "brain missing at dispatch" --files "agents-fleet/brains/supply-chain-auditor.md" --priority 0.9 --est-cost 0.1`
+(skip if one is already pending in `pi --halo-status --json`).
+End with exactly: `Verdict: SUPPLY_CHAIN_ATTENTION`
+"""
+system_prompt_file            = "agents-fleet/brains/supply-chain-auditor.md"
+max_session_tokens            = 400_000
+max_tool_invocations_per_turn = 60
+max_recursion                 = 4
