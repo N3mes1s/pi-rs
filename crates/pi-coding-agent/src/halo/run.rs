@@ -118,13 +118,19 @@ pub fn run_supervisor(repo_root: &Path, config_path: Option<&Path>, max_cycles: 
             // clone.expected_root is unset or empty (covered by
             // validate() which currently requires it set, but
             // belt-and-suspenders).
+            // expected_root is a GLOB in the general case and may be
+            // tilde-prefixed (check_halo_clone_preconditions expands
+            // it the same way); only use it as the dispatch cwd when
+            // it expands to a real directory, else fall back to
+            // repo_root (which IS the validated halo clone).
             let cycle_cwd = cfg
                 .clone_config
                 .expected_root
                 .as_deref()
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
-                .map(std::path::PathBuf::from)
+                .map(|s| std::path::PathBuf::from(shellexpand::tilde(s).to_string()))
+                .filter(|p| p.is_dir())
                 .unwrap_or_else(|| repo_root.to_path_buf());
             let dispatch_inputs = DispatchInputs {
                 specs: &cfg.compiled_agents,

@@ -34,11 +34,23 @@
 # 75 rebuild failed, 76 stale artifact.
 set -u
 
-if [ $# -lt 1 ]; then
-  echo "usage: fleet-run.sh <agent-name> [agent-args...]" >&2
+# The agent name is the first NON-flag argument — halo's dispatch
+# prepends the forced --jsonl before the spec's args, so flags may
+# appear anywhere. Everything except the name is forwarded verbatim.
+NAME=""
+FWD=()
+for a in "$@"; do
+  if [ -z "$NAME" ] && [ "${a#--}" = "$a" ]; then
+    NAME="$a"
+  else
+    FWD+=("$a")
+  fi
+done
+if [ -z "$NAME" ]; then
+  echo "usage: fleet-run.sh [flags] <agent-name> [agent-args...]" >&2
   exit 64
 fi
-NAME="$1"; shift
+set -- ${FWD[@]+"${FWD[@]}"}
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$HERE")"
@@ -144,6 +156,22 @@ fi
 # thin-LTO relink costs minutes, and `--force` codegen would dirty
 # mtimes and trigger one). Brain-file changes never come through here:
 # the binary loads the brain at startup, no rebuild involved.
+if [ -n "$BIN" ] \
+  && grep -q "manifest_sha256  = \"$(manifest_sha)\"" "$OUT_DIR/pi-build.lock" 2>/dev/null \
+  && [ "$BIN" -nt "$PI_BUILD" ]; then
+  lineage_append "$BIN" rebuild
+  exec "$BIN" "$@"
+fi
+
+# Serialize concurrent dispatches of the same agent: two codegen+append
+# passes interleaving in one OUT_DIR corrupt the generated Cargo.toml.
+mkdir -p "$(dirname "$OUT_DIR")"
+exec 9>"$OUT_DIR.buildlock"
+flock 9 || { echo "fleet-run: cannot take build lock for $NAME" >&2; exit 75; }
+
+# Re-check under the lock: the dispatch that held it may have just
+# built exactly this manifest.
+BIN="$(resolve_built_bin || true)"
 if [ -n "$BIN" ] \
   && grep -q "manifest_sha256  = \"$(manifest_sha)\"" "$OUT_DIR/pi-build.lock" 2>/dev/null \
   && [ "$BIN" -nt "$PI_BUILD" ]; then
