@@ -139,7 +139,7 @@ fn render_main_rs(m: &Manifest, sha: &str, pi_build_version: &str) -> String {
 
 use pi_sdk::{{
     create_agent_session, AgentEvent, AgentEventKind, AuthStorage, LocalProcessProvider,
-    ModelRegistry, RuntimeConfig, SessionManager, Settings, ThinkingSetting,
+    ModelRegistry, RouteMode, RuntimeConfig, SessionManager, Settings, ThinkingSetting,
     ToolRegistry,
 }};
 use std::sync::Arc;
@@ -189,6 +189,13 @@ async fn main() -> std::process::ExitCode {{
                 .provider({provider_lit})
                 .model({model_lit})
                 .thinking({thinking_lit})
+                // A compiled agent's provider/model are part of its
+                // immutable core: the autonomous router (RFD 0020,
+                // RouteMode::Auto is the runtime default) must not
+                // re-route turns to models the manifest never
+                // declared — the exemplar table can pick providers
+                // the deployment has no credentials for.
+                .route(RouteMode::Off)
                 .build(),
         )
         .system_prompt(load_system_prompt())
