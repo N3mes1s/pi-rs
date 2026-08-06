@@ -1,4 +1,7 @@
 //! Unit tests for `compute_cost` in the Anthropic provider (RFD 0008).
+//!
+//! Both `compute_cost` and `UsageAcc::into_usage` are annotated `#[must_use]`
+//! so the compiler warns when callers discard the returned value.
 
 use pi_ai::provider::anthropic::{compute_cost, UsageAcc};
 use pi_ai::registry::ModelInfo;
@@ -120,6 +123,26 @@ fn cache_fields_none_falls_back_to_input_rate() {
     let cost = compute_cost(&model, &u);
     // 1M @ 5.0 + 1M @ 5.0 = 10.0
     assert!((cost - 10.0).abs() < 1e-9, "got {cost}");
+}
+
+// --- top-level re-export parity ---------------------------------------
+
+#[test]
+fn reexport_compute_cost_matches_direct() {
+    // Verifies the `pi_ai::compute_cost` re-export (with its `#[must_use]`
+    // propagated) produces identical results to the direct import.
+    let model = opus_4_7();
+    let u = UsageAcc {
+        input_tokens: 500_000,
+        output_tokens: 500_000,
+        ..Default::default()
+    };
+    let via_direct = compute_cost(&model, &u);
+    let via_reexport = pi_ai::compute_cost(&model, &u);
+    assert!(
+        (via_direct - via_reexport).abs() < 1e-12,
+        "re-export result mismatch: {via_direct} vs {via_reexport}",
+    );
 }
 
 // --- RFD 0015: UsageAcc::into_usage round-trip ------------------------

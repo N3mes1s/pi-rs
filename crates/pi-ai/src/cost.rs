@@ -27,6 +27,7 @@ pub struct UsageAcc {
 
 impl UsageAcc {
     /// Materialise the accumulator into a `Usage` event with cost filled in.
+    #[must_use]
     pub fn into_usage(self, model: &ModelInfo) -> Usage {
         Usage {
             input_tokens: self.input_tokens,
@@ -43,6 +44,7 @@ impl UsageAcc {
 ///
 /// Falls back to the input rate when a row doesn't carry explicit cache
 /// rates — byte-identical to the RFD-0008 behaviour.
+#[must_use]
 pub fn compute_cost(model: &ModelInfo, u: &UsageAcc) -> f64 {
     let cache_read_rate = model
         .cache_read_cost_per_mtok
