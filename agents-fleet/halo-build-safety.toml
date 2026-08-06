@@ -1,0 +1,81 @@
+# halo.toml — build-safety fleet wiring (RFD 0025 supervisor + RFD 0028 §D
+# compiled-agent cycle nodes).
+#
+# Install: copy to <halo-clone>/.pi/halo.toml (the .pi/ dir is gitignored;
+# this checked-in copy is the source of truth). Compile the fleet first —
+# see agents-fleet/README.md — then run `pi --halo` from the halo clone.
+#
+# Self-evolution wiring, in one place:
+#   - Each cycle runs the canonical 8-step orchestrate loop (proposer →
+#     implementer → reviewer → merge → smoke → rollback → evolve_tick).
+#     evolve_tick mutates AGENTS.md from recorded outcomes (RFDs 0011/0013).
+#   - AFTER the orchestrate cycle, halo dispatches the three compiled
+#     agents below (RFD 0028 §D.6). They audit the build and FEED the
+#     backlog via `pi --halo-add-proposal`; the next cycle's implementer
+#     picks those proposals up. The fleet manifests under agents-fleet/
+#     are themselves legitimate proposal targets, so the loop can rewrite
+#     its own auditors (recompiled by the next `pi-build` run).
+
+name = "build-safety-fleet"
+
+# halo refuses main; merges land on halo/auto-merge for human promotion.
+target_branch = "halo/auto-merge"
+
+[clone]
+# Dedicated halo-owned clone only (RFD 0025 §Halo-owned clone precondition).
+expected_root = "~/halo/pi-rs*"
+
+[guardrails]
+daily_spend_budget_usd  = 10.0
+commits_per_hour_max = 4
+failed_build_streak_max  = 2
+min_seconds_between_cycles = 1800
+cycles_per_day_max = 12
+
+[proposer]
+# Falls through to roles.slow (RFD 0025 OQ#1 closure) unless overridden.
+
+# ── compiled-agent cycle nodes (RFD 0028 §D.2) ──────────────────────────
+# Each node dispatches fleet-run.sh (in-repo, itself evolvable) rather
+# than a raw binary path. The shim re-runs pi-build codegen from the
+# manifest and rebuilds before exec'ing — so a manifest the halo
+# implementer rewrote last cycle runs as a FRESH binary this cycle.
+# Unchanged manifests are a cargo cache hit (~1s overhead).
+#
+# Exit codes per RFD 0028 §Cross-cutting #5: 0 ok; 1 internal; 2 usage/
+# config (bad or missing credentials); 3 budget/cap exhausted; 64 no
+# prompt; 75 rebuild failed (shim). Budget exhaustion throttles
+# (transient); everything else alerts.
+
+[[compiled_agent]]
+name        = "build-sentinel"
+binary      = "../agents-fleet/fleet-run.sh"
+args        = ["build-sentinel"]
+prompt      = "Audit the current workspace build per your workflow. File proposals for pi-rs root causes only."
+timeout_secs = 1800
+[compiled_agent.on_exit]
+"0" = "continue"
+"3" = "throttle"
+"*" = "alert"
+
+[[compiled_agent]]
+name        = "test-warden"
+binary      = "../agents-fleet/fleet-run.sh"
+args        = ["test-warden"]
+prompt      = "Sweep the test suites per your workflow. Classify failures (real / stale / flake) and file proposals per class."
+timeout_secs = 2700
+[compiled_agent.on_exit]
+"0" = "continue"
+"3" = "throttle"
+"*" = "alert"
+
+[[compiled_agent]]
+name        = "supply-chain-auditor"
+binary      = "../agents-fleet/fleet-run.sh"
+args        = ["supply-chain-auditor"]
+prompt      = "Audit dependencies, licenses and sibling path deps per your workflow. File proposals for each finding."
+timeout_secs = 900
+[compiled_agent.on_exit]
+"0" = "continue"
+"3" = "throttle"
+"*" = "alert"
